@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Payroll.Shared.Data;
+using Payroll.Web.Services;
 
 namespace Payroll.Web.Controllers;
 
@@ -14,6 +15,30 @@ public sealed class MobileAdminController : ControllerBase
 
     public MobileAdminController(IDbContextFactory<AppDbContext> dbFactory)
         => _dbFactory = dbFactory;
+
+    [HttpGet("live-locations")]
+    public IActionResult GetLiveLocations()
+    {
+        var list = LiveLocationStore.GetAll()
+            .Select(x => new
+            {
+                x.EmployeeId,
+                x.Latitude,
+                x.Longitude,
+                x.AccuracyMeters,
+                x.DistanceMeters,
+                x.AllowedRadiusMeters,
+                x.IsWithinAllowedRadius,
+                x.LastUpdatedUtc,
+                x.SessionStartedUtc,
+                x.SessionId,
+                x.SpeedMps,
+                x.MovementState
+            })
+            .ToList();
+
+        return Ok(list);
+    }
 
     [HttpGet("feature-settings")]
     public async Task<ActionResult<MobileFeatureSettingsDto>> GetFeatureSettings(CancellationToken cancellationToken)
