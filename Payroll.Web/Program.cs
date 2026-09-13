@@ -150,7 +150,15 @@ builder.Host.UseWindowsService();
 // SIGNALR
 // ============================================================
 
-builder.Services.AddSignalR();
+builder.Services.AddSignalR(options =>
+{
+    // Keep the realtime attendance/location connection alive through
+    // Render/proxy idle periods. The client timeout is intentionally
+    // longer than the keep-alive interval so a missed ping does not
+    // immediately tear down the Blazor circuit.
+    options.KeepAliveInterval = TimeSpan.FromSeconds(15);
+    options.ClientTimeoutInterval = TimeSpan.FromSeconds(60);
+});
 
 // Native Android employee authentication. This is an opaque, Data Protection
 // backed bearer token and is validated against the existing employee device
