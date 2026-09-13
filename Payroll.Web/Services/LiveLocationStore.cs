@@ -51,7 +51,8 @@ public static class LiveLocationStore
         double distanceMeters,
         int allowedRadiusMeters,
         bool isWithinAllowedRadius,
-        Guid sessionId)
+        Guid sessionId,
+        DateTime? capturedAtUtc = null)
     {
         if (employeeId <= 0 ||
             sessionId == Guid.Empty ||
@@ -61,6 +62,14 @@ public static class LiveLocationStore
         }
 
         var now = DateTime.UtcNow;
+        var captureTime = capturedAtUtc.HasValue && capturedAtUtc.Value != default
+            ? capturedAtUtc.Value.ToUniversalTime()
+            : now;
+
+        // A delayed/retried GPS packet must never become the current live
+        // position merely because the server received it later.
+        if (captureTime > now.AddMinutes(2))
+            captureTime = now;
 
         var safeAccuracy =
             IsValidPositiveNumber(accuracyMeters)
@@ -124,10 +133,13 @@ public static class LiveLocationStore
                 return false;
             }
 
-            // A delayed/retried GPS packet must never overwrite a newer
-            // accepted position merely because it reached the server later.
+            // Monotonic timestamp guard: an older GPS fix cannot overwrite a
+            // newer fix already accepted for this employee/session.
             if (captureTime < current.LastUpdatedUtc)
             {
+                // The request is valid, but older than the position already
+                // accepted for this session. Ignore it without treating the
+                // employee/session as invalid.
                 return true;
             }
 
@@ -141,8 +153,6 @@ public static class LiveLocationStore
                     latitude,
                     longitude);
 
-            // GPS fixes can occasionally jump. Only derive movement speed
-            // when the interval is sane and the jump is plausible.
             var speedMps =
                 elapsedSeconds > 0.25 &&
                 elapsedSeconds <= 300 &&
@@ -338,40 +348,40 @@ public static class LiveLocationStore
             : duration;
     }
 
-    private static string GetMovementState(double speedMps)
-    {
-        if (!double.IsFinite(speedMps) || speedMps <= 0.5)
-            return "Stopped";
-
-        if (speedMps <= 2.0)
-            return "Walking";
-
-        if (speedMps <= 8.0)
-            return "Cycling";
-
-        return "Moving";
-    }
-
     private static double CalculateDistance(
         double lat1,
         double lon1,
         double lat2,
         double lon2)
     {
-        const double earthRadiusMeters = 6371000d;
-        var r1 = lat1 * Math.PI / 180d;
-        var r2 = lat2 * Math.PI / 180d;
-        var dLat = (lat2 - lat1) * Math.PI / 180d;
-        var dLon = (lon2 - lon1) * Math.PI / 180d;
-
+        const double earthRadiusMeters = 6371000.0;
+        var dLat = DegreesToRadians(lat2 - lat1);
+        var dLon = DegreesToRadians(lon2 - lon1);
         var a =
-            Math.Sin(dLat / 2d) * Math.Sin(dLat / 2d) +
-            Math.Cos(r1) * Math.Cos(r2) *
-            Math.Sin(dLon / 2d) * Math.Sin(dLon / 2d);
+            Math.Sin(dLat / 2) * Math.Sin(dLat / 2) +
+            Math.Cos(DegreesToRadians(lat1)) *
+            Math.Cos(DegreesToRadians(lat2)) *
+            Math.Sin(dLon / 2) * Math.Sin(dLon / 2);
 
-        a = Math.Clamp(a, 0d, 1d);
-        var c = 2d * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1d - a));
+        var c = 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
         return earthRadiusMeters * c;
+    }
+
+    private static double DegreesToRadians(double degrees) =>
+        degrees * Math.PI / 180.0;
+
+    private static string GetMovementState(double speedMps)
+    {
+        if (!IsValidPositiveNumber(speedMps) || speedMps < 0.5)
+            return "Stopped";
+
+        if (speedMps < 2.0)
+            return "Walking";
+
+        if (speedMps < 8.0)
+            return "Moving";
+
+        return "Fast";
     }
 
     private static bool IsValidCoordinate(
@@ -428,15 +438,9 @@ public sealed class LiveEmployeeLocation
 
     public Guid SessionId { get; init; }
 
-    /// <summary>
-    /// Derived speed from consecutive valid GPS fixes. Not persisted in the
-    /// existing database schema, so this enhancement does not alter payroll
-    /// data or existing database calculations.
-    /// </summary>
+    // Transient live telemetry. These are derived from GPS updates and are
+    // not database schema changes.
     public double SpeedMps { get; init; }
 
-    /// <summary>
-    /// Derived movement state used by the live/offline tracking UI.
-    /// </summary>
     public string MovementState { get; init; } = "Stopped";
 }
