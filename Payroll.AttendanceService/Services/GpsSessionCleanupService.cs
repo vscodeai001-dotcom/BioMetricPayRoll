@@ -101,16 +101,19 @@ public class GpsSessionCleanupService : BackgroundService
         try
         {
             // ================================================================
-            // PHASE 1: END SESSIONS FOR EMPLOYEES WITH NO DEVICE LOCK
+            // SESSION LIFETIME
             // ================================================================
             //
-            // If an employee has NO device lock but an active GPS session,
-            // it means they were forcefully logged out or manually logged out.
-            //
-            // The GPS session should be ended immediately.
+            // Do not infer logout from missing locks or GPS inactivity here.
+            // Explicit manual logout and second-device replacement already
+            // end the authoritative GPS session at the point of the action.
+            // A temporary network/GPS/circuit interruption must never end a
+            // still-authenticated tracking session.
             // ================================================================
 
-            await EndSessionsWithoutDeviceLockAsync(db, stoppingToken);
+            // Intentionally no automatic GPS-session termination.
+            // Stale/live presentation is handled independently by
+            // LiveLocationStore/LocationHealthService.
 
             // Mobile applications can disappear without sending Logout
             // (for example uninstall, OS force-stop, or lost local token).
@@ -124,21 +127,9 @@ public class GpsSessionCleanupService : BackgroundService
             // an explicit logout or device replacement occurs.
             // await ReconcileAbandonedMobileSessionsAsync(db, stoppingToken);
 
-            // ================================================================
-            // PHASE 2: MARK SESSIONS AS TIMED OUT (30+ minutes no updates)
-            // ================================================================
-            //
-            // If a GPS session has been inactive for 30+ minutes AND the
-            // employee still has a device lock (meaning they're still logged in),
-            // mark it as timed out.
-            //
-            // This handles the case where:
-            // - GPS watcher paused by browser power management
-            // - Network issues causing GPS failure
-            // - Browser minimized for long time
-            // ================================================================
-
-            await MarkTimedOutSessionsAsync(db, stoppingToken);
+            // No automatic timeout pass. Session end is action-driven only:
+            // explicit logout, second-device replacement, or another existing
+            // authoritative session-ending operation.
         }
         catch (Exception ex)
         {

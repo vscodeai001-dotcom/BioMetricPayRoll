@@ -570,7 +570,14 @@ var dataProtectionPath =
 
 if (string.IsNullOrWhiteSpace(dataProtectionPath))
 {
-    dataProtectionPath = Path.Combine(builder.Environment.ContentRootPath, "dataprotection");
+    // Render/container deployments commonly mount their persistent disk at
+    // /data. Prefer it when available so authentication/DataProtection keys
+    // survive an application process/container restart. Local development
+    // continues to use the project-local directory.
+    dataProtectionPath =
+        builder.Environment.IsProduction() && Directory.Exists("/data")
+            ? "/data/dataprotection"
+            : Path.Combine(builder.Environment.ContentRootPath, "dataprotection");
 }
 
 try
@@ -582,6 +589,7 @@ try
     }
 
     builder.Services.AddDataProtection()
+        .SetApplicationName("BioMetricPayroll")
         .PersistKeysToFileSystem(new DirectoryInfo(dataProtectionPath));
 }
 catch (Exception dpEx)
