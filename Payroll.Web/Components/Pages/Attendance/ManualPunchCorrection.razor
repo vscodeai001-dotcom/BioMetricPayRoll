@@ -35,7 +35,7 @@
 </div>
 
 @* --- FILTER CONTROLS --- *@
-<div class="row p-3 mb-4 border rounded bg-light">
+<div class="row g-3 p-3 mb-4 border rounded bg-light manual-punch-filters">
     <div class="col-md-4">
         <label class="form-label small fw-bold">Filter by Employee</label>
         <select class="form-select" @bind="selectedEmployeeId">
@@ -103,7 +103,7 @@ else
 
                 @if (dayInfo.Punches.Any())
                 {
-                    <div class="d-flex flex-wrap gap-2 mb-2">
+                    <div class="d-flex flex-wrap gap-2 mb-2 manual-punch-list">
                         @foreach (var log in dayInfo.Punches.OrderBy(p => p.PunchTime))
                         {
                             <div class="btn-group btn-group-sm" role="group">

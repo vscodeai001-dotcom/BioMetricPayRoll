@@ -802,3 +802,14 @@ body.dark input[type="datetime-local"]::-webkit-calendar-picker-indicator {
         height: 2.15rem;
     }
 }
+
+
+/* Manual Punch Correction: dark-mode empty state fallback */
+body.dark .manual-punch-empty-state {
+    background: #1b222c !important;
+    color: #c7d0db !important;
+    border-color: #3a4654 !important;
+}
+body.dark .manual-punch-empty-state em {
+    color: #aeb9c6 !important;
+}

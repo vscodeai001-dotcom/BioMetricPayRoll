@@ -16,3 +16,51 @@
 :global(body.dark) .manual-punch-empty-state em {
     color: #b4bfcc !important;
 }
+
+
+/* Strong dark-theme override for the "No punches recorded" box.
+   Uses both body.dark and html/body dark selectors so it survives
+   Bootstrap/other theme specificity. */
+:global(body.dark) .manual-punch-empty-state,
+:global(html body.dark) .manual-punch-empty-state {
+    background: #1b222c !important;
+    color: #c7d0db !important;
+    border-color: #3a4654 !important;
+    box-shadow: none !important;
+}
+
+:global(body.dark) .manual-punch-empty-state em,
+:global(html body.dark) .manual-punch-empty-state em {
+    color: #aeb9c6 !important;
+}
+
+:global(body.dark) .manual-punch-empty-state .btn-success,
+:global(html body.dark) .manual-punch-empty-state .btn-success {
+    color: #fff !important;
+}
+
+
+/* Responsive filters and punch controls */
+.manual-punch-filters {
+    margin-left: 0;
+    margin-right: 0;
+}
+
+.manual-punch-list {
+    min-width: 0;
+}
+
+@media (max-width: 767.98px) {
+    .manual-punch-filters > div {
+        width: 100%;
+    }
+
+    .manual-punch-empty-state {
+        width: 100%;
+        overflow-wrap: anywhere;
+    }
+
+    .manual-punch-list .btn-group {
+        max-width: 100%;
+    }
+}

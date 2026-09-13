@@ -5208,3 +5208,72 @@ window.getAdminHistoryPlaybackState =
                 playback.speed
         };
     };
+
+// ============================================================
+// BROWSER TAB TITLE SYNC
+// Keeps document.title correct during Blazor client-side navigation.
+// ============================================================
+window.payrollDocumentTitle = function (pathname) {
+    const path = (pathname || window.location.pathname || "/")
+        .split("?")[0]
+        .split("#")[0]
+        .replace(/\/+$/, "") || "/";
+
+    const titles = {
+        "/": "Payroll",
+        "/admin": "Admin Dashboard",
+        "/admin-dashboard": "Admin Dashboard",
+        "/attendance-logs": "Attendance Log Summary",
+        "/manual-punch-correction": "Manual Punch Correction",
+        "/punch-correction-approval": "Punch Correction Approval",
+        "/company-report": "Company Attendance Report",
+        "/attendance-event-monitoring": "Attendance Event Monitoring",
+        "/salary-advances": "Salary Advances",
+        "/run-payroll": "Run Payroll",
+        "/year-end-summary": "Year-End Summary",
+        "/tax-declarations": "Tax Declarations",
+        "/bonus-management": "Bonus Management",
+        "/fbp-component-setup": "FBP Component Setup",
+        "/exit-settlement": "Exit & Settlement",
+        "/leave-management": "Leave Management",
+        "/shift-schedule": "Shift Schedule",
+        "/regularization-approval": "Regularization Approval",
+        "/audit-logs": "System Audit Logs",
+        "/employee-records": "Employee Management",
+        "/holiday-management": "Holiday Management",
+        "/company-settings": "Company Settings",
+        "/feature-toggles": "Feature & Permission Manager",
+        "/user-role-management": "User & Role Management",
+        "/recycle-bin": "Recycle Bin",
+        "/offline-tracking": "GPS Connection & Offline Tracking",
+        "/report-center": "Report Center",
+        "/employee-home": "Employee Home",
+        "/my-attendance": "My Attendance",
+        "/my-payslips": "My Payslips",
+        "/my-bonuses": "My Bonuses",
+        "/my-leave-history": "My Leave History",
+        "/my-leave-request": "Request Leave",
+        "/my-regularization": "Punch Regularization",
+        "/my-reports": "My Personal Reports",
+        "/my-resignation": "My Resignation",
+        "/my-salary-advances": "My Salary Advances",
+        "/my-shift-schedule": "My Shift Schedule",
+        "/my-tax-declaration": "My Tax Declaration",
+        "/my-fbp-declaration": "FBP Declaration"
+    };
+
+    let title = titles[path];
+
+    // Common aliases / dynamic employee routes.
+    if (!title && path.startsWith("/employees/")) {
+        title = "Employee Details";
+    }
+
+    if (!title && path.startsWith("/employee/")) {
+        title = "Employee Details";
+    }
+
+    document.title = title
+        ? title + " | BioMetric Payroll"
+        : "BioMetric Payroll";
+};

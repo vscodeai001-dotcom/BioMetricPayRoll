@@ -113,6 +113,7 @@
     protected override async Task OnInitializedAsync()
     {
         Theme.OnThemeChanged += StateHasChanged;
+        Navigation.LocationChanged += HandleLocationChanged;
 
         var authState =
             await AuthState.GetAuthenticationStateAsync();
@@ -153,6 +154,10 @@
 
         try
         {
+            await JSRuntime.InvokeVoidAsync(
+                "payrollDocumentTitle",
+                Navigation.Uri);
+
             var savedTheme = persistedTheme;
 
             if (string.IsNullOrWhiteSpace(savedTheme))
@@ -279,9 +284,32 @@
         Theme?.SetTheme(newTheme);
     }
 
+    private async void HandleLocationChanged(
+        object? sender,
+        Microsoft.AspNetCore.Components.Routing.LocationChangedEventArgs e)
+    {
+        try
+        {
+            await InvokeAsync(async () =>
+            {
+                await JSRuntime.InvokeVoidAsync(
+                    "payrollDocumentTitle",
+                    e.Location);
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(
+                ex,
+                "Unable to synchronize browser tab title for {Location}.",
+                e.Location);
+        }
+    }
+
     public void Dispose()
     {
         Theme.OnThemeChanged -= StateHasChanged;
+        Navigation.LocationChanged -= HandleLocationChanged;
     }
 
     private async Task LoadFeatureSettings()
