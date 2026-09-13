@@ -684,10 +684,16 @@ builder.Services.AddBlazoredToast();
 // Endpoint: /health
 //
 
-builder.Services.AddHealthChecks()
-    .AddDbContextCheck<AppDbContext>(
-        name: "database",
-        tags: new[] { "ready" });
+// IMPORTANT: /health is a LIVENESS endpoint for the container/orchestrator.
+// It must not depend on Neon/PostgreSQL availability. A transient database
+// outage must never cause the hosting platform to restart this process, because
+// a process restart can invalidate authentication material if the deployment
+// is not using persistent Data Protection keys.
+//
+// Database readiness remains observable separately through the application's
+// normal database operations and logs; it is deliberately not coupled to the
+// liveness endpoint used by Render/container health checks.
+builder.Services.AddHealthChecks();
 
 
 // ============================================================

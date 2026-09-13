@@ -49,6 +49,11 @@ public sealed class MobileTokenAuthenticationHandler : AuthenticationHandler<Aut
 
         if (lockRecord == null)
         {
+            // The only supported automatic mobile-session termination is an
+            // authoritative session replacement/logout. Make that explicit
+            // to the client. A network/database exception never reaches this
+            // branch because those exceptions are not authentication results.
+            Response.Headers["X-Mobile-Session-State"] = "SESSION_REVOKED";
             return AuthenticateResult.Fail("Mobile session is no longer active on this device.");
         }
 
@@ -64,6 +69,9 @@ public sealed class MobileTokenAuthenticationHandler : AuthenticationHandler<Aut
 
         if (!deviceMatches)
         {
+            // Another device owns the authoritative lock. This is a genuine
+            // second-device/session-replacement condition.
+            Response.Headers["X-Mobile-Session-State"] = "SESSION_REVOKED";
             return AuthenticateResult.Fail("Mobile session is no longer active on this device.");
         }
 
@@ -90,10 +98,16 @@ public sealed class MobileTokenAuthenticationHandler : AuthenticationHandler<Aut
         var isAdmin = role.Contains("Admin", StringComparison.OrdinalIgnoreCase);
 
         if (employee == null && !isAdmin)
+        {
+            Response.Headers["X-Mobile-Session-State"] = "REAUTH_REQUIRED";
             return AuthenticateResult.Fail("Employee session is invalid or not linked.");
+        }
 
         if (employee != null && !string.Equals(employee.AspNetUserId, payload.UserId, StringComparison.Ordinal))
+        {
+            Response.Headers["X-Mobile-Session-State"] = "REAUTH_REQUIRED";
             return AuthenticateResult.Fail("Employee link mismatch.");
+        }
 
         var claims = new List<Claim>
         {

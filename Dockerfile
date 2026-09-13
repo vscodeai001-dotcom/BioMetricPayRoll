@@ -59,17 +59,9 @@ EXPOSE 10000
 # HEALTH CHECK
 # ============================================================
 #
-# Render and other orchestration platforms use this endpoint
-# to determine if the application is healthy.
+# Render should use its HTTP health-check path (/health). Do not add a Docker
+# process healthcheck that depends on an executable such as curl being present
+# in the runtime image. The application /health endpoint is intentionally a
+# liveness-only endpoint and therefore cannot restart the service because Neon
+# is temporarily unavailable.
 #
-# If health check fails repeatedly, the container is restarted.
-#
-# Interval: 30s
-# Timeout: 10s
-# Retries: 3
-#
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-10000}/health || exit 1
-
-ENTRYPOINT ["dotnet", "Payroll.Web.dll"]
