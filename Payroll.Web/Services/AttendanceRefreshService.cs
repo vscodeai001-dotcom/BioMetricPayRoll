@@ -149,17 +149,52 @@ namespace Payroll.Web.Services
         public async Task NotifyApplicationDataChangedAsync(
             IReadOnlyCollection<string> changedEntities)
         {
+            var changes = changedEntities
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(x => x, StringComparer.Ordinal)
+                .Select(x => new ApplicationDataChange
+                {
+                    Entity = x,
+                    Action = "MODIFIED"
+                })
+                .ToArray();
+
+            await NotifyApplicationDataChangedAsync(changes);
+        }
+
+        public async Task NotifyApplicationDataChangedAsync(
+            IReadOnlyCollection<ApplicationDataChange> changes)
+        {
+            var normalized = changes
+                .Where(x => !string.IsNullOrWhiteSpace(x.Entity))
+                .GroupBy(x => x.Entity, StringComparer.Ordinal)
+                .Select(g => new ApplicationDataChange
+                {
+                    Entity = g.Key,
+                    Action = g.Select(x => x.Action)
+                        .FirstOrDefault(a => string.Equals(a, "ADDED", StringComparison.OrdinalIgnoreCase))
+                        ?? g.Select(x => x.Action)
+                            .FirstOrDefault(a => string.Equals(a, "DELETED", StringComparison.OrdinalIgnoreCase))
+                        ?? "MODIFIED"
+                })
+                .OrderBy(x => x.Entity, StringComparer.Ordinal)
+                .ToArray();
+
             await _hub.Clients.All.SendAsync(
                 "ApplicationDataChanged",
                 new
                 {
-                    Entities = changedEntities
-                        .Distinct(StringComparer.Ordinal)
-                        .OrderBy(x => x, StringComparer.Ordinal)
-                        .ToArray(),
-
+                    Changes = normalized,
+                    Entities = normalized.Select(x => x.Entity).ToArray(),
                     Timestamp = DateTime.UtcNow
                 });
+        }
+
+        public sealed class ApplicationDataChange
+        {
+            public string Entity { get; set; } = string.Empty;
+            public string Action { get; set; } = "MODIFIED";
         }
 
 

@@ -8,6 +8,8 @@
     private DotNetObjectReference<ApplicationRealtimeRefreshListener>? _dotNetRef;
     private bool _registered;
     private bool _disposed;
+    private bool _refreshScheduled;
+    private DateTime _lastRefreshUtc = DateTime.MinValue;
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -43,10 +45,41 @@
             if (_disposed)
                 return Task.CompletedTask;
 
-            // Enhanced navigation refreshes the active route without
-            // forcing a browser reload. The database remains the source
-            // of truth and the current page re-queries its normal data.
-            Navigation.Refresh(false);
+            // Coalesce bursts of CRUD writes so a bulk operation does not
+            // create a refresh storm. The database remains the source of truth.
+            if (_refreshScheduled)
+                return Task.CompletedTask;
+
+            var now = DateTime.UtcNow;
+            if ((now - _lastRefreshUtc) < TimeSpan.FromMilliseconds(300))
+                return Task.CompletedTask;
+
+            _refreshScheduled = true;
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(200);
+                    await InvokeAsync(() =>
+                    {
+                        if (!_disposed)
+                        {
+                            _lastRefreshUtc = DateTime.UtcNow;
+                            Navigation.Refresh(false);
+                        }
+                    });
+                }
+                catch
+                {
+                    // A disconnected circuit must never break successful CRUD.
+                }
+                finally
+                {
+                    _refreshScheduled = false;
+                }
+            });
+
             return Task.CompletedTask;
         });
     }

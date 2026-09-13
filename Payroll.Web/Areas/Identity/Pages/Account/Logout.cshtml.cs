@@ -36,19 +36,25 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
         private readonly ILogger<LogoutModel>
             _logger;
 
+        private readonly AttendanceEventMonitorService
+            _attendanceEventMonitor;
+
 
         public LogoutModel(
             SignInManager<IdentityUser> signInManager,
             UserManager<IdentityUser> userManager,
             IDbContextFactory<AppDbContext> dbFactory,
             GeoLocationService geoLocationService,
-            ILogger<LogoutModel> logger)
+            ILogger<LogoutModel> logger,
+            AttendanceEventMonitorService attendanceEventMonitor)
         {
             _signInManager = signInManager;
             _userManager = userManager;
             _dbFactory = dbFactory;
             _geoLocationService = geoLocationService;
             _logger = logger;
+
+            _attendanceEventMonitor = attendanceEventMonitor;
         }
 
 
@@ -82,6 +88,11 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
             {
                 if (user != null)
                 {
+                    await _attendanceEventMonitor.RecordEmployeeStateAsync(
+                        "LOGOUT_REQUESTED",
+                        user.Id,
+                        details: new { action = "MANUAL_LOGOUT", attendanceDecisionChanged = false });
+
                     await EndEmployeeGpsSessionAsync(user);
 
                     await ReleaseEmployeeDeviceLockAsync(
@@ -116,6 +127,19 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
             _logger.LogInformation(
                 "LOGOUT COMPLETED. UserId={UserId}",
                 user?.Id);
+
+            if (user != null)
+            {
+                await _attendanceEventMonitor.RecordEmployeeStateAsync(
+                    "LOGOUT_COMPLETED",
+                    user.Id,
+                    details: new
+                    {
+                        action = "MANUAL_LOGOUT",
+                        attendancePunchCreatedByLogout = false,
+                        note = "Monitoring only. Existing attendance priority/fallback rules were not changed."
+                    });
+            }
 
 
             if (

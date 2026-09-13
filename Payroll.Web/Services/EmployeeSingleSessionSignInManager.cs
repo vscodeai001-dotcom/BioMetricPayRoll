@@ -56,6 +56,9 @@ namespace Payroll.Web.Services
         private readonly GeoLocationService
             _geoLocationService;
 
+        private readonly AttendanceEventMonitorService
+            _attendanceEventMonitor;
+
 
         // ============================================================
         // CONSTRUCTOR
@@ -71,7 +74,8 @@ namespace Payroll.Web.Services
             IUserConfirmation<IdentityUser> confirmation,
             IDbContextFactory<AppDbContext> dbFactory,
             ILogger<EmployeeSingleSessionSignInManager> sessionLogger,
-            GeoLocationService geoLocationService)
+            GeoLocationService geoLocationService,
+            AttendanceEventMonitorService attendanceEventMonitor)
             : base(
                 userManager,
                 contextAccessor,
@@ -92,6 +96,9 @@ namespace Payroll.Web.Services
 
             _geoLocationService =
                 geoLocationService;
+
+            _attendanceEventMonitor =
+                attendanceEventMonitor;
         }
 
 
@@ -122,6 +129,11 @@ namespace Payroll.Web.Services
 
             if (!passwordResult.Succeeded)
             {
+                await _attendanceEventMonitor.RecordAsync(
+                    "LOGIN_PASSWORD_FAILED",
+                    user.Id,
+                    details: new { result = passwordResult.ToString(), lockoutOnFailure });
+
                 return passwordResult;
             }
 
@@ -196,10 +208,23 @@ namespace Payroll.Web.Services
                         existingDeviceId);
 
 
-                    return await SignInWithCurrentEmployeeSessionAsync(
+                    await _attendanceEventMonitor.RecordEmployeeStateAsync(
+                        "LOGIN_SAME_DEVICE_SESSION",
+                        user.Id,
+                        existingDeviceId,
+                        new { attendanceDecisionChanged = false });
+
+                    var sameSessionResult = await SignInWithCurrentEmployeeSessionAsync(
                         user,
                         isPersistent,
                         existingDeviceId);
+
+                    await _attendanceEventMonitor.RecordEmployeeStateAsync(
+                        sameSessionResult.Succeeded ? "LOGIN_SUCCESS_SAME_DEVICE" : "LOGIN_FAILED_SAME_DEVICE",
+                        user.Id,
+                        existingDeviceId);
+
+                    return sameSessionResult;
                 }
             }
 
@@ -216,6 +241,12 @@ namespace Payroll.Web.Services
                 "EMPLOYEE NEW-DEVICE LOGIN ATTEMPT. UserId={UserId}, DeviceId={DeviceId}",
                 user.Id,
                 newDeviceId);
+
+            await _attendanceEventMonitor.RecordEmployeeStateAsync(
+                "LOGIN_NEW_DEVICE_ATTEMPT",
+                user.Id,
+                newDeviceId,
+                new { passwordVerified = true, sessionType = "NEW_DEVICE" });
 
 
             // ========================================================
@@ -256,6 +287,17 @@ namespace Payroll.Web.Services
                 _logger.LogWarning(
                     "EMPLOYEE LOGIN BLOCKED. EXISTING SESSION EXISTS. UserId={UserId}",
                     user.Id);
+
+                await _attendanceEventMonitor.RecordEmployeeStateAsync(
+                    "LOGIN_SECOND_DEVICE_DETECTED",
+                    user.Id,
+                    newDeviceId,
+                    new
+                    {
+                        passwordVerified = true,
+                        existingSessionDetected = true,
+                        action = "EXISTING_SESSION_WILL_BE_INVALIDATED"
+                    });
 
 
                 /*
@@ -315,10 +357,18 @@ namespace Payroll.Web.Services
                 // Save the replacement device ID for this request.
                 // ----------------------------------------------------
 
-                return await AuthenticateEmployeeAsync(
+                var replacementResult = await AuthenticateEmployeeAsync(
                     user,
                     isPersistent,
                     replacementDeviceId);
+
+                await _attendanceEventMonitor.RecordEmployeeStateAsync(
+                    replacementResult.Succeeded ? "LOGIN_SUCCESS_AFTER_SECOND_DEVICE" : "LOGIN_FAILED_AFTER_SECOND_DEVICE",
+                    user.Id,
+                    replacementDeviceId,
+                    new { oldSessionInvalidated = true, attendanceDecisionChanged = false });
+
+                return replacementResult;
             }
 
 
@@ -326,10 +376,18 @@ namespace Payroll.Web.Services
             // 7. FIRST LOGIN ON THIS ACCOUNT
             // ========================================================
 
-            return await AuthenticateEmployeeAsync(
+            var firstDeviceResult = await AuthenticateEmployeeAsync(
                 user,
                 isPersistent,
                 newDeviceId);
+
+            await _attendanceEventMonitor.RecordEmployeeStateAsync(
+                firstDeviceResult.Succeeded ? "LOGIN_SUCCESS_FIRST_OR_AVAILABLE_DEVICE" : "LOGIN_FAILED_FIRST_OR_AVAILABLE_DEVICE",
+                user.Id,
+                newDeviceId,
+                new { attendanceDecisionChanged = false });
+
+            return firstDeviceResult;
         }
 
 
@@ -711,6 +769,16 @@ namespace Payroll.Web.Services
                     "EXISTING EMPLOYEE SESSION INVALIDATED. UserId={UserId}",
                     userId);
 
+                await _attendanceEventMonitor.RecordEmployeeStateAsync(
+                    "LOGIN_SECOND_DEVICE_FORCE_LOGOUT_COMPLETED",
+                    userId,
+                    details: new
+                    {
+                        oldSessionInvalidated = true,
+                        gpsSessionsTerminated = true,
+                        attendancePunchCreated = false,
+                        attendanceDecisionChanged = false
+                    });
 
                 return true;
             }

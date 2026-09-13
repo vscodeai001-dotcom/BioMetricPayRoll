@@ -282,6 +282,9 @@ builder.Services.AddScoped<
     AuditService>();
 
 builder.Services.AddScoped<
+    AttendanceEventMonitorService>();
+
+builder.Services.AddScoped<
     GeoLocationService>();
 
 builder.Services.AddScoped<

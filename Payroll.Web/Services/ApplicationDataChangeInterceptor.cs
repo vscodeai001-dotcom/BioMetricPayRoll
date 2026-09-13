@@ -21,7 +21,7 @@ public sealed class ApplicationDataChangeInterceptor : SaveChangesInterceptor
     private sealed class PendingChange
     {
         public bool Notify;
-        public string[] Entities { get; set; } = Array.Empty<string>();
+        public AttendanceRefreshService.ApplicationDataChange[] Changes { get; set; } = Array.Empty<AttendanceRefreshService.ApplicationDataChange>();
     }
 
     private readonly AttendanceRefreshService _refreshService;
@@ -108,10 +108,20 @@ public sealed class ApplicationDataChangeInterceptor : SaveChangesInterceptor
                 e.State is EntityState.Added
                     or EntityState.Modified
                     or EntityState.Deleted)
-            .Select(e => e.Entity.GetType().Name)
-            .Where(name => !IgnoredEntityNames.Contains(name))
-            .Distinct(StringComparer.Ordinal)
-            .OrderBy(name => name, StringComparer.Ordinal)
+            .Select(e => new AttendanceRefreshService.ApplicationDataChange
+            {
+                Entity = e.Entity.GetType().Name,
+                Action = e.State switch
+                {
+                    EntityState.Added => "ADDED",
+                    EntityState.Deleted => "DELETED",
+                    _ => "MODIFIED"
+                }
+            })
+            .Where(x => !IgnoredEntityNames.Contains(x.Entity))
+            .GroupBy(x => x.Entity, StringComparer.Ordinal)
+            .Select(g => g.First())
+            .OrderBy(x => x.Entity, StringComparer.Ordinal)
             .ToArray();
 
         if (changedEntities.Length == 0)
@@ -119,7 +129,7 @@ public sealed class ApplicationDataChangeInterceptor : SaveChangesInterceptor
 
         var pending = _pending.GetOrCreateValue(db);
         pending.Notify = true;
-        pending.Entities = changedEntities;
+        pending.Changes = changedEntities;
     }
 
     private async Task PublishIfNeededAsync(
@@ -144,7 +154,7 @@ public sealed class ApplicationDataChangeInterceptor : SaveChangesInterceptor
         try
         {
             await _refreshService.NotifyApplicationDataChangedAsync(
-                pending.Entities);
+                pending.Changes);
         }
         catch
         {

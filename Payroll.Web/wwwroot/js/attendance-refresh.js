@@ -144,9 +144,9 @@ window.attendanceRefresh = (function () {
                     // Dispatch event for admin UI to update status/age indicators
                     window.dispatchEvent(new CustomEvent('location-health-updated', { detail: data }));
 
-                    // Health is status-only. Do not turn a heartbeat into a
-                    // LocationChanged refresh. Actual coordinates arrive through
-                    // the LocationChanged event below.
+                    // LocationHealth is a status heartbeat only. Actual GPS
+                    // coordinates arrive through LocationChanged. Do not turn
+                    // every health heartbeat into a database/page refresh.
                 }
             );
 
