@@ -1,75 +1,79 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
-using Payroll.Shared;
 using Payroll.Shared.Data;
 
 namespace Payroll.Web.Services;
 
 /// <summary>
-/// Observability-only layer for employee authentication/logout and
-/// attendance-state decisions. This service NEVER creates, deletes,
-/// changes, or reorders AttendanceLog rows.
-/// Existing attendance priority/fallback/business rules remain the
-/// sole authority for the final attendance result.
+/// Observability-only layer for employee authentication/session and attendance state.
+/// It never changes AttendanceLog rows or attendance priority/fallback rules.
 /// </summary>
 public sealed class AttendanceEventMonitorService
 {
+    private readonly AuditService _audit;
     private readonly IDbContextFactory<AppDbContext> _dbFactory;
-    private readonly AuditService _auditService;
     private readonly ILogger<AttendanceEventMonitorService> _logger;
 
     public AttendanceEventMonitorService(
+        AuditService audit,
         IDbContextFactory<AppDbContext> dbFactory,
-        AuditService auditService,
         ILogger<AttendanceEventMonitorService> logger)
     {
+        _audit = audit;
         _dbFactory = dbFactory;
-        _auditService = auditService;
         _logger = logger;
     }
 
-    public async Task RecordAsync(
+    // Compatibility signature used by the Web/Android monitoring call sites.
+    public Task RecordAsync(
         string eventType,
         string userId,
-        string? employeeId = null,
-        string? deviceId = null,
-        object? details = null)
+        string? email,
+        string? deviceId,
+        string platform,
+        string? result,
+        string? reason,
+        object? context = null,
+        string? relatedDeviceId = null)
     {
-        try
+        var details = JsonSerializer.Serialize(new
         {
-            var payload = new Dictionary<string, object?>
-            {
-                ["monitorVersion"] = 1,
-                ["eventType"] = eventType,
-                ["eventUtc"] = DateTime.UtcNow,
-                ["userId"] = userId,
-                ["employeeId"] = employeeId,
-                ["deviceId"] = deviceId,
-                ["details"] = details
-            };
+            EventType = eventType,
+            Platform = platform,
+            DeviceId = deviceId,
+            RelatedDeviceId = relatedDeviceId,
+            Result = result,
+            Reason = reason,
+            Context = context,
+            RecordedAtUtc = DateTime.UtcNow
+        });
 
-            await _auditService.LogAsync(
-                "ATTENDANCE_EVENT_MONITOR",
-                "EmployeeAttendanceDecision",
-                employeeId ?? userId,
-                JsonSerializer.Serialize(payload));
-        }
-        catch (Exception ex)
-        {
-            // Monitoring must never change authentication or attendance flow.
-            _logger.LogWarning(
-                ex,
-                "ATTENDANCE EVENT MONITORING FAILED. EventType={EventType}, UserId={UserId}, EmployeeId={EmployeeId}",
-                eventType,
-                userId,
-                employeeId);
-        }
+        return SafeWriteAsync(userId, email, details, eventType);
     }
 
-    // Compatibility overload for existing callers that use the named `details` argument.
-    // This keeps the monitoring API additive and does not affect authentication or attendance logic.
+    // Compatibility overload for EmployeeSingleSessionSignInManager calls such as:
+    // RecordAsync("LOGIN_PASSWORD_FAILED", user.Id, details: new { ... })
     public Task RecordAsync(string eventType, string userId, object? details = null)
-        => RecordAsync(eventType, userId, null, null, details);
+    {
+        var serialized = JsonSerializer.Serialize(new
+        {
+            EventType = eventType,
+            Context = details,
+            RecordedAtUtc = DateTime.UtcNow
+        });
+
+        return SafeWriteAsync(userId, null, serialized, eventType);
+    }
+
+    public async Task<string?> GetActiveDeviceIdAsync(string userId)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync();
+        return await db.EmployeeDeviceLocks
+            .AsNoTracking()
+            .Where(x => x.UserId == userId)
+            .Select(x => x.DeviceId)
+            .FirstOrDefaultAsync();
+    }
 
     public async Task RecordEmployeeStateAsync(
         string eventType,
@@ -83,42 +87,36 @@ public sealed class AttendanceEventMonitorService
 
             var employee = await db.Employees
                 .AsNoTracking()
-                .FirstOrDefaultAsync(x => x.AspNetUserId == userId);
+                .FirstOrDefaultAsync(x => x.AspNetUserId == userId && !x.IsDeleted);
 
             if (employee == null)
             {
-                await RecordAsync(eventType, userId, null, deviceId, details);
+                await RecordAsync(eventType, userId, null, deviceId, "System", null, null, details);
                 return;
             }
 
-            var punches = await db.AttendanceLogs
+            var today = DateTime.Now.Date;
+            var todayPunches = await db.AttendanceLogs
                 .AsNoTracking()
-                .Where(x => x.EmployeeID == employee.EmployeeID)
-                .OrderByDescending(x => x.PunchTime)
-                .Take(20)
+                .Where(x => x.EmployeeID == employee.EmployeeID && x.PunchTime.Date == today)
+                .OrderBy(x => x.PunchTime)
                 .ToListAsync();
 
-            var latest = punches.FirstOrDefault();
-            var todayLocal = DateTime.Now.Date;
-            var todayPunches = punches
-                .Where(x => x.PunchTime.Date == todayLocal)
-                .OrderBy(x => x.PunchTime)
-                .ToList();
+            var latest = todayPunches.LastOrDefault();
 
-            var state = new Dictionary<string, object?>
+            var state = new
             {
-                ["attendanceStateBeforeEvent"] = todayPunches.Count % 2 == 0 ? "CLOSED" : "OPEN",
-                ["todayPunchCount"] = todayPunches.Count,
-                ["todayExpectedNextByExistingParity"] = todayPunches.Count % 2 == 0 ? "IN" : "OUT",
-                ["lastPunchId"] = latest?.LogID,
-                ["lastPunchTime"] = latest?.PunchTime,
-                ["lastPunchDeviceId"] = latest?.DeviceID,
-                ["lastPunchLogType"] = latest?.LogType,
-                ["lastPunchBiometricId"] = latest?.BiometricID,
-                ["lastPunchApproved"] = latest?.IsApproved,
-                ["lastPunchLatitude"] = latest?.Latitude,
-                ["lastPunchLongitude"] = latest?.Longitude,
-                ["details"] = details
+                EmployeeId = employee.EmployeeID,
+                AttendanceStateBeforeEvent = todayPunches.Count % 2 == 0 ? "CLOSED" : "OPEN",
+                TodayPunchCount = todayPunches.Count,
+                ExistingParityExpectedNext = todayPunches.Count % 2 == 0 ? "IN" : "OUT",
+                LastPunchId = latest?.LogID,
+                LastPunchTime = latest?.PunchTime,
+                LastPunchDeviceId = latest?.DeviceID,
+                LastPunchLogType = latest?.LogType,
+                LastPunchBiometricId = latest?.BiometricID,
+                LastPunchApproved = latest?.IsApproved,
+                Context = details
             };
 
             await RecordAsync(
@@ -126,15 +124,45 @@ public sealed class AttendanceEventMonitorService
                 userId,
                 employee.EmployeeID.ToString(),
                 deviceId,
+                "Attendance",
+                "OBSERVED",
+                null,
                 state);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(
                 ex,
-                "ATTENDANCE EMPLOYEE STATE MONITORING FAILED. EventType={EventType}, UserId={UserId}",
+                "Attendance employee state monitoring failed. EventType={EventType}, UserId={UserId}",
                 eventType,
                 userId);
+        }
+    }
+
+    private async Task SafeWriteAsync(
+        string userId,
+        string? email,
+        string details,
+        string eventType)
+    {
+        try
+        {
+            await _audit.LogAsync(
+                "AUTH_SESSION",
+                "EmployeeAttendanceSession",
+                userId,
+                details,
+                userId,
+                email);
+        }
+        catch (Exception ex)
+        {
+            // Monitoring must never break authentication/session/attendance flow.
+            _logger.LogWarning(
+                ex,
+                "Attendance event monitoring failed. UserId={UserId}, EventType={EventType}",
+                userId,
+                eventType);
         }
     }
 }
