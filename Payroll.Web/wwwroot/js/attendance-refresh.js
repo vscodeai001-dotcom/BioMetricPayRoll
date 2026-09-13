@@ -127,9 +127,13 @@ window.attendanceRefresh = (function () {
                     );
 
                     // Deliver the application-wide invalidation immediately.
-                    // Database writes are already the source of truth; there is
-                    // intentionally no artificial debounce here.
+                    // Database writes are already the source of truth.
                     await notifyApplicationListeners(data);
+
+                    // Attendance/punch audit pages are existing live viewers too.
+                    // Feed them through their existing viewer callback so a new
+                    // automatic/geofence punch appears without pressing Refresh.
+                    await notifyViewer();
 
                 }
             );

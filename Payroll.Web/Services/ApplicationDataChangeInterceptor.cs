@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Payroll.Shared.Data;
 using System.Runtime.CompilerServices;
 
 namespace Payroll.Web.Services;
@@ -22,6 +23,9 @@ public sealed class ApplicationDataChangeInterceptor : SaveChangesInterceptor
     {
         public bool Notify;
         public AttendanceRefreshService.ApplicationDataChange[] Changes { get; set; } = Array.Empty<AttendanceRefreshService.ApplicationDataChange>();
+        public double? OfficeLatitude;
+        public double? OfficeLongitude;
+        public int? GeoRadiusMeters;
     }
 
     private readonly AttendanceRefreshService _refreshService;
@@ -33,6 +37,10 @@ public sealed class ApplicationDataChangeInterceptor : SaveChangesInterceptor
         {
             "EmployeeGpsSession",
             "EmployeeLocationHistory",
+            // Device-lock LastSeen updates are heartbeat/session bookkeeping,
+            // not user-facing CRUD. They must not create an application-wide
+            // realtime sync storm on every mobile API request.
+            "EmployeeDeviceLock",
             "UserThemePreference",
             "Notification"
         };
@@ -130,6 +138,23 @@ public sealed class ApplicationDataChangeInterceptor : SaveChangesInterceptor
         var pending = _pending.GetOrCreateValue(db);
         pending.Notify = true;
         pending.Changes = changedEntities;
+
+        // Company settings are normal CRUD, but the geofence radius/office
+        // location also has a dedicated lightweight realtime channel. Capture
+        // the saved values here so currently connected employee/admin screens
+        // update immediately without changing historical records.
+        var companySetting = db.ChangeTracker
+            .Entries<CompanySetting>()
+            .Where(e => e.State is EntityState.Added or EntityState.Modified)
+            .Select(e => e.Entity)
+            .FirstOrDefault();
+
+        if (companySetting != null)
+        {
+            pending.OfficeLatitude = companySetting.OfficeLatitude;
+            pending.OfficeLongitude = companySetting.OfficeLongitude;
+            pending.GeoRadiusMeters = companySetting.GeoRadiusMeters;
+        }
     }
 
     private async Task PublishIfNeededAsync(
@@ -155,6 +180,16 @@ public sealed class ApplicationDataChangeInterceptor : SaveChangesInterceptor
         {
             await _refreshService.NotifyApplicationDataChangedAsync(
                 pending.Changes);
+
+            if (pending.OfficeLatitude.HasValue &&
+                pending.OfficeLongitude.HasValue &&
+                pending.GeoRadiusMeters.HasValue)
+            {
+                await _refreshService.NotifyGeoSettingsChangedAsync(
+                    pending.OfficeLatitude.Value,
+                    pending.OfficeLongitude.Value,
+                    pending.GeoRadiusMeters.Value);
+            }
         }
         catch
         {

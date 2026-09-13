@@ -2713,6 +2713,47 @@
     }
 
     [JSInvokable]
+    public async Task ApplicationDataChanged(object? data = null)
+    {
+        if (disposed)
+            return;
+
+        try
+        {
+            // Company/settings/employee CRUD can change the current live-map
+            // membership or geofence presentation. Refresh only this component,
+            // not the whole Blazor circuit/page.
+            await RefreshLocations();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine(
+                $"Admin live map application realtime refresh failed: {ex}");
+        }
+    }
+
+    [JSInvokable]
+    public async Task GeoSettingsChanged(object? data = null)
+    {
+        if (disposed)
+            return;
+
+        try
+        {
+            // Radius/office changes are an explicit realtime test path.
+            // Re-read authoritative CompanySettings so the live circle,
+            // selected card and inside/outside presentation immediately use
+            // the current value without changing historical audit rows.
+            await RefreshLocations();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine(
+                $"Admin live map geo-settings realtime refresh failed: {ex}");
+        }
+    }
+
+    [JSInvokable]
     public async Task SessionStarted(object? data = null)
     {
         if (disposed)
@@ -3324,6 +3365,17 @@
             {
                 await JSRuntime.InvokeVoidAsync(
                     "attendanceRefresh.registerLocationHealth",
+                    liveLocationSignalRReference);
+            }
+            catch { }
+
+            // Subscribe this live-map component directly to the centralized
+            // application invalidation stream. This avoids relying on a full
+            // route refresh for current live state.
+            try
+            {
+                await JSRuntime.InvokeVoidAsync(
+                    "attendanceRefresh.registerApplication",
                     liveLocationSignalRReference);
             }
             catch { }
@@ -4573,6 +4625,14 @@
             {
                 await JSRuntime.InvokeVoidAsync(
                     "attendanceRefresh.unregisterLocationHealth",
+                    liveLocationSignalRReference);
+            }
+            catch { }
+
+            try
+            {
+                await JSRuntime.InvokeVoidAsync(
+                    "attendanceRefresh.unregisterApplication",
                     liveLocationSignalRReference);
             }
             catch { }
