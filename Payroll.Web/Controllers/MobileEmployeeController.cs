@@ -33,6 +33,7 @@ public sealed class MobileEmployeeController : ControllerBase
     private readonly IHubContext<AttendanceRefreshHub> _hub;
     private readonly ILogger<MobileEmployeeController> _logger;
     private readonly RegularizationService _regularizationService;
+    private readonly AttendanceEventMonitorService _attendanceMonitor;
 
     public MobileEmployeeController(
         UserManager<IdentityUser> userManager,
@@ -42,7 +43,8 @@ public sealed class MobileEmployeeController : ControllerBase
         GeoLocationService geo,
         IHubContext<AttendanceRefreshHub> hub,
         ILogger<MobileEmployeeController> logger,
-        RegularizationService regularizationService)
+        RegularizationService regularizationService,
+        AttendanceEventMonitorService attendanceMonitor)
     {
         _userManager = userManager;
         _signInManager = signInManager;
@@ -52,6 +54,7 @@ public sealed class MobileEmployeeController : ControllerBase
         _hub = hub;
         _logger = logger;
         _regularizationService = regularizationService;
+        _attendanceMonitor = attendanceMonitor;
     }
 
     [HttpPost("login")]
@@ -86,6 +89,9 @@ public sealed class MobileEmployeeController : ControllerBase
 
         if (!passwordResult.Succeeded)
         {
+            await _attendanceMonitor.RecordAsync(
+                "LOGIN_FAILED", user.Id, user.Email ?? emailIdentifier, request.DeviceId, "Android", "FAILED",
+                passwordResult.IsLockedOut ? "LOCKED" : (passwordResult.IsNotAllowed ? "NOT_ALLOWED" : "INVALID_CREDENTIALS"));
             if (passwordResult.IsLockedOut)
                 return Unauthorized(new { success = false, code = "LOCKED", message = "This account is temporarily locked. Please try again later." });
 
@@ -118,6 +124,11 @@ public sealed class MobileEmployeeController : ControllerBase
 
         if (existing != null && !sameDevice && !request.ForceReplace)
         {
+            await _attendanceMonitor.RecordAsync(
+                "SECOND_DEVICE_ATTEMPT", user.Id, user.Email ?? emailIdentifier, mobileDeviceId, "Android",
+                "EXISTING_SESSION_FOUND", "SINGLE_DEVICE_POLICY",
+                new { ExistingSessionSinceUtc = existing.CreatedAtUtc }, existing.DeviceId);
+
             return Conflict(new
             {
                 success = false,
@@ -138,6 +149,11 @@ public sealed class MobileEmployeeController : ControllerBase
 
         if (existing != null && !sameDevice)
         {
+            await _attendanceMonitor.RecordAsync(
+                "FORCE_LOGOUT_REQUESTED", user.Id, user.Email ?? emailIdentifier, mobileDeviceId, "Android",
+                "REQUESTED", "NEW_DEVICE_REPLACE",
+                new { ForceReplace = request.ForceReplace }, existing.DeviceId);
+
             // Replacing a mobile device is an explicit force logout of the
             // previous device. End every active GPS session before releasing
             // the old device lock so no live session survives replacement.
@@ -157,8 +173,15 @@ public sealed class MobileEmployeeController : ControllerBase
             if (!stampResult.Succeeded)
                 return StatusCode(500, new { success = false, message = "Unable to replace the existing employee session." });
 
+            var oldDeviceId = existing.DeviceId;
             db.EmployeeDeviceLocks.Remove(existing);
             await db.SaveChangesAsync();
+
+            await _attendanceMonitor.RecordAsync(
+                "FORCED_SESSION_LOGOUT", user.Id, user.Email ?? emailIdentifier, oldDeviceId, "Android",
+                "TERMINATED", "REPLACED_BY_NEW_DEVICE",
+                new { NewDeviceId = mobileDeviceId }, oldDeviceId);
+
             existing = null;
         }
 
@@ -179,6 +202,11 @@ public sealed class MobileEmployeeController : ControllerBase
             existing.LastSeenAtUtc = DateTime.UtcNow;
             await db.SaveChangesAsync();
         }
+
+        await _attendanceMonitor.RecordAsync(
+            "LOGIN_SUCCESS", user.Id, user.Email ?? emailIdentifier, mobileDeviceId, "Android", "SUCCESS",
+            request.ForceReplace ? "NEW_DEVICE_AFTER_FORCE_REPLACE" : "SESSION_STARTED",
+            new { EmployeeId = employee?.EmployeeID ?? 0, Role = primaryRole });
 
         var token = _tokens.Create(user.Id, employee?.EmployeeID ?? 0, mobileDeviceId, primaryRole);
 
@@ -240,6 +268,10 @@ public sealed class MobileEmployeeController : ControllerBase
             return Unauthorized();
 
         var employeeId = GetEmployeeId();
+        var deviceId = User.FindFirstValue("BioMetric-Employee-Device") ?? "ANDROID";
+
+        await _attendanceMonitor.RecordAsync(
+            "LOGOUT_REQUESTED", userId, User.FindFirstValue(ClaimTypes.Email), deviceId, "Android", "REQUESTED", "MANUAL_LOGOUT");
 
         // Logout is authoritative: end every active GPS session before the
         // device lock is released. This also cleans up legacy duplicate
@@ -260,6 +292,12 @@ public sealed class MobileEmployeeController : ControllerBase
             db.EmployeeDeviceLocks.Remove(lockRecord);
             await db.SaveChangesAsync();
         }
+
+        await _attendanceMonitor.RecordAsync(
+            "DEVICE_LOCK_RELEASED", userId, User.FindFirstValue(ClaimTypes.Email), deviceId, "Android", "SUCCESS", "MANUAL_LOGOUT");
+        await _attendanceMonitor.RecordAsync(
+            "LOGOUT_COMPLETED", userId, User.FindFirstValue(ClaimTypes.Email), deviceId, "Android", "SUCCESS",
+            "MANUAL_LOGOUT_COMPLETED", new { EmployeeId = employeeId, SessionsEnded = endedCount });
 
         return Ok(new { success = true });
     }

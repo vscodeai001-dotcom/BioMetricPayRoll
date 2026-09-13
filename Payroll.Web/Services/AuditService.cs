@@ -18,7 +18,7 @@ namespace Payroll.Web.Services
             _httpContextAccessor = httpContextAccessor;
         }
 
-        public async Task LogAsync(string actionType, string entityType, string entityId, string details)
+        public async Task LogAsync(string actionType, string entityType, string entityId, string details, string? actorUserId = null, string? actorEmail = null)
         {
             // 1. Check if Audit is enabled (Enforcing the feature gate)
             // Use the injected context to check settings.
@@ -29,8 +29,8 @@ namespace Payroll.Web.Services
             }
 
             var user = _httpContextAccessor.HttpContext?.User;
-            string userId = user?.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? "SYSTEM";
-            string userEmail = user?.Identity?.Name ?? "System";
+            string userId = actorUserId ?? user?.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? "SYSTEM";
+            string userEmail = actorEmail ?? user?.Identity?.Name ?? "System";
 
             var log = new AuditLog
             {

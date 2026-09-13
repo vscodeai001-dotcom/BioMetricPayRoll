@@ -60,6 +60,9 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
         private readonly GeoLocationService
             _geoLocationService;
 
+        private readonly AttendanceEventMonitorService
+            _attendanceMonitor;
+
 
         // ============================================================
         // CONSTRUCTOR
@@ -71,7 +74,8 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
             IDbContextFactory<AppDbContext> dbFactory,
             ILogger<LoginModel> logger,
             NotificationService notificationService,
-            GeoLocationService geoLocationService)
+            GeoLocationService geoLocationService,
+            AttendanceEventMonitorService attendanceMonitor)
         {
             _signInManager = signInManager;
             _userManager = userManager;
@@ -79,6 +83,7 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
             _logger = logger;
             _notificationService = notificationService;
             _geoLocationService = geoLocationService;
+            _attendanceMonitor = attendanceMonitor;
         }
 
 
@@ -282,6 +287,10 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
 
             if (!passwordResult.Succeeded)
             {
+                await _attendanceMonitor.RecordAsync(
+                    "LOGIN_FAILED", user.Id, user.Email ?? email, null, "Web", "FAILED",
+                    passwordResult.IsLockedOut ? "LOCKED" : (passwordResult.IsNotAllowed ? "NOT_ALLOWED" : "INVALID_CREDENTIALS"));
+
                 AddInvalidLoginError();
 
                 return Page();
@@ -319,6 +328,14 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
             deviceId ??= Guid.NewGuid().ToString("N");
 
 
+            var activeDeviceBeforeLogin = await _attendanceMonitor.GetActiveDeviceIdAsync(user.Id);
+
+            await _attendanceMonitor.RecordAsync(
+                "LOGIN_ATTEMPT", user.Id, user.Email ?? email, deviceId, "Web", "PASSWORD_VERIFIED",
+                ForceLogoutExisting ? "FORCE_REPLACE_REQUEST" : "NORMAL_LOGIN_ATTEMPT",
+                new { CurrentDeviceOwnsSession = currentDeviceOwnsSession, ExistingSession = activeDeviceBeforeLogin != null },
+                activeDeviceBeforeLogin);
+
             _logger.LogInformation(
                 "LOGIN ATTEMPT. UserId={UserId}, ForceLogout={ForceLogout}",
                 user.Id,
@@ -346,6 +363,11 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
                         string.Empty,
                         $"{AlreadyLoggedInMessage} {ForceLogoutInstruction}");
 
+                    await _attendanceMonitor.RecordAsync(
+                        "SECOND_DEVICE_ATTEMPT", user.Id, user.Email ?? email, deviceId, "Web",
+                        "EXISTING_SESSION_FOUND", "SINGLE_DEVICE_POLICY",
+                        new { ExistingSession = true }, activeDeviceBeforeLogin);
+
                     await NotifyBlockedLoginAsync(
                         user,
                         email);
@@ -372,6 +394,11 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
 
             else
             {
+                await _attendanceMonitor.RecordAsync(
+                    "FORCE_LOGOUT_REQUESTED", user.Id, user.Email ?? email, deviceId, "Web",
+                    "REQUESTED", "EMPLOYEE_CONFIRMED_EXISTING_SESSION_REPLACEMENT",
+                    new { ForceLogoutExisting }, activeDeviceBeforeLogin);
+
                 _logger.LogWarning(
                     "FORCE LOGIN REQUEST. UserId={UserId}",
                     user.Id);
@@ -388,6 +415,11 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
                     return Page();
                 }
 
+
+                await _attendanceMonitor.RecordAsync(
+                    "FORCED_SESSION_LOGOUT", user.Id, user.Email ?? email, activeDeviceBeforeLogin, "Web",
+                    "TERMINATED", "REPLACED_BY_NEW_DEVICE",
+                    new { NewDeviceId = deviceId }, activeDeviceBeforeLogin);
 
                 _logger.LogWarning(
                     "EXISTING EMPLOYEE SESSION INVALIDATED. UserId={UserId}",
@@ -489,6 +521,11 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
                     user.Id);
             }
 
+
+            await _attendanceMonitor.RecordAsync(
+                "LOGIN_SUCCESS", user.Id, user.Email ?? email, deviceId, "Web", "SUCCESS",
+                ForceLogoutExisting ? "NEW_DEVICE_AFTER_FORCE_REPLACE" : "SESSION_STARTED",
+                new { ForceLogoutExisting }, ForceLogoutExisting ? activeDeviceBeforeLogin : null);
 
             // ========================================================
             // SUCCESS

@@ -1,5 +1,4 @@
 @page "/admin/attendance-event-monitoring"
-@using System.Text.Json
 @using Microsoft.AspNetCore.Authorization
 @using Microsoft.EntityFrameworkCore
 @using global::Payroll.Shared.Data
@@ -8,148 +7,96 @@
 
 <PageTitle>Attendance Event Monitoring</PageTitle>
 
-<div class="d-flex justify-content-between align-items-center mb-2">
+<div class="d-flex justify-content-between align-items-center mb-3">
     <div>
         <h3 class="mb-1"><i class="bi bi-activity me-2"></i>Attendance Event Monitoring</h3>
-        <p class="text-muted mb-0">Monitor login, logout, second-device and attendance-state decisions without changing the attendance rules.</p>
+        <div class="text-muted small">Login, logout and single-device session lifecycle. Attendance priority/fallback rules are not changed here.</div>
     </div>
-    <span class="badge bg-dark">Decision Audit</span>
+    <button class="btn btn-outline-primary" @onclick="LoadEvents"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
 </div>
 
-<div class="alert alert-info py-2">
-    <i class="bi bi-info-circle me-1"></i>
-    This page is <strong>observability only</strong>. Existing biometric, mobile, geofence, priority and fallback logic remains unchanged.
-</div>
-
-<div class="card shadow-sm mb-3">
-    <div class="card-body">
-        <div class="row g-2 align-items-end">
-            <div class="col-md-2"><label class="form-label small fw-bold">Start</label><input type="date" class="form-control" @bind="startDate" /></div>
-            <div class="col-md-2"><label class="form-label small fw-bold">End</label><input type="date" class="form-control" @bind="endDate" /></div>
-            <div class="col-md-2"><label class="form-label small fw-bold">Employee ID</label><input class="form-control" placeholder="All" @bind="employeeFilter" /></div>
-            <div class="col-md-3">
-                <label class="form-label small fw-bold">Event</label>
-                <select class="form-select" @bind="eventFilter"><option value="">All events</option>@foreach (var type in EventTypes){<option value="@type">@type</option>}</select>
-            </div>
-            <div class="col-md-2"><button class="btn btn-primary w-100" @onclick="LoadEvents" disabled="@isLoading"><i class="bi bi-search me-1"></i> Search</button></div>
-            <div class="col-md-1 text-end"><span class="badge bg-secondary">@events.Count</span></div>
-        </div>
+<div class="row g-2 p-3 mb-3 bg-light border rounded">
+    <div class="col-md-3"><label class="form-label small fw-bold">Start</label><input type="date" class="form-control" @bind="startDate" /></div>
+    <div class="col-md-3"><label class="form-label small fw-bold">End</label><input type="date" class="form-control" @bind="endDate" /></div>
+    <div class="col-md-3"><label class="form-label small fw-bold">Event</label>
+        <select class="form-select" @bind="eventFilter">
+            <option value="">All events</option>
+            <option>LOGIN_ATTEMPT</option><option>LOGIN_SUCCESS</option><option>LOGIN_FAILED</option>
+            <option>SECOND_DEVICE_ATTEMPT</option><option>FORCE_LOGOUT_REQUESTED</option><option>FORCED_SESSION_LOGOUT</option>
+            <option>LOGOUT_REQUESTED</option><option>DEVICE_LOCK_RELEASED</option><option>LOGOUT_COMPLETED</option>
+        </select>
     </div>
+    <div class="col-md-3 d-flex align-items-end"><button class="btn btn-primary w-100" @onclick="LoadEvents">Search</button></div>
 </div>
 
-@if (isLoading)
+@if (loading)
 {
-    <div class="text-center py-4"><span class="spinner-border spinner-border-sm me-2"></span>Loading monitoring events...</div>
+    <div class="alert alert-secondary">Loading monitored events...</div>
 }
 else if (!events.Any())
 {
-    <div class="alert alert-secondary">No attendance monitoring events found for the selected filters.</div>
+    <div class="alert alert-info">No monitored events found for the selected period.</div>
 }
 else
 {
     <div class="table-responsive">
-        <table class="table table-sm table-hover align-middle border">
-            <thead class="table-dark"><tr><th>Time</th><th>Employee</th><th>Event</th><th>Device</th><th>Attendance State</th><th>Last Source</th><th>Decision / Reason</th><th></th></tr></thead>
+        <table class="table table-sm table-striped table-hover border align-middle">
+            <thead class="table-dark"><tr><th>Time</th><th>User</th><th>Event</th><th>Details</th></tr></thead>
             <tbody>
-                @foreach (var item in events)
-                {
-                    <tr>
-                        <td class="text-nowrap">@item.Timestamp.ToLocalTime().ToString("dd-MMM-yyyy HH:mm:ss")</td>
-                        <td><strong>@item.EmployeeName</strong><br /><small class="text-muted">ID: @item.EmployeeId</small></td>
-                        <td><span class="badge @EventBadge(item.EventType)">@item.EventType</span></td>
-                        <td><small>@(string.IsNullOrWhiteSpace(item.DeviceId) ? "-" : item.DeviceId)</small></td>
-                        <td><span class="badge @(item.AttendanceState == "OPEN" ? "bg-warning text-dark" : "bg-success")">@item.AttendanceState</span><small class="d-block text-muted">Punches: @item.PunchCount</small></td>
-                        <td><small>@(string.IsNullOrWhiteSpace(item.LastSource) ? "-" : item.LastSource)</small></td>
-                        <td class="small">@item.Decision</td>
-                        <td><button class="btn btn-sm btn-outline-secondary" @onclick="() => ShowDetails(item)">Details</button></td>
-                    </tr>
-                }
+            @foreach (var item in events)
+            {
+                <tr>
+                    <td style="white-space:nowrap">@item.Timestamp.ToString("dd-MMM-yyyy HH:mm:ss")</td>
+                    <td><div class="fw-semibold">@item.UserEmail</div><div class="small text-muted">@item.EntityID</div></td>
+                    <td><span class="badge @Badge(item.EventType)">@item.EventType</span></td>
+                    <td><pre class="small mb-0" style="white-space:pre-wrap;max-width:900px">@item.Details</pre></td>
+                </tr>
+            }
             </tbody>
         </table>
     </div>
 }
 
-@if (selected != null)
-{
-    <div class="card shadow-sm mt-3 border-primary">
-        <div class="card-header d-flex justify-content-between align-items-center"><strong>Event Details</strong><button class="btn btn-sm btn-outline-secondary" @onclick="CloseDetails">Close</button></div>
-        <div class="card-body">
-            <div class="row g-2 mb-3"><div class="col-md-3"><strong>Event:</strong><br />@selected.EventType</div><div class="col-md-3"><strong>Employee:</strong><br />@selected.EmployeeName (@selected.EmployeeId)</div><div class="col-md-3"><strong>Device:</strong><br />@selected.DeviceId</div><div class="col-md-3"><strong>Time:</strong><br />@selected.Timestamp.ToLocalTime().ToString("dd-MMM-yyyy HH:mm:ss")</div></div>
-            <pre class="bg-light border rounded p-3 mb-0" style="max-height:420px;overflow:auto;white-space:pre-wrap;">@selected.RawDetails</pre>
-        </div>
-    </div>
-}
-
-<ApplicationRealtimeRefreshListener />
-
 @code {
+    private List<Row> events = new();
     private DateTime startDate = DateTime.Today.AddDays(-7);
     private DateTime endDate = DateTime.Today;
-    private string employeeFilter = string.Empty;
     private string eventFilter = string.Empty;
-    private bool isLoading;
-    private List<MonitoringRow> events = new();
-    private MonitoringRow? selected;
-
-    private static readonly string[] EventTypes = { "LOGIN_SUCCESS", "LOGIN_FAILED", "SECOND_DEVICE_LOGIN", "EXISTING_SESSION_REPLACED", "LOGOUT_REQUESTED", "LOGOUT_COMPLETED", "ATTENDANCE_STATE_AT_LOGIN", "ATTENDANCE_STATE_AT_LOGOUT" };
+    private bool loading;
 
     protected override async Task OnInitializedAsync() => await LoadEvents();
 
     private async Task LoadEvents()
     {
-        isLoading = true;
+        loading = true;
         try
         {
-            using var db = await DbFactory.CreateDbContextAsync();
+            await using var db = await DbFactory.CreateDbContextAsync();
             var from = startDate.Date;
-            var to = endDate.Date.AddDays(1).AddTicks(-1);
-            var logs = await db.AuditLogs.AsNoTracking().Where(x => x.EntityType == "EmployeeAttendanceDecision" && x.ActionType == "ATTENDANCE_EVENT_MONITOR" && x.Timestamp >= from && x.Timestamp <= to).OrderByDescending(x => x.Timestamp).Take(1000).ToListAsync();
-            var employeeNames = await db.Employees.AsNoTracking().Select(x => new { x.EmployeeID, x.Name }).ToDictionaryAsync(x => x.EmployeeID.ToString(), x => x.Name);
-            events = logs.Select(x => Parse(x, employeeNames)).Where(x => string.IsNullOrWhiteSpace(employeeFilter) || x.EmployeeId.Contains(employeeFilter.Trim(), StringComparison.OrdinalIgnoreCase)).Where(x => string.IsNullOrWhiteSpace(eventFilter) || string.Equals(x.EventType, eventFilter, StringComparison.OrdinalIgnoreCase)).ToList();
+            var to = endDate.Date.AddDays(1);
+            var raw = await db.AuditLogs.AsNoTracking()
+                .Where(x => x.ActionType == "AUTH_SESSION" && x.EntityType == "EmployeeAttendanceSession" && x.Timestamp >= from && x.Timestamp < to)
+                .OrderByDescending(x => x.Timestamp).Take(1000).ToListAsync();
+            events = raw.Select(x => new Row(x.Timestamp, x.UserEmail, x.EntityID, ExtractEvent(x.Details), x.Details ?? string.Empty))
+                .Where(x => string.IsNullOrWhiteSpace(eventFilter) || x.EventType.Equals(eventFilter, StringComparison.OrdinalIgnoreCase)).ToList();
         }
-        finally { isLoading = false; }
+        finally { loading = false; }
     }
 
-    private static MonitoringRow Parse(AuditLog log, Dictionary<string, string> names)
+    private static string ExtractEvent(string? details)
     {
-        var row = new MonitoringRow { Timestamp = log.Timestamp.Kind == DateTimeKind.Utc ? log.Timestamp : log.Timestamp.ToUniversalTime(), EmployeeId = log.EntityID ?? "-", EmployeeName = log.EntityID != null && names.TryGetValue(log.EntityID, out var name) ? name : "Unknown", RawDetails = log.Details ?? string.Empty };
-        try
-        {
-            using var doc = JsonDocument.Parse(log.Details ?? "{}");
-            var root = doc.RootElement;
-            row.EventType = root.TryGetProperty("eventType", out var ev) ? ev.GetString() ?? "UNKNOWN" : "UNKNOWN";
-            row.DeviceId = root.TryGetProperty("deviceId", out var dev) ? dev.GetString() ?? "-" : "-";
-            if (root.TryGetProperty("details", out var details) && details.ValueKind == JsonValueKind.Object)
-            {
-                row.AttendanceState = GetString(details, "attendanceStateBeforeEvent") ?? "UNKNOWN";
-                row.PunchCount = GetInt(details, "todayPunchCount");
-                row.LastSource = GetString(details, "lastPunchDeviceId") ?? GetString(details, "lastPunchLogType") ?? "-";
-                row.Decision = GetString(details, "decision") ?? GetString(details, "reason") ?? GetString(details, "result") ?? BuildFallback(row.EventType, row.AttendanceState, row.PunchCount);
-            }
-            else row.Decision = BuildFallback(row.EventType, row.AttendanceState, row.PunchCount);
-        }
-        catch { row.EventType = "UNKNOWN"; row.Decision = "Monitoring record could not be parsed. Raw details are shown below."; }
-        return row;
+        if (string.IsNullOrWhiteSpace(details)) return "UNKNOWN";
+        try { using var doc = System.Text.Json.JsonDocument.Parse(details); return doc.RootElement.TryGetProperty("EventType", out var p) ? p.GetString() ?? "UNKNOWN" : "UNKNOWN"; }
+        catch { return "UNKNOWN"; }
     }
 
-    private static string? GetString(JsonElement obj, string name) => obj.TryGetProperty(name, out var value) && value.ValueKind != JsonValueKind.Null ? value.ToString() : null;
-    private static int GetInt(JsonElement obj, string name) => obj.TryGetProperty(name, out var value) && value.TryGetInt32(out var number) ? number : 0;
-    private static string BuildFallback(string eventType, string state, int count) => $"{eventType}: existing attendance state was {state} with {count} punch(es); no attendance rule was changed by monitoring.";
-    private string EventBadge(string type) => type switch { "LOGIN_SUCCESS" or "LOGOUT_COMPLETED" => "bg-success", "LOGIN_FAILED" or "SECOND_DEVICE_LOGIN" => "bg-danger", "EXISTING_SESSION_REPLACED" => "bg-warning text-dark", _ => "bg-info text-dark" };
-    private void ShowDetails(MonitoringRow row) => selected = row;
-    private void CloseDetails() => selected = null;
-
-    private sealed class MonitoringRow
+    private static string Badge(string e) => e switch
     {
-        public DateTime Timestamp { get; set; }
-        public string EmployeeId { get; set; } = "-";
-        public string EmployeeName { get; set; } = "Unknown";
-        public string EventType { get; set; } = "UNKNOWN";
-        public string DeviceId { get; set; } = "-";
-        public string AttendanceState { get; set; } = "UNKNOWN";
-        public int PunchCount { get; set; }
-        public string LastSource { get; set; } = "-";
-        public string Decision { get; set; } = "-";
-        public string RawDetails { get; set; } = string.Empty;
-    }
+        "LOGIN_SUCCESS" or "LOGOUT_COMPLETED" => "bg-success",
+        "SECOND_DEVICE_ATTEMPT" or "FORCE_LOGOUT_REQUESTED" => "bg-warning text-dark",
+        "FORCED_SESSION_LOGOUT" or "LOGIN_FAILED" => "bg-danger",
+        _ => "bg-secondary"
+    };
+
+    private sealed record Row(DateTime Timestamp, string UserEmail, string? EntityID, string EventType, string Details);
 }

@@ -37,7 +37,7 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
             _logger;
 
         private readonly AttendanceEventMonitorService
-            _attendanceEventMonitor;
+            _attendanceMonitor;
 
 
         public LogoutModel(
@@ -46,15 +46,14 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
             IDbContextFactory<AppDbContext> dbFactory,
             GeoLocationService geoLocationService,
             ILogger<LogoutModel> logger,
-            AttendanceEventMonitorService attendanceEventMonitor)
+            AttendanceEventMonitorService attendanceMonitor)
         {
             _signInManager = signInManager;
             _userManager = userManager;
             _dbFactory = dbFactory;
             _geoLocationService = geoLocationService;
             _logger = logger;
-
-            _attendanceEventMonitor = attendanceEventMonitor;
+            _attendanceMonitor = attendanceMonitor;
         }
 
 
@@ -84,15 +83,19 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
                 await _userManager.GetUserAsync(User);
 
 
+            string? deviceId = null;
+            if (user != null)
+            {
+                deviceId = User.FindFirstValue(DeviceClaimType);
+                if (string.IsNullOrWhiteSpace(deviceId)) Request.Cookies.TryGetValue(DeviceCookieName, out deviceId);
+                await _attendanceMonitor.RecordAsync(
+                    "LOGOUT_REQUESTED", user.Id, user.Email, deviceId, "Web", "REQUESTED", "MANUAL_LOGOUT");
+            }
+
             try
             {
                 if (user != null)
                 {
-                    await _attendanceEventMonitor.RecordEmployeeStateAsync(
-                        "LOGOUT_REQUESTED",
-                        user.Id,
-                        details: new { action = "MANUAL_LOGOUT", attendanceDecisionChanged = false });
-
                     await EndEmployeeGpsSessionAsync(user);
 
                     await ReleaseEmployeeDeviceLockAsync(
@@ -123,23 +126,13 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
 
             DeleteDeviceCookie();
 
+            if (user != null)
+                await _attendanceMonitor.RecordAsync(
+                    "LOGOUT_COMPLETED", user.Id, user.Email, deviceId, "Web", "SUCCESS", "MANUAL_LOGOUT_COMPLETED");
 
             _logger.LogInformation(
                 "LOGOUT COMPLETED. UserId={UserId}",
                 user?.Id);
-
-            if (user != null)
-            {
-                await _attendanceEventMonitor.RecordEmployeeStateAsync(
-                    "LOGOUT_COMPLETED",
-                    user.Id,
-                    details: new
-                    {
-                        action = "MANUAL_LOGOUT",
-                        attendancePunchCreatedByLogout = false,
-                        note = "Monitoring only. Existing attendance priority/fallback rules were not changed."
-                    });
-            }
 
 
             if (
