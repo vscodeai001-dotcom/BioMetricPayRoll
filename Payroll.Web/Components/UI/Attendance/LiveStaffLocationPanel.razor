@@ -2875,8 +2875,8 @@
             AccuracyMeters = TryGetJsonDouble(json, "AccuracyMeters", out var accuracyVal)
                 ? accuracyVal
                 : existing.AccuracyMeters,
-            SpeedMps = TryGetJsonDouble(json, "SpeedMps", out var speedVal)
-                ? speedVal
+            SpeedMps = TryGetJsonDouble(json, "SpeedMps", out var updatedSpeedVal)
+                ? updatedSpeedVal
                 : existing.SpeedMps,
             MovementState = TryGetJsonString(json, "MovementState", out var movementStateVal)
                 ? movementStateVal
