@@ -757,6 +757,50 @@ public class GeoLocationService
                 return true;
             }
 
+            // Hard idempotency guard for automatic geofence punches.
+            // If another GeofenceAuto event for this employee was already
+            // committed in the same second, do not create a second attendance
+            // punch. This specifically prevents GPS boundary oscillation from
+            // producing IN/OUT pairs with the exact same timestamp.
+            var currentSecond = new DateTime(
+                indiaNow.Year,
+                indiaNow.Month,
+                indiaNow.Day,
+                indiaNow.Hour,
+                indiaNow.Minute,
+                indiaNow.Second,
+                DateTimeKind.Unspecified);
+
+            var nextSecond = currentSecond.AddSeconds(1);
+
+            var duplicateAutomaticPunch =
+                await db.AttendanceLogs
+                    .AsNoTracking()
+                    .Where(x =>
+                        x.EmployeeID == employeeId &&
+                        x.DeviceID != null &&
+                        x.DeviceID.Equals(
+                            "GeofenceAuto",
+                            StringComparison.OrdinalIgnoreCase) &&
+                        x.PunchTime >= currentSecond &&
+                        x.PunchTime < nextSecond)
+                    .OrderBy(x => x.LogID)
+                    .FirstOrDefaultAsync();
+
+            if (duplicateAutomaticPunch != null)
+            {
+                _logger.LogInformation(
+                    "Duplicate automatic geofence punch suppressed. " +
+                    "EmployeeId={EmployeeId}, ExistingLogId={LogId}, ExistingType={LogType}, Time={PunchTime}",
+                    employeeId,
+                    duplicateAutomaticPunch.LogID,
+                    duplicateAutomaticPunch.LogType,
+                    duplicateAutomaticPunch.PunchTime);
+
+                await transaction.CommitAsync();
+                return true;
+            }
+
             var log =
                 new AttendanceLog
                 {
