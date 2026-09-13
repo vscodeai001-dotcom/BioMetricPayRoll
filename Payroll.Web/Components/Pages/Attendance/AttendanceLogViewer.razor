@@ -808,7 +808,7 @@
                             // DAILY PUNCHES
                             // ------------------------------------------------
 
-                            var dayPunchLogs =
+                            var dayPunches =
                                 relevantLogs
                                     .Where(
                                         l =>
@@ -821,43 +821,30 @@
                                     .OrderBy(
                                         l =>
                                             l.PunchTime)
-                                    .ThenBy(
+                                    .Select(
                                         l =>
-                                            l.LogID)
+                                            l.PunchTime)
                                     .ToList();
 
-                            var dayPunches =
-                                dayPunchLogs
-                                    .Select(l => l.PunchTime)
+                            // Keep the attendance calculation input exactly as before,
+                            // but expose diagnostic detail in the report so identical
+                            // minute values can be traced to the real source/device.
+                            var dayPunchLogs =
+                                relevantLogs
+                                    .Where(
+                                        l =>
+                                            l.EmployeeID == ds.EmployeeID &&
+                                            DateOnly.FromDateTime(l.PunchTime.Date) == ds.ShiftDate)
+                                    .OrderBy(l => l.PunchTime)
+                                    .ThenBy(l => l.LogID)
                                     .ToList();
 
                             dto.Punches =
                                 string.Join(
-                                    " / ",
-                                    dayPunches.Select(
-                                        p =>
-                                            p.ToString(
-                                                "HH:mm")));
-
-                            // Diagnostic-only raw event details.
-                            // IMPORTANT: this does not alter, deduplicate, or re-order
-                            // the attendance calculation input. It only exposes the
-                            // exact database event source/time so repeated HH:mm values
-                            // can be traced safely.
-                            dto.RawPunchDetails = dayPunchLogs
-                                .Select(l => new AttendanceLogDto.RawPunchDetailDto
-                                {
-                                    LogID = l.LogID,
-                                    PunchTime = l.PunchTime,
-                                    Source = string.IsNullOrWhiteSpace(l.DeviceID)
-                                        ? (string.IsNullOrWhiteSpace(l.LogType) ? "Unknown" : l.LogType!)
-                                        : l.DeviceID!,
-                                    DeviceID = l.DeviceID ?? string.Empty,
-                                    BiometricID = l.BiometricID ?? string.Empty,
-                                    LogType = l.LogType ?? string.Empty,
-                                    IsApproved = l.IsApproved
-                                })
-                                .ToList();
+                                    "\n",
+                                    dayPunchLogs.Select(
+                                        l =>
+                                            $"{l.PunchTime:HH:mm:ss}  {l.DeviceID ?? "Unknown"}  #{l.LogID}  {l.LogType}"));
 
                             // ------------------------------------------------
                             // BREAKS

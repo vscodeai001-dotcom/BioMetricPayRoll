@@ -22,6 +22,11 @@ public class GeoLocationService
     // authoritative and are protected by a short conflict window.
     private const int AuthoritativePunchProtectionSeconds = 120;
     private const int FallbackReconciliationWindowSeconds = 300;
+    // GPS fixes can oscillate around the configured boundary for a few seconds.
+    // Do not manufacture alternating automatic IN/OUT punches during that
+    // short GPS-noise window. The existing attendance parity/priority logic
+    // remains unchanged; this only debounces automatic geofence transitions.
+    private const int GeofenceAutoTransitionDebounceSeconds = 60;
     private const long AttendanceAdvisoryLockNamespace = 0x504159524F4C4CL;
     private const long GpsSessionAdvisoryLockNamespace = 0x4750534C4F434BL;
 
@@ -676,6 +681,51 @@ public class GeoLocationService
             // naturally idempotent because the same condition becomes true.
             if (currentLocationState == attendanceCurrentlyOpen)
                 return true;
+
+            // GPS noise can make a location oscillate INSIDE/OUTSIDE the
+            // boundary several times in the same minute. Without a small
+            // debounce window this creates sequences such as:
+            //   16:15 IN, 16:15 OUT, 16:15 IN, 16:15 OUT ...
+            // These are not useful attendance events. Keep the previous
+            // session state until the new state remains authoritative long
+            // enough to be accepted. Returning false is intentional: the
+            // caller does not advance LastIsWithinAllowedRadius, so the next
+            // fix can retry the same transition after the debounce window.
+            var latestAutomaticPunch =
+                todaysPunches
+                    .Where(x =>
+                        x.DeviceID != null &&
+                        x.DeviceID.Equals(
+                            "GeofenceAuto",
+                            StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(x => x.PunchTime)
+                    .FirstOrDefault();
+
+            if (latestAutomaticPunch != null &&
+                !string.Equals(
+                    latestAutomaticPunch.LogType,
+                    requiredPunchType,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                var secondsSinceAutomaticPunch =
+                    (indiaNow - latestAutomaticPunch.PunchTime).TotalSeconds;
+
+                if (secondsSinceAutomaticPunch >= 0 &&
+                    secondsSinceAutomaticPunch < GeofenceAutoTransitionDebounceSeconds)
+                {
+                    _logger.LogInformation(
+                        "Automatic geofence {PunchType} debounced because the " +
+                        "previous automatic geofence punch was only {Seconds:F0}s ago. " +
+                        "EmployeeId={EmployeeId}, PreviousLogId={LogId}, PreviousType={PreviousType}",
+                        requiredPunchType,
+                        secondsSinceAutomaticPunch,
+                        employeeId,
+                        latestAutomaticPunch.LogID,
+                        latestAutomaticPunch.LogType);
+
+                    return false;
+                }
+            }
 
             /*
              * BIOMETRIC and explicit MOBILE punches are authoritative.
