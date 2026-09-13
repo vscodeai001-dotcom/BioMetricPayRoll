@@ -963,6 +963,28 @@ namespace Payroll.Shared.Migrations
                     b.Property<DateTime>("RecordedAtUtc")
                         .HasColumnType("timestamp without time zone");
 
+                    b.Property<string>("CaptureSource")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasColumnName("capture_source")
+                        .HasDefaultValue("Online");
+
+                    b.Property<DateTime>("CapturedAtUtc")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp without time zone")
+                        .HasColumnName("captured_at_utc")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.Property<Guid?>("SyncBatchId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("sync_batch_id");
+
+                    b.Property<DateTime?>("SyncedAtUtc")
+                        .HasColumnType("timestamp without time zone")
+                        .HasColumnName("synced_at_utc");
+
                     b.Property<Guid>("SessionId")
                         .HasColumnType("uuid");
 
@@ -971,6 +993,10 @@ namespace Payroll.Shared.Migrations
                     b.HasIndex("EmployeeId", "RecordedAtUtc");
 
                     b.HasIndex("SessionId", "RecordedAtUtc");
+
+                    b.HasIndex("EmployeeId", "CaptureSource", "CapturedAtUtc");
+
+                    b.HasIndex("SyncBatchId");
 
                     b.ToTable("employee_location_history", (string)null);
                 });

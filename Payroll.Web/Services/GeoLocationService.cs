@@ -495,6 +495,8 @@ public class GeoLocationService
 
                 try
                 {
+                    var liveLocation = LiveLocationStore.Get(employeeId);
+
                     await _hubContext.Clients.All.SendAsync(
                         "LocationChanged",
                         new
@@ -507,7 +509,9 @@ public class GeoLocationService
                             DistanceMeters = safeDistance,
                             AccuracyMeters = safeAccuracy,
                             AllowedRadiusMeters = allowedRadiusMeters,
-                            IsWithinAllowedRadius = isWithinAllowedRadius
+                            IsWithinAllowedRadius = isWithinAllowedRadius,
+                            SpeedMps = liveLocation?.SpeedMps ?? 0,
+                            MovementState = liveLocation?.MovementState ?? "Stopped"
                         });
                 }
                 catch (Exception signalREx)
@@ -1343,7 +1347,9 @@ public class GeoLocationService
                         ? 0
                         : allowedRadiusMeters,
                 IsWithinAllowedRadius = isWithinAllowedRadius,
-                RecordedAtUtc = DateTime.UtcNow
+                RecordedAtUtc = DateTime.UtcNow,
+                CaptureSource = "Online",
+                CapturedAtUtc = DateTime.UtcNow
             };
 
             db.EmployeeLocationHistory.Add(record);
@@ -1540,7 +1546,9 @@ public class GeoLocationService
                     DistanceFromOfficeMeters = NormalizeDistance(distance),
                     AllowedRadiusMeters = company.GeoRadiusMeters,
                     IsWithinAllowedRadius = true,
-                    RecordedAtUtc = auditTimeUtc
+                    RecordedAtUtc = auditTimeUtc,
+                    CaptureSource = "Online",
+                    CapturedAtUtc = auditTimeUtc
                 });
         }
 

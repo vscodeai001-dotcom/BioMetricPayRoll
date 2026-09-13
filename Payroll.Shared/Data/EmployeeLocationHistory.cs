@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 
 namespace Payroll.Shared.Data
 {
@@ -27,5 +27,28 @@ namespace Payroll.Shared.Data
         public bool IsWithinAllowedRadius { get; set; }
 
         public DateTime RecordedAtUtc { get; set; }
+
+        /// <summary>
+        /// Identifies how this point was captured. Online points are written
+        /// by the normal GPS pipeline; OfflineSync is reserved for queued
+        /// device batches that are uploaded after connectivity returns.
+        /// </summary>
+        public string CaptureSource { get; set; } = "Online";
+
+        /// <summary>
+        /// Original device capture time in UTC. This is intentionally kept
+        /// separate from RecordedAtUtc, which represents server persistence.
+        /// </summary>
+        public DateTime CapturedAtUtc { get; set; }
+
+        /// <summary>
+        /// Identifies a future offline synchronization batch.
+        /// </summary>
+        public Guid? SyncBatchId { get; set; }
+
+        /// <summary>
+        /// Server time when an offline point was synchronized.
+        /// </summary>
+        public DateTime? SyncedAtUtc { get; set; }
     }
 }

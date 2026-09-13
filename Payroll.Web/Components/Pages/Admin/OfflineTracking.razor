@@ -48,7 +48,7 @@
                         <tr>
                             <td><strong>@row.EmployeeName</strong><div class="small text-muted">ID @row.EmployeeId</div></td>
                             <td><span class="badge @row.StatusClass">@row.Status</span></td>
-                            <td>@ToLocal(row.LastUpdatedUtc).ToString("dd MMM yyyy HH:mm:ss")</td>
+                            <td>@(row.LastUpdatedUtc.HasValue ? ToLocal(row.LastUpdatedUtc.Value).ToString("dd MMM yyyy HH:mm:ss") : "Never")</td>
                             <td>@FormatAge(row.Age)</td>
                             <td>@row.MovementState</td>
                             <td>@FormatSpeed(row.SpeedMps)</td>
@@ -68,6 +68,9 @@
                 <h5 class="fw-bold mb-1">Offline movement sync</h5>
                 <p class="text-muted mb-2">The web side is prepared to receive offline GPS batches. Android Phase 4 will add the device-side offline queue, connection-reason reporting, background collection, and chronological synchronization when the network returns.</p>
                 <div class="small text-muted">This screen intentionally does not guess whether a disconnect was caused by airplane mode, carrier loss, or another network problem. The Android device will report the exact reason when that phase is connected.</div>
+                <div class="mt-2">
+                    <span class="badge bg-primary-subtle text-primary">Today: @offlineSyncCount offline GPS points synced</span>
+                </div>
             </div>
         </div>
     </div>
@@ -108,33 +111,75 @@
         try
         {
             await using var db = await DbFactory.CreateDbContextAsync();
-            var employees = await db.Employees.AsNoTracking().Where(e => !e.IsDeleted).ToDictionaryAsync(e => e.EmployeeID, e => e.Name);
+
+            // Load the employee list independently of the in-memory GPS store.
+            // This keeps the page useful even when an employee has no active
+            // GPS session or when the app has just restarted.
+            var employeeList = await db.Employees
+                .AsNoTracking()
+                .Where(e => !e.IsDeleted)
+                .OrderBy(e => e.Name)
+                .Select(e => new { e.EmployeeID, e.Name })
+                .ToListAsync();
+
+
+            // GPS capture metadata is already represented by the migration.
+            // Keep the query read-only so this page never changes existing data.
             offlineSyncRows = await (from point in db.EmployeeLocationHistory.AsNoTracking()
                                       join employee in db.Employees.AsNoTracking() on point.EmployeeId equals employee.EmployeeID
-                                      where point.CaptureSource == "OfflineSync" && point.CapturedAtUtc >= DateTime.UtcNow.Date
+                                      where point.CaptureSource == "OfflineSync" &&
+                                            point.CapturedAtUtc >= DateTime.UtcNow.Date
                                       orderby point.CapturedAtUtc descending
                                       select new OfflineSyncRow
                                       {
                                           EmployeeName = employee.Name,
                                           CapturedAtUtc = point.CapturedAtUtc,
                                           SyncedAtUtc = point.SyncedAtUtc,
-                                          SpeedMps = point.SpeedMps,
-                                          MovementState = point.MovementState,
                                           IsWithinAllowedRadius = point.IsWithinAllowedRadius,
                                           Latitude = point.Latitude,
                                           Longitude = point.Longitude
                                       }).Take(500).ToListAsync();
 
-            rows = LiveLocationStore.GetAll().Select(location =>
+            offlineSyncRows.Reverse();
+            CalculateOfflineMovement();
+
+            var liveLocations = LiveLocationStore.GetAll()
+                .ToDictionary(x => x.EmployeeId);
+
+            rows = employeeList.Select(employee =>
             {
+                if (!liveLocations.TryGetValue(employee.EmployeeID, out var location))
+                {
+                    return new Row
+                    {
+                        EmployeeId = employee.EmployeeID,
+                        EmployeeName = employee.Name,
+                        Status = "Offline",
+                        StatusClass = "bg-danger-subtle text-danger",
+                        LastUpdatedUtc = null,
+                        Age = TimeSpan.MaxValue,
+                        MovementState = "No GPS session",
+                        SpeedMps = 0,
+                        Latitude = 0,
+                        Longitude = 0,
+                        Geofence = "-"
+                    };
+                }
+
                 var status = LiveLocationStore.GetStatus(location);
                 var age = LiveLocationStore.GetAge(location);
+
                 return new Row
                 {
                     EmployeeId = location.EmployeeId,
-                    EmployeeName = employees.TryGetValue(location.EmployeeId, out var name) ? name : "Employee",
+                    EmployeeName = employee.Name,
                     Status = status.ToString(),
-                    StatusClass = status switch { LiveLocationStatus.Live => "bg-success-subtle text-success", LiveLocationStatus.Stale => "bg-warning-subtle text-warning-emphasis", _ => "bg-danger-subtle text-danger" },
+                    StatusClass = status switch
+                    {
+                        LiveLocationStatus.Live => "bg-success-subtle text-success",
+                        LiveLocationStatus.Stale => "bg-warning-subtle text-warning-emphasis",
+                        _ => "bg-danger-subtle text-danger"
+                    },
                     LastUpdatedUtc = location.LastUpdatedUtc,
                     Age = age,
                     MovementState = location.MovementState,
@@ -143,13 +188,76 @@
                     Longitude = location.Longitude,
                     Geofence = location.IsWithinAllowedRadius ? "Within range" : "Outside range"
                 };
-            }).OrderBy(x => x.Status == "Live" ? 0 : x.Status == "Stale" ? 1 : 2).ThenBy(x => x.EmployeeName).ToList();
+            })
+            .OrderBy(x => x.Status == "Live" ? 0 : x.Status == "Stale" ? 1 : 2)
+            .ThenBy(x => x.EmployeeName)
+            .ToList();
+
             lastRefresh = DateTime.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Offline tracking refresh failed: {ex}");
         }
         finally
         {
             loading = false;
         }
+    }
+
+    private void CalculateOfflineMovement()
+    {
+        if (offlineSyncRows.Count == 0)
+            return;
+
+        var previousByEmployee = new Dictionary<int, OfflineSyncRow>();
+
+        foreach (var row in offlineSyncRows)
+        {
+            if (previousByEmployee.TryGetValue(row.EmployeeId, out var previous))
+            {
+                var elapsed = (row.CapturedAtUtc - previous.CapturedAtUtc).TotalSeconds;
+                var distance = CalculateDistanceMeters(
+                    previous.Latitude,
+                    previous.Longitude,
+                    row.Latitude,
+                    row.Longitude);
+
+                row.SpeedMps = elapsed > 0.25 && elapsed <= 300 && distance <= 5000
+                    ? distance / elapsed
+                    : 0;
+                row.MovementState = GetMovementState(row.SpeedMps);
+            }
+            else
+            {
+                row.SpeedMps = 0;
+                row.MovementState = "Stopped";
+            }
+
+            previousByEmployee[row.EmployeeId] = row;
+        }
+    }
+
+    private static string GetMovementState(double speedMps)
+    {
+        if (!double.IsFinite(speedMps) || speedMps <= 0.5) return "Stopped";
+        if (speedMps <= 2.0) return "Walking";
+        if (speedMps <= 8.0) return "Cycling";
+        return "Moving";
+    }
+
+    private static double CalculateDistanceMeters(double lat1, double lon1, double lat2, double lon2)
+    {
+        const double earthRadiusMeters = 6371000d;
+        var r1 = lat1 * Math.PI / 180d;
+        var r2 = lat2 * Math.PI / 180d;
+        var dLat = (lat2 - lat1) * Math.PI / 180d;
+        var dLon = (lon2 - lon1) * Math.PI / 180d;
+        var a = Math.Sin(dLat / 2d) * Math.Sin(dLat / 2d) +
+                Math.Cos(r1) * Math.Cos(r2) *
+                Math.Sin(dLon / 2d) * Math.Sin(dLon / 2d);
+        a = Math.Clamp(a, 0d, 1d);
+        return earthRadiusMeters * 2d * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1d - a));
     }
 
     private async Task RefreshLoopAsync(CancellationToken token)
@@ -166,7 +274,7 @@
     }
 
     private static string FormatSpeed(double speedMps) => !double.IsFinite(speedMps) || speedMps <= .05 ? "0 km/h" : $"{speedMps * 3.6:F1} km/h";
-    private static string FormatAge(TimeSpan age) => age.TotalDays >= 1 ? $"{(int)age.TotalDays}d {age.Hours}h" : age.TotalHours >= 1 ? $"{(int)age.TotalHours}h {age.Minutes}m" : $"{Math.Max(0, (int)age.TotalMinutes)}m {Math.Max(0, age.Seconds)}s";
+    private static string FormatAge(TimeSpan age) => age == TimeSpan.MaxValue ? "Never" : age.TotalDays >= 1 ? $"{(int)age.TotalDays}d {age.Hours}h" : age.TotalHours >= 1 ? $"{(int)age.TotalHours}h {age.Minutes}m" : $"{Math.Max(0, (int)age.TotalMinutes)}m {Math.Max(0, age.Seconds)}s";
     private static DateTime ToLocal(DateTime utc) => TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), TimeZoneInfo.FindSystemTimeZoneById(OperatingSystem.IsWindows() ? "India Standard Time" : "Asia/Kolkata"));
 
     public async ValueTask DisposeAsync()
@@ -179,6 +287,7 @@
 
     private sealed class OfflineSyncRow
     {
+        public int EmployeeId { get; set; }
         public string EmployeeName { get; set; } = "Employee";
         public DateTime CapturedAtUtc { get; set; }
         public DateTime? SyncedAtUtc { get; set; }
@@ -195,7 +304,7 @@
         public string EmployeeName { get; set; } = "";
         public string Status { get; set; } = "Offline";
         public string StatusClass { get; set; } = "bg-secondary";
-        public DateTime LastUpdatedUtc { get; set; }
+        public DateTime? LastUpdatedUtc { get; set; }
         public TimeSpan Age { get; set; }
         public string MovementState { get; set; } = "Stopped";
         public double SpeedMps { get; set; }

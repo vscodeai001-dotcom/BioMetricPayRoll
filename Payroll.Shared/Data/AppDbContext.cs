@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 
@@ -303,6 +303,22 @@ public class AppDbContext
             entity.Property(x => x.RecordedAtUtc)
                 .IsRequired();
 
+            entity.Property(x => x.CaptureSource)
+                .HasColumnName("capture_source")
+                .HasMaxLength(20)
+                .IsRequired()
+                .HasDefaultValue("Online");
+
+            entity.Property(x => x.CapturedAtUtc)
+                .HasColumnName("captured_at_utc")
+                .IsRequired()
+                .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+            entity.Property(x => x.SyncBatchId)
+                .HasColumnName("sync_batch_id");
+
+            entity.Property(x => x.SyncedAtUtc)
+                .HasColumnName("synced_at_utc");
 
             entity.HasIndex(x => new
             {
@@ -316,6 +332,15 @@ public class AppDbContext
                 x.SessionId,
                 x.RecordedAtUtc
             });
+
+            entity.HasIndex(x => new
+            {
+                x.EmployeeId,
+                x.CaptureSource,
+                x.CapturedAtUtc
+            });
+
+            entity.HasIndex(x => x.SyncBatchId);
         });
 
 
