@@ -28,12 +28,12 @@
     </div>
 
     <div class="row g-3 mb-4">
-        <Metric Title="Employees Tracked" Value="@summary.Employees" Icon="bi-people" />
-        <Metric Title="Offline Points" Value="@summary.OfflinePoints" Icon="bi-cloud-slash" />
-        <Metric Title="Offline Sessions" Value="@summary.OfflineSessions" Icon="bi-clock-history" />
-        <Metric Title="Pending / Unsynced" Value="@summary.Unsynced" Icon="bi-hourglass-split" />
-        <Metric Title="Total Distance" Value="@FormatDistance(summary.DistanceMeters)" Icon="bi-signpost-2" />
-        <Metric Title="Last Capture" Value="@FormatIst(summary.LastCaptureUtc)" Icon="bi-geo-alt" />
+        @Metric("Employees Tracked", summary.Employees.ToString(), "bi-people")
+        @Metric("Offline Points", summary.OfflinePoints.ToString(), "bi-cloud-slash")
+        @Metric("Offline Sessions", summary.OfflineSessions.ToString(), "bi-clock-history")
+        @Metric("Pending / Unsynced", summary.Unsynced.ToString(), "bi-hourglass-split")
+        @Metric("Total Distance", FormatDistance(summary.DistanceMeters), "bi-signpost-2")
+        @Metric("Last Capture", FormatIst(summary.LastCaptureUtc), "bi-geo-alt")
     </div>
 
     <div class="card shadow-sm border-0 mb-4">
