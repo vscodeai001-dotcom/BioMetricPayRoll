@@ -1054,9 +1054,11 @@
        ============================================================ */
 
     .admin-map-wrapper {
-        background: #eef2f7;
+        position: relative;
+        background: linear-gradient(135deg, #eaf0f7 0%, #dfe8f3 100%);
         border-radius: 0 0 16px 16px;
         overflow: hidden;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.75);
     }
 
     .admin-live-map {
@@ -2693,30 +2695,6 @@
     }
 
     [JSInvokable]
-    public async Task GeoSettingsChanged(object? data = null)
-    {
-        if (disposed)
-            return;
-
-        try
-        {
-            // Company GPS/radius settings are persisted in CompanySettings and
-            // RebaselineAllActiveSessionsAsync updates every active session.
-            // Reload the authoritative snapshot immediately so the map,
-            // selected employee card, and geofence state update without the
-            // admin pressing Refresh.
-            await RefreshLocations();
-            mapNeedsUpdate = true;
-            await InvokeAsync(StateHasChanged);
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine(
-                $"Admin GPS settings realtime refresh failed: {ex}");
-        }
-    }
-
-    [JSInvokable]
     public async Task SessionStarted(object? data = null)
     {
         if (disposed)
@@ -2756,15 +2734,6 @@
         return idProperty.TryGetInt32(out employeeId) && employeeId > 0;
     }
 
-    private static bool IsValidGpsCoordinate(double latitude, double longitude)
-    {
-        return double.IsFinite(latitude) &&
-               double.IsFinite(longitude) &&
-               latitude >= -90 && latitude <= 90 &&
-               longitude >= -180 && longitude <= 180 &&
-               !(Math.Abs(latitude) < 0.0000001 && Math.Abs(longitude) < 0.0000001);
-    }
-
     private bool TryApplyLocationPayload(
         object? data,
         out bool needsAuthoritativeRefresh)
@@ -2790,10 +2759,13 @@
 
         if (!TryGetJsonDouble(json, "Latitude", out var latitude) ||
             !TryGetJsonDouble(json, "Longitude", out var longitude) ||
-            !IsValidGpsCoordinate(latitude, longitude))
+            !double.IsFinite(latitude) ||
+            !double.IsFinite(longitude) ||
+            latitude < -90 || latitude > 90 ||
+            longitude < -180 || longitude > 180 ||
+            (latitude == 0 && longitude == 0))
         {
-            // Never allow NaN/Infinity/out-of-range/0,0 coordinates onto the
-            // live map. Returning false forces the authoritative refresh path.
+            // Never let malformed GPS data reach the map.
             return false;
         }
 
@@ -2803,6 +2775,12 @@
         {
             Guid.TryParse(sessionText, out sessionId);
         }
+
+        var payloadAtUtc = TryGetJsonDateTime(json, "Timestamp", out var payloadTime)
+            ? payloadTime.ToUniversalTime()
+            : (TryGetJsonDateTime(json, "LastUpdatedUtc", out var lastTime)
+                ? lastTime.ToUniversalTime()
+                : DateTime.UtcNow);
 
         var existingIndex = locations.FindIndex(
             x => x.EmployeeId == employeeId);
@@ -2821,7 +2799,7 @@
                 DistanceMeters = TryGetJsonDouble(json, "DistanceMeters", out var distVal) ? distVal : 0,
                 AllowedRadiusMeters = TryGetJsonInt(json, "AllowedRadiusMeters", out var radVal) ? radVal : 0,
                 IsWithinAllowedRadius = TryGetJsonBool(json, "IsWithinAllowedRadius", out var withinVal) ? withinVal : true,
-                LastUpdatedUtc = TryGetJsonDateTime(json, "LastUpdatedUtc", out var updVal) ? updVal : DateTime.UtcNow,
+                LastUpdatedUtc = payloadAtUtc,
                 SessionStartedUtc = TryGetJsonDateTime(json, "SessionStartedUtc", out var startVal) ? startVal : DateTime.UtcNow,
                 SessionId = sessionId
             };
@@ -2835,6 +2813,13 @@
         }
 
         var existing = locations[existingIndex];
+
+        // A delayed packet from an older GPS session or an older capture
+        // timestamp must never move the marker backwards.
+        if (payloadAtUtc < existing.LastUpdatedUtc)
+        {
+            return true;
+        }
 
         // A delayed packet from an older GPS session must never overwrite
         // the current session's coordinates.
@@ -3164,18 +3149,32 @@
                     if (!seenEmployees.Add(session.EmployeeId))
                         continue;
 
-                    if (!IsValidGpsCoordinate(
-                            session.LastLatitude!.Value,
-                            session.LastLongitude!.Value))
-                    {
+                    var lat = session.LastLatitude!.Value;
+                    var lng = session.LastLongitude!.Value;
+
+                    // The map is fail-safe: never render malformed coordinates
+                    // or an active session whose last GPS fix is no longer
+                    // current. The session itself remains untouched.
+                    if (!double.IsFinite(lat) || !double.IsFinite(lng) ||
+                        lat < -90 || lat > 90 || lng < -180 || lng > 180 ||
+                        (lat == 0 && lng == 0))
                         continue;
-                    }
+
+                    var locationAge = DateTime.UtcNow - session.LastUpdateAtUtc;
+                    if (locationAge < TimeSpan.Zero)
+                        locationAge = TimeSpan.Zero;
+
+                    // Do not display stale DB coordinates as current live
+                    // positions. SignalR will repopulate the marker on the
+                    // next genuine GPS fix.
+                    if (locationAge > TimeSpan.FromSeconds(120))
+                        continue;
 
                     snapshot.Add(new LiveEmployeeLocation
                     {
                         EmployeeId = session.EmployeeId,
-                        Latitude = session.LastLatitude!.Value,
-                        Longitude = session.LastLongitude!.Value,
+                        Latitude = lat,
+                        Longitude = lng,
                         AccuracyMeters = session.LastAccuracyMeters ?? 0,
                         DistanceMeters = session.LastDistanceFromOfficeMeters ?? 0,
                         AllowedRadiusMeters = session.LastAllowedRadiusMeters ?? 0,
@@ -3347,7 +3346,6 @@
             var office = await GetOfficeLocation();
 
             var staff = locations
-                .Where(x => IsValidGpsCoordinate(x.Latitude, x.Longitude))
                 .Select(x => new AdminMapLocation
                 {
                     EmployeeId = x.EmployeeId,
@@ -3357,9 +3355,7 @@
                     Latitude = x.Latitude,
                     Longitude = x.Longitude,
                     DistanceMeters = x.DistanceMeters,
-                    AllowedRadiusMeters = currentOfficeRadius > 0
-                        ? currentOfficeRadius
-                        : x.AllowedRadiusMeters,
+                    AllowedRadiusMeters = x.AllowedRadiusMeters,
                     IsWithinAllowedRadius = x.IsWithinAllowedRadius,
                     AccuracyMeters = x.AccuracyMeters,
                     LastUpdatedUtc = x.LastUpdatedUtc,

@@ -97,6 +97,14 @@ public sealed class EmployeeLocationController : ControllerBase
 
             var accuracy = request.Accuracy >= 0 ? request.Accuracy : 0;
 
+            // Preserve the browser GPS capture time for ordering live fixes.
+            // A missing timestamp falls back to server time; a clock-skewed
+            // future timestamp is normalized by the service rather than used
+            // to make a location appear newer than it really is.
+            var capturedAtUtc = request.Timestamp.Kind == DateTimeKind.Unspecified
+                ? DateTime.SpecifyKind(request.Timestamp, DateTimeKind.Utc)
+                : request.Timestamp.ToUniversalTime();
+
             // Log authenticated user information for diagnostics
             try
             {
@@ -148,7 +156,8 @@ public sealed class EmployeeLocationController : ControllerBase
                     accuracy,
                     distanceResult.DistanceMeters,
                     distanceResult.AllowedRadiusMeters,
-                    distanceResult.IsWithinAllowedRadius);
+                    distanceResult.IsWithinAllowedRadius,
+                    capturedAtUtc);
 
             if (!sessionUpdated)
             {

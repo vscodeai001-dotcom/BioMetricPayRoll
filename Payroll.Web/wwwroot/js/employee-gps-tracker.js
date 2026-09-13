@@ -488,7 +488,12 @@ window.EmployeeGpsTracker = (function () {
                 latitude: coords.latitude,
                 longitude: coords.longitude,
                 accuracy: coords.accuracy,
-                timestamp: now
+                // GeolocationPosition.timestamp is the actual capture time.
+                // Keeping it through retries prevents a delayed packet from
+                // looking like a fresh GPS position on the server/map.
+                timestamp: Number.isFinite(Number(position.timestamp))
+                    ? Number(position.timestamp)
+                    : now
             };
 
             // Throttle server broadcasts to the existing 5-second rate.
@@ -510,7 +515,10 @@ window.EmployeeGpsTracker = (function () {
             const locationData = {
                 latitude: coords.latitude,
                 longitude: coords.longitude,
-                accuracy: coords.accuracy
+                accuracy: coords.accuracy,
+                timestamp: Number.isFinite(Number(position.timestamp))
+                    ? Number(position.timestamp)
+                    : (lastLocationData?.timestamp || now)
             };
 
             // IMPORTANT:
@@ -546,7 +554,7 @@ window.EmployeeGpsTracker = (function () {
             latitude: locationData.latitude,
             longitude: locationData.longitude,
             accuracy: locationData.accuracy,
-            timestamp: new Date().toISOString()
+            timestamp: new Date(Number(locationData.timestamp) || Date.now()).toISOString()
         };
 
         const attemptSend = function (attempt) {
@@ -582,7 +590,7 @@ window.EmployeeGpsTracker = (function () {
 
     function scheduleRetryOrQueue(locationData, previousAttempt) {
         try {
-            const key = (locationData && locationData.timestamp) ? locationData.timestamp : new Date().toISOString();
+            const key = (locationData && locationData.timestamp) ? String(locationData.timestamp) : new Date().toISOString();
             const attempts = (retryAttemptsMap[key] || 0) + 1;
             retryAttemptsMap[key] = attempts;
 

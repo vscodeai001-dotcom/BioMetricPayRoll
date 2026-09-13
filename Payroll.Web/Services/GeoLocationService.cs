@@ -22,11 +22,6 @@ public class GeoLocationService
     // authoritative and are protected by a short conflict window.
     private const int AuthoritativePunchProtectionSeconds = 120;
     private const int FallbackReconciliationWindowSeconds = 300;
-    // GPS fixes can oscillate around the configured boundary for a few seconds.
-    // Do not manufacture alternating automatic IN/OUT punches during that
-    // short GPS-noise window. The existing attendance parity/priority logic
-    // remains unchanged; this only debounces automatic geofence transitions.
-    private const int GeofenceAutoTransitionDebounceSeconds = 60;
     private const long AttendanceAdvisoryLockNamespace = 0x504159524F4C4CL;
     private const long GpsSessionAdvisoryLockNamespace = 0x4750534C4F434BL;
 
@@ -311,7 +306,8 @@ public class GeoLocationService
         double accuracyMeters,
         double distanceMeters,
         int allowedRadiusMeters,
-        bool isWithinAllowedRadius)
+        bool isWithinAllowedRadius,
+        DateTime? capturedAtUtc = null)
     {
         if (employeeId <= 0 ||
             sessionId == Guid.Empty ||
@@ -378,6 +374,21 @@ public class GeoLocationService
                     // in-memory entry. A newer session is never removed.
                     LiveLocationStore.Remove(employeeId, sessionId);
                     return false;
+                }
+
+                var captureTime = capturedAtUtc.HasValue && capturedAtUtc.Value != default
+                    ? capturedAtUtc.Value.ToUniversalTime()
+                    : DateTime.UtcNow;
+
+                // Do not let delayed/retried GPS packets overwrite the newer
+                // session position. This is a display/data-integrity guard;
+                // attendance rules continue to use the current server time.
+                if (captureTime < session.LastUpdateAtUtc)
+                {
+                    _logger.LogDebug(
+                        "Ignoring out-of-order GPS fix. EmployeeId={EmployeeId}, SessionId={SessionId}, Capture={CaptureTime}, Current={CurrentTime}",
+                        employeeId, sessionId, captureTime, session.LastUpdateAtUtc);
+                    return true;
                 }
 
                 var safeAccuracy = NormalizeAccuracy(accuracyMeters);
@@ -484,8 +495,9 @@ public class GeoLocationService
                     safeAccuracy,
                     safeDistance,
                     allowedRadiusMeters,
-                    isWithinAllowedRadius,
-                    sessionId);
+                    session.LastIsWithinAllowedRadius ?? isWithinAllowedRadius,
+                    sessionId,
+                    captureTime);
 
                 if (!liveUpdated)
                 {
@@ -500,8 +512,6 @@ public class GeoLocationService
 
                 try
                 {
-                    var liveLocation = LiveLocationStore.Get(employeeId);
-
                     await _hubContext.Clients.All.SendAsync(
                         "LocationChanged",
                         new
@@ -514,9 +524,7 @@ public class GeoLocationService
                             DistanceMeters = safeDistance,
                             AccuracyMeters = safeAccuracy,
                             AllowedRadiusMeters = allowedRadiusMeters,
-                            IsWithinAllowedRadius = isWithinAllowedRadius,
-                            SpeedMps = liveLocation?.SpeedMps ?? 0,
-                            MovementState = liveLocation?.MovementState ?? "Stopped"
+                            IsWithinAllowedRadius = isWithinAllowedRadius
                         });
                 }
                 catch (Exception signalREx)
@@ -682,49 +690,6 @@ public class GeoLocationService
             if (currentLocationState == attendanceCurrentlyOpen)
                 return true;
 
-            // GPS noise can make a location oscillate INSIDE/OUTSIDE the
-            // boundary several times in the same minute. Without a small
-            // debounce window this creates sequences such as:
-            //   16:15 IN, 16:15 OUT, 16:15 IN, 16:15 OUT ...
-            // These are not useful attendance events. Keep the previous
-            // session state until the new state remains authoritative long
-            // enough to be accepted. Returning false is intentional: the
-            // caller does not advance LastIsWithinAllowedRadius, so the next
-            // fix can retry the same transition after the debounce window.
-            var latestAutomaticPunch =
-                todaysPunches
-                    .Where(x =>
-                        x.DeviceID != null &&
-                        x.DeviceID == "GeofenceAuto")
-                    .OrderByDescending(x => x.PunchTime)
-                    .FirstOrDefault();
-
-            if (latestAutomaticPunch != null &&
-                !string.Equals(
-                    latestAutomaticPunch.LogType,
-                    requiredPunchType,
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                var secondsSinceAutomaticPunch =
-                    (indiaNow - latestAutomaticPunch.PunchTime).TotalSeconds;
-
-                if (secondsSinceAutomaticPunch >= 0 &&
-                    secondsSinceAutomaticPunch < GeofenceAutoTransitionDebounceSeconds)
-                {
-                    _logger.LogInformation(
-                        "Automatic geofence {PunchType} debounced because the " +
-                        "previous automatic geofence punch was only {Seconds:F0}s ago. " +
-                        "EmployeeId={EmployeeId}, PreviousLogId={LogId}, PreviousType={PreviousType}",
-                        requiredPunchType,
-                        secondsSinceAutomaticPunch,
-                        employeeId,
-                        latestAutomaticPunch.LogID,
-                        latestAutomaticPunch.LogType);
-
-                    return false;
-                }
-            }
-
             /*
              * BIOMETRIC and explicit MOBILE punches are authoritative.
              * If one has already been committed close to this transition,
@@ -750,48 +715,6 @@ public class GeoLocationService
                     recentAuthoritative.LogID,
                     recentAuthoritative.DeviceID,
                     recentAuthoritative.PunchTime);
-
-                await transaction.CommitAsync();
-                return true;
-            }
-
-            // Hard idempotency guard for automatic geofence punches.
-            // If another GeofenceAuto event for this employee was already
-            // committed in the same second, do not create a second attendance
-            // punch. This specifically prevents GPS boundary oscillation from
-            // producing IN/OUT pairs with the exact same timestamp.
-            var currentSecond = new DateTime(
-                indiaNow.Year,
-                indiaNow.Month,
-                indiaNow.Day,
-                indiaNow.Hour,
-                indiaNow.Minute,
-                indiaNow.Second,
-                DateTimeKind.Unspecified);
-
-            var nextSecond = currentSecond.AddSeconds(1);
-
-            var duplicateAutomaticPunch =
-                await db.AttendanceLogs
-                    .AsNoTracking()
-                    .Where(x =>
-                        x.EmployeeID == employeeId &&
-                        x.DeviceID != null &&
-                        x.DeviceID == "GeofenceAuto" &&
-                        x.PunchTime >= currentSecond &&
-                        x.PunchTime < nextSecond)
-                    .OrderBy(x => x.LogID)
-                    .FirstOrDefaultAsync();
-
-            if (duplicateAutomaticPunch != null)
-            {
-                _logger.LogInformation(
-                    "Duplicate automatic geofence punch suppressed. " +
-                    "EmployeeId={EmployeeId}, ExistingLogId={LogId}, ExistingType={LogType}, Time={PunchTime}",
-                    employeeId,
-                    duplicateAutomaticPunch.LogID,
-                    duplicateAutomaticPunch.LogType,
-                    duplicateAutomaticPunch.PunchTime);
 
                 await transaction.CommitAsync();
                 return true;
@@ -1437,9 +1360,7 @@ public class GeoLocationService
                         ? 0
                         : allowedRadiusMeters,
                 IsWithinAllowedRadius = isWithinAllowedRadius,
-                RecordedAtUtc = DateTime.UtcNow,
-                CaptureSource = "Online",
-                CapturedAtUtc = DateTime.UtcNow
+                RecordedAtUtc = DateTime.UtcNow
             };
 
             db.EmployeeLocationHistory.Add(record);
@@ -1636,9 +1557,7 @@ public class GeoLocationService
                     DistanceFromOfficeMeters = NormalizeDistance(distance),
                     AllowedRadiusMeters = company.GeoRadiusMeters,
                     IsWithinAllowedRadius = true,
-                    RecordedAtUtc = auditTimeUtc,
-                    CaptureSource = "Online",
-                    CapturedAtUtc = auditTimeUtc
+                    RecordedAtUtc = auditTimeUtc
                 });
         }
 
