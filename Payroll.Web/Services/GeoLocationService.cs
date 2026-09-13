@@ -695,9 +695,7 @@ public class GeoLocationService
                 todaysPunches
                     .Where(x =>
                         x.DeviceID != null &&
-                        x.DeviceID.Equals(
-                            "GeofenceAuto",
-                            StringComparison.OrdinalIgnoreCase))
+                        x.DeviceID == "GeofenceAuto")
                     .OrderByDescending(x => x.PunchTime)
                     .FirstOrDefault();
 
@@ -779,9 +777,7 @@ public class GeoLocationService
                     .Where(x =>
                         x.EmployeeID == employeeId &&
                         x.DeviceID != null &&
-                        x.DeviceID.Equals(
-                            "GeofenceAuto",
-                            StringComparison.OrdinalIgnoreCase) &&
+                        x.DeviceID == "GeofenceAuto" &&
                         x.PunchTime >= currentSecond &&
                         x.PunchTime < nextSecond)
                     .OrderBy(x => x.LogID)
