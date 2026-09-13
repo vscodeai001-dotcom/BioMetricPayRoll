@@ -2712,8 +2712,12 @@ window.registerAdminLiveLocationRealtime = function (mapId) {
                 !Number.isFinite(employeeId) ||
                 employeeId <= 0 ||
                 !Number.isFinite(latitude) ||
-                !Number.isFinite(longitude)
+                !Number.isFinite(longitude) ||
+                latitude < -90 || latitude > 90 ||
+                longitude < -180 || longitude > 180 ||
+                (Math.abs(latitude) < 0.0000001 && Math.abs(longitude) < 0.0000001)
             ) {
+                console.warn('Admin live realtime: invalid GPS coordinate ignored.', data);
                 return;
             }
 
@@ -3204,7 +3208,10 @@ window.updateAdminLiveStaffMap =
 
                     if (
                         !Number.isFinite(lat) ||
-                        !Number.isFinite(lng)
+                        !Number.isFinite(lng) ||
+                        lat < -90 || lat > 90 ||
+                        lng < -180 || lng > 180 ||
+                        (Math.abs(lat) < 0.0000001 && Math.abs(lng) < 0.0000001)
                     ) {
                         return;
                     }

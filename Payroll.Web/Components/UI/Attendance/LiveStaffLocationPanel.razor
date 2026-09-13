@@ -2693,6 +2693,30 @@
     }
 
     [JSInvokable]
+    public async Task GeoSettingsChanged(object? data = null)
+    {
+        if (disposed)
+            return;
+
+        try
+        {
+            // Company GPS/radius settings are persisted in CompanySettings and
+            // RebaselineAllActiveSessionsAsync updates every active session.
+            // Reload the authoritative snapshot immediately so the map,
+            // selected employee card, and geofence state update without the
+            // admin pressing Refresh.
+            await RefreshLocations();
+            mapNeedsUpdate = true;
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine(
+                $"Admin GPS settings realtime refresh failed: {ex}");
+        }
+    }
+
+    [JSInvokable]
     public async Task SessionStarted(object? data = null)
     {
         if (disposed)
@@ -2732,6 +2756,15 @@
         return idProperty.TryGetInt32(out employeeId) && employeeId > 0;
     }
 
+    private static bool IsValidGpsCoordinate(double latitude, double longitude)
+    {
+        return double.IsFinite(latitude) &&
+               double.IsFinite(longitude) &&
+               latitude >= -90 && latitude <= 90 &&
+               longitude >= -180 && longitude <= 180 &&
+               !(Math.Abs(latitude) < 0.0000001 && Math.Abs(longitude) < 0.0000001);
+    }
+
     private bool TryApplyLocationPayload(
         object? data,
         out bool needsAuthoritativeRefresh)
@@ -2757,9 +2790,10 @@
 
         if (!TryGetJsonDouble(json, "Latitude", out var latitude) ||
             !TryGetJsonDouble(json, "Longitude", out var longitude) ||
-            !double.IsFinite(latitude) ||
-            !double.IsFinite(longitude))
+            !IsValidGpsCoordinate(latitude, longitude))
         {
+            // Never allow NaN/Infinity/out-of-range/0,0 coordinates onto the
+            // live map. Returning false forces the authoritative refresh path.
             return false;
         }
 
@@ -3130,6 +3164,13 @@
                     if (!seenEmployees.Add(session.EmployeeId))
                         continue;
 
+                    if (!IsValidGpsCoordinate(
+                            session.LastLatitude!.Value,
+                            session.LastLongitude!.Value))
+                    {
+                        continue;
+                    }
+
                     snapshot.Add(new LiveEmployeeLocation
                     {
                         EmployeeId = session.EmployeeId,
@@ -3306,6 +3347,7 @@
             var office = await GetOfficeLocation();
 
             var staff = locations
+                .Where(x => IsValidGpsCoordinate(x.Latitude, x.Longitude))
                 .Select(x => new AdminMapLocation
                 {
                     EmployeeId = x.EmployeeId,
@@ -3315,7 +3357,9 @@
                     Latitude = x.Latitude,
                     Longitude = x.Longitude,
                     DistanceMeters = x.DistanceMeters,
-                    AllowedRadiusMeters = x.AllowedRadiusMeters,
+                    AllowedRadiusMeters = currentOfficeRadius > 0
+                        ? currentOfficeRadius
+                        : x.AllowedRadiusMeters,
                     IsWithinAllowedRadius = x.IsWithinAllowedRadius,
                     AccuracyMeters = x.AccuracyMeters,
                     LastUpdatedUtc = x.LastUpdatedUtc,

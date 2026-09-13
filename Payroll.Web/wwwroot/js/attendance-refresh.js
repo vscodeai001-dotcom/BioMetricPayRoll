@@ -144,9 +144,9 @@ window.attendanceRefresh = (function () {
                     // Dispatch event for admin UI to update status/age indicators
                     window.dispatchEvent(new CustomEvent('location-health-updated', { detail: data }));
 
-                    // Also notify registered Blazor listeners so components refresh lightweight state
-                    await notifyViewer();
-                    await notifyListeners('LocationChanged', data);
+                    // Health is status-only. Do not turn a heartbeat into a
+                    // LocationChanged refresh. Actual coordinates arrive through
+                    // the LocationChanged event below.
                 }
             );
 
