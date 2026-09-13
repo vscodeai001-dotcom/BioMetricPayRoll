@@ -51,8 +51,7 @@ public static class LiveLocationStore
         double distanceMeters,
         int allowedRadiusMeters,
         bool isWithinAllowedRadius,
-        Guid sessionId,
-        DateTime? capturedAtUtc = null)
+        Guid sessionId)
     {
         if (employeeId <= 0 ||
             sessionId == Guid.Empty ||
@@ -62,14 +61,6 @@ public static class LiveLocationStore
         }
 
         var now = DateTime.UtcNow;
-        var captureTime = capturedAtUtc.HasValue && capturedAtUtc.Value != default
-            ? capturedAtUtc.Value.ToUniversalTime()
-            : now;
-
-        // A delayed/retried GPS packet must never become the current live
-        // position merely because the server received it later.
-        if (captureTime > now.AddMinutes(2))
-            captureTime = now;
 
         var safeAccuracy =
             IsValidPositiveNumber(accuracyMeters)
@@ -104,7 +95,9 @@ public static class LiveLocationStore
                         IsWithinAllowedRadius = isWithinAllowedRadius,
                         LastUpdatedUtc = captureTime,
                         SessionStartedUtc = now,
-                        SessionId = sessionId
+                        SessionId = sessionId,
+                        SpeedMps = 0,
+                        MovementState = "Stopped"
                     };
 
                 if (Locations.TryAdd(
@@ -131,15 +124,33 @@ public static class LiveLocationStore
                 return false;
             }
 
-            // Monotonic timestamp guard: an older GPS fix cannot overwrite a
-            // newer fix already accepted for this employee/session.
+            // A delayed/retried GPS packet must never overwrite a newer
+            // accepted position merely because it reached the server later.
             if (captureTime < current.LastUpdatedUtc)
             {
-                // The request is valid, but older than the position already
-                // accepted for this session. Ignore it without treating the
-                // employee/session as invalid.
                 return true;
             }
+
+            var elapsedSeconds =
+                (captureTime - current.LastUpdatedUtc).TotalSeconds;
+
+            var movementDistanceMeters =
+                CalculateDistance(
+                    current.Latitude,
+                    current.Longitude,
+                    latitude,
+                    longitude);
+
+            // GPS fixes can occasionally jump. Only derive movement speed
+            // when the interval is sane and the jump is plausible.
+            var speedMps =
+                elapsedSeconds > 0.25 &&
+                elapsedSeconds <= 300 &&
+                movementDistanceMeters <= 5000
+                    ? movementDistanceMeters / elapsedSeconds
+                    : current.SpeedMps;
+
+            var movementState = GetMovementState(speedMps);
 
             var updatedLocation =
                 new LiveEmployeeLocation
@@ -153,7 +164,9 @@ public static class LiveLocationStore
                     IsWithinAllowedRadius = isWithinAllowedRadius,
                     LastUpdatedUtc = captureTime,
                     SessionStartedUtc = current.SessionStartedUtc,
-                    SessionId = sessionId
+                    SessionId = sessionId,
+                    SpeedMps = speedMps,
+                    MovementState = movementState
                 };
 
             if (Locations.TryUpdate(
@@ -325,6 +338,42 @@ public static class LiveLocationStore
             : duration;
     }
 
+    private static string GetMovementState(double speedMps)
+    {
+        if (!double.IsFinite(speedMps) || speedMps <= 0.5)
+            return "Stopped";
+
+        if (speedMps <= 2.0)
+            return "Walking";
+
+        if (speedMps <= 8.0)
+            return "Cycling";
+
+        return "Moving";
+    }
+
+    private static double CalculateDistance(
+        double lat1,
+        double lon1,
+        double lat2,
+        double lon2)
+    {
+        const double earthRadiusMeters = 6371000d;
+        var r1 = lat1 * Math.PI / 180d;
+        var r2 = lat2 * Math.PI / 180d;
+        var dLat = (lat2 - lat1) * Math.PI / 180d;
+        var dLon = (lon2 - lon1) * Math.PI / 180d;
+
+        var a =
+            Math.Sin(dLat / 2d) * Math.Sin(dLat / 2d) +
+            Math.Cos(r1) * Math.Cos(r2) *
+            Math.Sin(dLon / 2d) * Math.Sin(dLon / 2d);
+
+        a = Math.Clamp(a, 0d, 1d);
+        var c = 2d * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1d - a));
+        return earthRadiusMeters * c;
+    }
+
     private static bool IsValidCoordinate(
         double latitude,
         double longitude)
@@ -378,4 +427,16 @@ public sealed class LiveEmployeeLocation
     public DateTime SessionStartedUtc { get; init; }
 
     public Guid SessionId { get; init; }
+
+    /// <summary>
+    /// Derived speed from consecutive valid GPS fixes. Not persisted in the
+    /// existing database schema, so this enhancement does not alter payroll
+    /// data or existing database calculations.
+    /// </summary>
+    public double SpeedMps { get; init; }
+
+    /// <summary>
+    /// Derived movement state used by the live/offline tracking UI.
+    /// </summary>
+    public string MovementState { get; init; } = "Stopped";
 }
