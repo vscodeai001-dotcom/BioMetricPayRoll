@@ -1,0 +1,535 @@
+@page "/admin/offline-tracking-details"
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.EntityFrameworkCore
+@using global::Payroll.Shared.Data
+@using global::Payroll.Web.Services
+@implements IAsyncDisposable
+@inject IDbContextFactory<AppDbContext> DbFactory
+@attribute [Authorize(Roles = "Admin, SuperAdmin")]
+
+<PageTitle>Offline GPS Tracking Details</PageTitle>
+
+<div class="container-fluid py-3 enterprise-offline-page">
+    <div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-3">
+        <div>
+            <div class="small text-muted text-uppercase fw-bold">GPS Operations</div>
+            <h3 class="fw-bold mb-1"><i class="bi bi-cloud-slash me-2"></i>Offline GPS Tracking Details</h3>
+            <div class="text-muted">Enterprise view of offline capture, synchronization, GPS sessions, movement, geofence state and recovery history.</div>
+        </div>
+        <button class="btn btn-outline-primary" @onclick="LoadAsync" disabled="@loading">
+            <i class="bi bi-arrow-clockwise me-1"></i>@(loading ? "Loading..." : "Refresh")
+        </button>
+    </div>
+
+    <div class="alert alert-info border-0 shadow-sm">
+        <i class="bi bi-shield-check me-2"></i>
+        <strong>Audit model:</strong> device capture time is kept separately from server synchronization time.
+        Offline GPS points are never displayed as if they were captured when the phone reconnected.
+    </div>
+
+    <div class="row g-3 mb-4">
+        <Metric Title="Employees Tracked" Value="@summary.Employees" Icon="bi-people" />
+        <Metric Title="Offline Points" Value="@summary.OfflinePoints" Icon="bi-cloud-slash" />
+        <Metric Title="Offline Sessions" Value="@summary.OfflineSessions" Icon="bi-clock-history" />
+        <Metric Title="Pending / Unsynced" Value="@summary.Unsynced" Icon="bi-hourglass-split" />
+        <Metric Title="Total Distance" Value="@FormatDistance(summary.DistanceMeters)" Icon="bi-signpost-2" />
+        <Metric Title="Last Capture" Value="@FormatIst(summary.LastCaptureUtc)" Icon="bi-geo-alt" />
+    </div>
+
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <div>
+                <strong><i class="bi bi-funnel me-2"></i>Tracking Filters</strong>
+                <div class="small text-muted">Use these filters to investigate one employee, session or offline period.</div>
+            </div>
+            <button class="btn btn-sm btn-primary" @onclick="LoadAsync">Apply</button>
+        </div>
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-12 col-md-3">
+                    <label class="form-label">Employee</label>
+                    <select class="form-select" @bind="employeeFilter">
+                        <option value="0">All employees</option>
+                        @foreach (var e in employees)
+                        {
+                            <option value="@e.EmployeeID">@e.Name (#@e.EmployeeID)</option>
+                        }
+                    </select>
+                </div>
+                <div class="col-6 col-md-2">
+                    <label class="form-label">From</label>
+                    <input type="date" class="form-control" @bind="fromDate" />
+                </div>
+                <div class="col-6 col-md-2">
+                    <label class="form-label">To</label>
+                    <input type="date" class="form-control" @bind="toDate" />
+                </div>
+                <div class="col-12 col-md-2">
+                    <label class="form-label">Capture</label>
+                    <select class="form-select" @bind="captureFilter">
+                        <option value="">All</option>
+                        <option value="OfflineSync">Offline sync</option>
+                        <option value="Online">Online</option>
+                    </select>
+                </div>
+                <div class="col-12 col-md-3">
+                    <label class="form-label">Session ID</label>
+                    <input class="form-control" placeholder="Optional session GUID" @bind="sessionFilter" />
+                </div>
+            </div>
+        </div>
+    </div>
+
+    @if (error is not null)
+    {
+        <div class="alert alert-danger"><i class="bi bi-exclamation-triangle me-2"></i>@error</div>
+    }
+
+    @if (loading)
+    {
+        <div class="card border-0 shadow-sm p-5 text-center">
+            <span class="spinner-border me-2"></span>Loading enterprise tracking data...
+        </div>
+    }
+    else
+    {
+        <div class="row g-3 mb-4">
+            <div class="col-12 col-xl-7">
+                <div class="card shadow-sm border-0 h-100">
+                    <div class="card-header">
+                        <strong><i class="bi bi-broadcast-pin me-2"></i>Live / Session Health</strong>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-sm table-hover align-middle mb-0 tracking-table">
+                                <thead><tr><th>Employee</th><th>Status</th><th>Last GPS</th><th>Age</th><th>Movement</th><th>Speed</th><th>Radius</th></tr></thead>
+                                <tbody>
+                                @foreach (var row in liveRows)
+                                {
+                                    <tr>
+                                        <td><strong>@row.EmployeeName</strong><div class="small text-muted">#@row.EmployeeId</div></td>
+                                        <td><span class="badge @StatusClass(row.Status)">@row.Status</span></td>
+                                        <td>@FormatIst(row.LastUpdatedUtc)</td>
+                                        <td>@row.Age</td>
+                                        <td>@row.Movement</td>
+                                        <td>@row.SpeedKmh.ToString("F1") km/h</td>
+                                        <td>@(row.WithinRadius ? "IN" : "OUT")</td>
+                                    </tr>
+                                }
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-12 col-xl-5">
+                <div class="card shadow-sm border-0 h-100">
+                    <div class="card-header"><strong><i class="bi bi-diagram-3 me-2"></i>Offline Lifecycle</strong></div>
+                    <div class="card-body">
+                        <div class="lifecycle">
+                            <div><span>01</span><b>GPS Capture</b><small>Original device timestamp</small></div>
+                            <div><span>02</span><b>Local Queue</b><small>Preserve sequence and session</small></div>
+                            <div><span>03</span><b>Connectivity Recovery</b><small>Detect online transition</small></div>
+                            <div><span>04</span><b>Ordered Sync</b><small>Oldest event first</small></div>
+                            <div><span>05</span><b>Server ACK</b><small>Exact event acknowledged</small></div>
+                            <div><span>06</span><b>Audit / Replay</b><small>Original capture time retained</small></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card shadow-sm border-0 mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <strong><i class="bi bi-map me-2"></i>Offline Route / Point Ledger</strong>
+                <span class="badge bg-primary-subtle text-primary">@points.Count points</span>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive offline-ledger">
+                    <table class="table table-sm table-hover align-middle mb-0">
+                        <thead>
+                            <tr>
+                                <th>Capture IST</th><th>Employee</th><th>Session</th><th>Source</th>
+                                <th>Coordinates</th><th>Accuracy</th><th>Office Distance</th>
+                                <th>Radius</th><th>State</th><th>Speed</th><th>Sync IST</th><th>Batch</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        @foreach (var p in points)
+                        {
+                            <tr>
+                                <td class="nowrap">@FormatIst(p.CapturedAtUtc)</td>
+                                <td><strong>@p.EmployeeName</strong><div class="small text-muted">#@p.EmployeeId</div></td>
+                                <td><code>@ShortGuid(p.SessionId)</code></td>
+                                <td><span class="badge @(p.CaptureSource == "OfflineSync" ? "bg-warning text-dark" : "bg-secondary")">@p.CaptureSource</span></td>
+                                <td><code>@p.Latitude.ToString("F6"), @p.Longitude.ToString("F6")</code></td>
+                                <td>@p.AccuracyMeters.ToString("F1") m</td>
+                                <td>@p.DistanceMeters.ToString("F1") m</td>
+                                <td>@p.RadiusMeters m</td>
+                                <td><span class="badge @(p.WithinRadius ? "bg-success" : "bg-danger")">@(p.WithinRadius ? "IN" : "OUT")</span><div class="small text-muted">@p.Movement</div></td>
+                                <td>@p.SpeedKmh.ToString("F1") km/h</td>
+                                <td class="nowrap">@(p.SyncedAtUtc.HasValue ? FormatIst(p.SyncedAtUtc) : "Pending")</td>
+                                <td><code>@(p.SyncBatchId.HasValue ? ShortGuid(p.SyncBatchId.Value) : "-")</code></td>
+                            </tr>
+                        }
+                        </tbody>
+                    </table>
+                </div>
+                @if (!points.Any())
+                {
+                    <div class="p-4 text-center text-muted">No GPS points match the selected filters.</div>
+                }
+            </div>
+        </div>
+
+        <div class="row g-3">
+            <div class="col-12 col-xl-7">
+                <div class="card shadow-sm border-0">
+                    <div class="card-header"><strong><i class="bi bi-clock-history me-2"></i>GPS Session Ledger</strong></div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-sm table-hover align-middle mb-0">
+                                <thead><tr><th>Employee</th><th>Session</th><th>Started IST</th><th>Last GPS IST</th><th>Ended IST</th><th>Reason</th><th>Points</th><th>Distance</th></tr></thead>
+                                <tbody>
+                                @foreach (var s in sessions)
+                                {
+                                    <tr>
+                                        <td><strong>@s.EmployeeName</strong><div class="small text-muted">#@s.EmployeeId</div></td>
+                                        <td><code>@ShortGuid(s.SessionId)</code></td>
+                                        <td class="nowrap">@FormatIst(s.StartedUtc)</td>
+                                        <td class="nowrap">@FormatIst(s.LastUpdateUtc)</td>
+                                        <td class="nowrap">@(s.EndedUtc.HasValue ? FormatIst(s.EndedUtc) : "ACTIVE")</td>
+                                        <td>@(s.EndReason ?? "Active")</td>
+                                        <td>@s.TotalPoints</td>
+                                        <td>@FormatDistance(s.TotalDistanceMeters)</td>
+                                    </tr>
+                                }
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-12 col-xl-5">
+                <div class="card shadow-sm border-0">
+                    <div class="card-header"><strong><i class="bi bi-shield-check me-2"></i>Recovery / Audit Events</strong></div>
+                    <div class="card-body p-0">
+                        <div class="event-list">
+                            @foreach (var a in auditEvents)
+                            {
+                                <div class="event-row">
+                                    <div class="event-time">@FormatIst(a.Timestamp)</div>
+                                    <div class="event-main">
+                                        <div class="fw-semibold">@a.EventType</div>
+                                        <div class="small text-muted">@a.UserEmail · @a.EntityID</div>
+                                        <pre>@a.Details</pre>
+                                    </div>
+                                </div>
+                            }
+                        </div>
+                        @if (!auditEvents.Any())
+                        {
+                            <div class="p-4 text-center text-muted">No GPS recovery/audit events found.</div>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+</div>
+
+<style>
+.enterprise-offline-page { min-width: 0; }
+.enterprise-offline-page .card { border-radius: 14px; overflow: hidden; }
+.enterprise-offline-page .card-header { background: rgba(127,127,127,.08); border-bottom-color: rgba(127,127,127,.18); }
+.enterprise-offline-page .form-label { font-size: .82rem; font-weight: 700; }
+.tracking-table th, .offline-ledger th { white-space: nowrap; font-size: .72rem; text-transform: uppercase; letter-spacing: .03em; }
+.tracking-table td, .offline-ledger td { font-size: .78rem; }
+.nowrap { white-space: nowrap; }
+.offline-ledger { max-height: 520px; overflow: auto; }
+.offline-ledger table { min-width: 1200px; }
+.event-list { max-height: 460px; overflow: auto; }
+.event-row { display:flex; gap:12px; padding:12px 14px; border-bottom:1px solid rgba(127,127,127,.18); }
+.event-time { min-width:145px; font-size:.74rem; color:var(--bs-secondary-color); }
+.event-main { min-width:0; flex:1; }
+.event-main pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:.7rem; margin:.25rem 0 0; color:var(--bs-secondary-color); }
+.lifecycle { display:grid; gap:9px; }
+.lifecycle > div { display:grid; grid-template-columns:34px 1fr; column-gap:10px; align-items:center; }
+.lifecycle span { grid-row:span 2; width:30px; height:30px; border-radius:50%; display:grid; place-items:center; background:var(--bs-primary); color:#fff; font-size:.7rem; font-weight:700; }
+.lifecycle b { font-size:.84rem; }
+.lifecycle small { color:var(--bs-secondary-color); }
+@media (max-width: 767.98px) {
+    .enterprise-offline-page { padding-left:.25rem; padding-right:.25rem; }
+    .offline-ledger { margin:0; }
+    .event-time { min-width:0; }
+    .event-row { display:block; }
+    .event-time { margin-bottom:4px; }
+}
+</style>
+
+@code {
+    private bool loading;
+    private string? error;
+    private int employeeFilter;
+    private string captureFilter = "OfflineSync";
+    private string sessionFilter = "";
+    private DateTime fromDate = DateTime.Today.AddDays(-1);
+    private DateTime toDate = DateTime.Today;
+
+    private List<EmployeeOption> employees = new();
+    private List<LiveRow> liveRows = new();
+    private List<PointRow> points = new();
+    private List<SessionRow> sessions = new();
+    private List<AuditRow> auditEvents = new();
+    private Summary summary = new();
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        error = null;
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+
+            employees = await db.Employees.AsNoTracking()
+                .Where(x => !x.IsDeleted)
+                .OrderBy(x => x.Name)
+                .Select(x => new EmployeeOption { EmployeeID = x.EmployeeID, Name = x.Name })
+                .ToListAsync();
+
+            var fromUtc = IndiaToUtc(fromDate.Date);
+            var toUtc = IndiaToUtc(toDate.Date.AddDays(1));
+
+            var employeeIds = employeeFilter > 0
+                ? new[] { employeeFilter }
+                : null;
+
+            var historyQuery = db.EmployeeLocationHistory.AsNoTracking()
+                .Where(x => x.CapturedAtUtc >= fromUtc && x.CapturedAtUtc < toUtc);
+
+            if (employeeIds is not null)
+                historyQuery = historyQuery.Where(x => employeeIds.Contains(x.EmployeeId));
+
+            if (!string.IsNullOrWhiteSpace(captureFilter))
+                historyQuery = historyQuery.Where(x => x.CaptureSource == captureFilter);
+
+            if (Guid.TryParse(sessionFilter, out var sessionId))
+                historyQuery = historyQuery.Where(x => x.SessionId == sessionId);
+
+            var rawPoints = await (from p in historyQuery
+                                   join e in db.Employees.AsNoTracking() on p.EmployeeId equals e.EmployeeID
+                                   orderby p.CapturedAtUtc ascending
+                                   select new PointRow
+                                   {
+                                       EmployeeId = p.EmployeeId, EmployeeName = e.Name, SessionId = p.SessionId,
+                                       Latitude = p.Latitude, Longitude = p.Longitude, AccuracyMeters = p.AccuracyMeters,
+                                       DistanceMeters = p.DistanceFromOfficeMeters, RadiusMeters = p.AllowedRadiusMeters,
+                                       WithinRadius = p.IsWithinAllowedRadius, CapturedAtUtc = p.CapturedAtUtc,
+                                       CaptureSource = p.CaptureSource, SyncBatchId = p.SyncBatchId, SyncedAtUtc = p.SyncedAtUtc,
+                                       RecordedAtUtc = p.RecordedAtUtc
+                                   }).Take(2000).ToListAsync();
+
+            points = BuildPointRows(rawPoints);
+
+            var sessionQuery = db.EmployeeGpsSessions.AsNoTracking().AsQueryable();
+            if (employeeFilter > 0) sessionQuery = sessionQuery.Where(x => x.EmployeeId == employeeFilter);
+            if (Guid.TryParse(sessionFilter, out var sessionId2)) sessionQuery = sessionQuery.Where(x => x.SessionId == sessionId2);
+
+            var rawSessions = await (from s in sessionQuery
+                                     join e in db.Employees.AsNoTracking() on s.EmployeeId equals e.EmployeeID
+                                     where s.StartedAtUtc < toUtc &&
+                                           (s.EndedAtUtc == null || s.EndedAtUtc >= fromUtc)
+                                     orderby s.StartedAtUtc descending
+                                     select new SessionRow
+                                     {
+                                         EmployeeId = s.EmployeeId, EmployeeName = e.Name, SessionId = s.SessionId,
+                                         StartedUtc = s.StartedAtUtc, LastUpdateUtc = s.LastUpdateAtUtc,
+                                         EndedUtc = s.EndedAtUtc, EndReason = s.EndReason,
+                                         TotalPoints = s.TotalPoints, TotalDistanceMeters = s.TotalDistanceMeters
+                                     }).Take(500).ToListAsync();
+
+            sessions = rawSessions;
+
+            var live = LiveLocationStore.GetAll();
+            var names = employees.ToDictionary(x => x.EmployeeID, x => x.Name);
+            liveRows = live
+                .Where(x => employeeFilter == 0 || x.EmployeeId == employeeFilter)
+                .Select(x => new LiveRow
+                {
+                    EmployeeId = x.EmployeeId,
+                    EmployeeName = names.TryGetValue(x.EmployeeId, out var n) ? n : $"Employee #{x.EmployeeId}",
+                    Status = LiveLocationStore.GetStatus(x).ToString(),
+                    LastUpdatedUtc = x.LastUpdatedUtc,
+                    Age = FormatAge(LiveLocationStore.GetAge(x)),
+                    Movement = x.MovementState,
+                    SpeedKmh = x.SpeedMps * 3.6,
+                    WithinRadius = x.IsWithinAllowedRadius
+                })
+                .OrderBy(x => x.Status == "Live" ? 0 : x.Status == "Stale" ? 1 : 2)
+                .ThenBy(x => x.EmployeeName)
+                .ToList();
+
+            // AUTH_SESSION and GPS/offline related audit entries. Details are
+            // retained verbatim so this screen explains recovery decisions.
+            var auditQuery = db.AuditLogs.AsNoTracking()
+                .Where(x => x.Timestamp >= fromUtc && x.Timestamp < toUtc)
+                .Where(x =>
+                    x.ActionType.Contains("GPS") ||
+                    x.EntityType.Contains("Gps") ||
+                    x.EntityType.Contains("Location") ||
+                    x.ActionType.Contains("OFFLINE"));
+
+            if (employeeFilter > 0)
+                auditQuery = auditQuery.Where(x => x.EntityID == employeeFilter.ToString());
+
+            auditEvents = (await auditQuery
+                .OrderByDescending(x => x.Timestamp)
+                .Take(300)
+                .Select(x => new AuditRow
+                {
+                    Timestamp = x.Timestamp,
+                    UserEmail = x.UserEmail,
+                    EntityID = x.EntityID,
+                    EventType = x.ActionType + " / " + x.EntityType,
+                    Details = x.Details ?? ""
+                }).ToListAsync());
+
+            summary = new Summary
+            {
+                Employees = points.Select(x => x.EmployeeId).Distinct().Count(),
+                OfflinePoints = points.Count(x => x.CaptureSource == "OfflineSync"),
+                OfflineSessions = sessions.Count(x => x.EndedUtc.HasValue && (x.EndReason ?? "").Contains("OFFLINE", StringComparison.OrdinalIgnoreCase)),
+                Unsynced = points.Count(x => !x.SyncedAtUtc.HasValue && x.CaptureSource == "OfflineSync"),
+                DistanceMeters = sessions.Sum(x => x.TotalDistanceMeters),
+                LastCaptureUtc = points.Count == 0 ? null : points.Max(x => x.CapturedAtUtc)
+            };
+        }
+        catch (Exception ex)
+        {
+            error = "Unable to load offline tracking details: " + ex.Message;
+        }
+        finally { loading = false; }
+    }
+
+    private static List<PointRow> BuildPointRows(List<PointRow> rows)
+    {
+        var previous = new Dictionary<int, PointRow>();
+        foreach (var row in rows)
+        {
+            if (previous.TryGetValue(row.EmployeeId, out var prior))
+            {
+                var elapsed = (row.CapturedAtUtc - prior.CapturedAtUtc).TotalSeconds;
+                var distance = CalculateDistance(prior.Latitude, prior.Longitude, row.Latitude, row.Longitude);
+                var speed = elapsed > 0.25 && elapsed <= 300 && distance <= 5000 ? distance / elapsed : 0;
+                row.SpeedKmh = speed * 3.6;
+                row.Movement = GetMovement(speed);
+            }
+            previous[row.EmployeeId] = row;
+        }
+        return rows.OrderByDescending(x => x.CapturedAtUtc).ToList();
+    }
+
+    private static string GetMovement(double speedMps)
+    {
+        if (!double.IsFinite(speedMps) || speedMps <= .5) return "Stopped";
+        if (speedMps <= 2) return "Walking";
+        if (speedMps <= 8) return "Cycling";
+        return "Moving";
+    }
+
+    private static string FormatAge(TimeSpan age) =>
+        age == TimeSpan.MaxValue ? "Never" :
+        age.TotalHours >= 1 ? $"{(int)age.TotalHours}h {age.Minutes}m" :
+        $"{Math.Max(0, (int)age.TotalMinutes)}m {Math.Max(0, age.Seconds)}s";
+
+    private static double CalculateDistance(double aLat, double aLon, double bLat, double bLon)
+    {
+        const double r = 6371000d;
+        var p1 = aLat * Math.PI / 180d;
+        var p2 = bLat * Math.PI / 180d;
+        var dp = (bLat - aLat) * Math.PI / 180d;
+        var dl = (bLon - aLon) * Math.PI / 180d;
+        var a = Math.Sin(dp / 2) * Math.Sin(dp / 2) +
+                Math.Cos(p1) * Math.Cos(p2) * Math.Sin(dl / 2) * Math.Sin(dl / 2);
+        return r * 2 * Math.Atan2(Math.Sqrt(Math.Clamp(a, 0, 1)), Math.Sqrt(1 - Math.Clamp(a, 0, 1)));
+    }
+
+    private static string FormatDistance(double meters) =>
+        meters >= 1000 ? $"{meters / 1000d:F2} km" : $"{meters:F0} m";
+
+    private static string FormatIst(DateTime? utc) =>
+        utc.HasValue ? TimeZoneInfo.ConvertTimeFromUtc(
+            DateTime.SpecifyKind(utc.Value, DateTimeKind.Utc),
+            TimeZoneInfo.FindSystemTimeZoneById(OperatingSystem.IsWindows() ? "India Standard Time" : "Asia/Kolkata"))
+            .ToString("dd-MMM-yyyy HH:mm:ss") : "-";
+
+    private static DateTime IndiaToUtc(DateTime india) =>
+        TimeZoneInfo.ConvertTimeToUtc(
+            DateTime.SpecifyKind(india, DateTimeKind.Unspecified),
+            TimeZoneInfo.FindSystemTimeZoneById(OperatingSystem.IsWindows() ? "India Standard Time" : "Asia/Kolkata"));
+
+    private static string ShortGuid(Guid id) => id.ToString("N")[..8];
+
+    private static string StatusClass(string status) => status switch
+    {
+        "Live" => "bg-success",
+        "Stale" => "bg-warning text-dark",
+        _ => "bg-danger"
+    };
+
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+    private sealed class EmployeeOption { public int EmployeeID { get; set; } public string Name { get; set; } = ""; }
+    private sealed class LiveRow { public int EmployeeId { get; set; } public string EmployeeName { get; set; } = ""; public string Status { get; set; } = ""; public DateTime LastUpdatedUtc { get; set; } public string Age { get; set; } = ""; public string Movement { get; set; } = ""; public double SpeedKmh { get; set; } public bool WithinRadius { get; set; } }
+    private sealed class PointRow
+    {
+        public int EmployeeId { get; set; } public string EmployeeName { get; set; } = ""; public Guid SessionId { get; set; }
+        public double Latitude { get; set; } public double Longitude { get; set; } public double AccuracyMeters { get; set; }
+        public double DistanceMeters { get; set; } public int RadiusMeters { get; set; } public bool WithinRadius { get; set; }
+        public DateTime CapturedAtUtc { get; set; } public string CaptureSource { get; set; } = ""; public Guid? SyncBatchId { get; set; }
+        public DateTime? SyncedAtUtc { get; set; } public DateTime RecordedAtUtc { get; set; } public double SpeedKmh { get; set; } public string Movement { get; set; } = "Stopped";
+    }
+    private sealed class SessionRow
+    {
+        public int EmployeeId { get; set; } public string EmployeeName { get; set; } = ""; public Guid SessionId { get; set; }
+        public DateTime StartedUtc { get; set; } public DateTime LastUpdateUtc { get; set; } public DateTime? EndedUtc { get; set; }
+        public string? EndReason { get; set; } public int TotalPoints { get; set; } public double TotalDistanceMeters { get; set; }
+    }
+    private sealed class AuditRow { public DateTime Timestamp { get; set; } public string UserEmail { get; set; } = ""; public string? EntityID { get; set; } public string EventType { get; set; } = ""; public string Details { get; set; } = ""; }
+    private sealed class Summary { public int Employees { get; set; } public int OfflinePoints { get; set; } public int OfflineSessions { get; set; } public int Unsynced { get; set; } public double DistanceMeters { get; set; } public DateTime? LastCaptureUtc { get; set; } }
+}
+
+
+@* Local reusable metric component *@
+@code {
+    private RenderFragment Metric(string Title, string Value, string Icon) => builder =>
+    {
+        var seq = 0;
+        builder.OpenElement(seq++, "div");
+        builder.AddAttribute(seq++, "class", "col-6 col-lg-2");
+        builder.OpenElement(seq++, "div");
+        builder.AddAttribute(seq++, "class", "card border-0 shadow-sm p-3 h-100");
+        builder.OpenElement(seq++, "div");
+        builder.AddAttribute(seq++, "class", "d-flex justify-content-between align-items-start");
+        builder.OpenElement(seq++, "div");
+        builder.OpenElement(seq++, "small");
+        builder.AddAttribute(seq++, "class", "text-muted");
+        builder.AddContent(seq++, Title);
+        builder.CloseElement();
+        builder.OpenElement(seq++, "strong");
+        builder.AddAttribute(seq++, "class", "fs-4 d-block mt-1");
+        builder.AddContent(seq++, Value);
+        builder.CloseElement();
+        builder.CloseElement();
+        builder.OpenElement(seq++, "i");
+        builder.AddAttribute(seq++, "class", $"bi {Icon} fs-4 text-primary");
+        builder.CloseElement();
+        builder.CloseElement();
+        builder.CloseElement();
+        builder.CloseElement();
+    };
+}
