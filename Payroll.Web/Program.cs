@@ -9,6 +9,7 @@ using Hangfire.PostgreSql;
 
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Localization;
 using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Authorization;
@@ -339,6 +340,36 @@ builder.Services.AddScoped<
 
 
 builder.Services.AddHttpContextAccessor();
+
+// ============================================================
+// REVERSE PROXY / HTTPS FORWARDED HEADERS
+// ============================================================
+//
+// Render terminates TLS at its proxy and forwards the request to
+// the ASP.NET Core container. Without processing X-Forwarded-Proto,
+// ASP.NET Core can see the incoming request as HTTP even though the
+// browser is using HTTPS. Identity then generates redirects such as:
+//   http://biometric-payroll.onrender.com/Identity/Account/Login
+//
+// That HTTP redirect is blocked when /my-attendance is running inside
+// the HTTPS Blazor document/frame. Trust the Render proxy headers so
+// Request.Scheme remains HTTPS for authentication redirects, cookies,
+// antiforgery, and generated absolute URLs.
+//
+// Render's proxy IPs are dynamic, so the forwarded-header middleware
+// must not be restricted to a fixed proxy IP/network. The application
+// is intended to be reached through Render's ingress.
+// ============================================================
+
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders =
+        ForwardedHeaders.XForwardedFor |
+        ForwardedHeaders.XForwardedProto;
+
+    options.KnownNetworks.Clear();
+    options.KnownProxies.Clear();
+});
 
 builder.Services.AddAntiforgery();
 
@@ -930,8 +961,22 @@ if (!app.Environment.IsDevelopment())
 // MIDDLEWARE PIPELINE
 // ============================================================
 
-// HTTPS redirection intentionally disabled.
-// app.UseHttpsRedirection();
+// ============================================================
+// REVERSE PROXY HEADERS MUST RUN FIRST
+// ============================================================
+//
+// Render terminates HTTPS before forwarding traffic to Kestrel.
+// Process X-Forwarded-Proto before authentication so Identity sees
+// the original browser scheme (HTTPS), not Render's internal HTTP hop.
+// This prevents HTTPS pages from receiving HTTP Identity login URLs.
+// ============================================================
+
+app.UseForwardedHeaders();
+
+// Do not enable UseHttpsRedirection here. Render already performs the
+// public HTTPS termination/redirect, while the local Windows Service
+// deployment intentionally runs on HTTP. Forwarded headers are enough
+// to make generated authentication URLs use HTTPS on Render.
 
 app.UseStaticFiles();
 
