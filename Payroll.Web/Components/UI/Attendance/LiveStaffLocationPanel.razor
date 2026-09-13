@@ -3149,69 +3149,50 @@
             {
                 refreshQueued = false;
 
-                await using var db =
-                    await DbFactory.CreateDbContextAsync();
-
-                // EmployeeGpsSessions is the authoritative lifecycle source.
-                // Only EndedAtUtc == null sessions are allowed into the live
-                // collection, and only the newest active session per employee
-                // can appear. This prevents stale SignalR packets from creating
-                // phantom Live entries such as 3 Live / 2 employees.
+                /*
+                 * IMPORTANT:
+                 *
+                 * The process-local LiveLocationStore is the real-time source
+                 * of truth for the admin map. GPS updates are published into
+                 * this store by GeoLocationService BEFORE SignalR broadcasts
+                 * LocationChanged.
+                 *
+                 * The previous Phase 1 version replaced this with a mandatory
+                 * EmployeeGpsSessions database query. That introduced a bad
+                 * dependency for the live dashboard: if the DB session row was
+                 * not visible/active on the request that refreshed this Blazor
+                 * circuit, the map became empty even though the employee was
+                 * actively sending GPS updates.
+                 *
+                 * Keep the live map driven by LiveLocationStore. Database
+                 * history/session data remains authoritative for history,
+                 * playback and analytics. This also preserves the existing
+                 * real-time SignalR flow.
+                 */
                 var employeeIds = employees
                     .Select(e => e.EmployeeID)
+                    .ToHashSet();
+
+                var snapshot = LiveLocationStore.GetAll()
+                    .Where(x => employeeIds.Contains(x.EmployeeId))
                     .ToList();
-
-                // A GPS session is live only when it belongs to a current
-                // employee and the session itself is still active in the
-                // authoritative database. Device locks are intentionally NOT
-                // required here: web-browser employees have a valid GPS
-                // session even when their device-lock lifecycle is different
-                // from the mobile bearer lifecycle. Abandoned mobile sessions
-                // are closed by the dedicated mobile lease cleanup service.
-                var activeSessions = await (
-                    from session in db.EmployeeGpsSessions.AsNoTracking()
-                    join employee in db.Employees.AsNoTracking()
-                        on session.EmployeeId equals employee.EmployeeID
-                    where employeeIds.Contains(session.EmployeeId)
-                          && !employee.IsDeleted
-                          && !session.EndedAtUtc.HasValue
-                          && session.LastLatitude.HasValue
-                          && session.LastLongitude.HasValue
-                    orderby session.EmployeeId, session.StartedAtUtc descending
-                    select session)
-                    .ToListAsync();
-
-                var snapshot = new List<LiveEmployeeLocation>();
-                var seenEmployees = new HashSet<int>();
-
-                foreach (var session in activeSessions)
-                {
-                    if (!seenEmployees.Add(session.EmployeeId))
-                        continue;
-
-                    snapshot.Add(new LiveEmployeeLocation
-                    {
-                        EmployeeId = session.EmployeeId,
-                        Latitude = session.LastLatitude!.Value,
-                        Longitude = session.LastLongitude!.Value,
-                        AccuracyMeters = session.LastAccuracyMeters ?? 0,
-                        SpeedMps = session.LastSpeedMps ?? 0,
-                        MovementState = session.LastMovementState ?? "Stopped",
-                        DistanceMeters = session.LastDistanceFromOfficeMeters ?? 0,
-                        AllowedRadiusMeters = session.LastAllowedRadiusMeters ?? 0,
-                        IsWithinAllowedRadius = session.LastIsWithinAllowedRadius ?? false,
-                        LastUpdatedUtc = session.LastUpdateAtUtc,
-                        SessionStartedUtc = session.StartedAtUtc,
-                        SessionId = session.SessionId
-                    });
-                }
 
                 locations.Clear();
                 locations.AddRange(snapshot);
 
-                // Initialize currentOfficeRadius from DB on first load/refresh
-                var office = await GetOfficeLocation();
-                currentOfficeRadius = office.Radius;
+                // Initialize currentOfficeRadius from DB on first load/refresh.
+                // This is configuration only and does not control whether live
+                // employees are displayed on the map.
+                try
+                {
+                    var office = await GetOfficeLocation();
+                    currentOfficeRadius = office.Radius;
+                }
+                catch (Exception officeEx)
+                {
+                    Console.Error.WriteLine(
+                        $"Live location office configuration refresh failed: {officeEx}");
+                }
 
                 lastRefresh = DateTime.Now;
                 mapNeedsUpdate = true;
