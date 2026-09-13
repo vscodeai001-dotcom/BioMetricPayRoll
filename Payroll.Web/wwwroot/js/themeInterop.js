@@ -12,6 +12,19 @@ window.payrollEscapeHtml = function (value) {
 // THEME
 // ============================================================
 
+// Keep already-open tabs for the same browser in the user's selected theme.
+// The server-side per-user preference remains authoritative on circuit startup.
+// This is presentation-only and does not alter authentication or business data.
+try {
+    window.addEventListener('storage', function (event) {
+        if (event.key === 'payroll_theme' && (event.newValue === 'dark' || event.newValue === 'light')) {
+            if (window.themeInterop && typeof window.themeInterop.setThemeOnBody === 'function') {
+                window.themeInterop.setThemeOnBody(event.newValue);
+            }
+        }
+    });
+} catch (e) { }
+
 window.themeInterop = {
     setThemeOnBody: function (theme) {
         if (theme === 'dark') document.body.classList.add('dark');
@@ -3599,22 +3612,73 @@ window.updateAdminLiveStaffMap =
                         });
                     }
 
-                    const lineOptions = {
-                        color: markerColor,
-                        weight: 2,
-                        opacity: .8,
-                        dashArray: '6,6'
-                    };
+                    // Road routing is a selected-employee detail only.
+                    // The default live map shows every employee marker but does
+                    // not draw employee-to-office routes. This keeps the map
+                    // readable and avoids a route line for every employee.
+                    if (isSelected) {
+                        const lineOptions = {
+                            color: markerColor,
+                            weight: 2,
+                            opacity: .8,
+                            dashArray: '6,6'
+                        };
 
-                    if (!state.roadRouteCasings[employeeId]) {
-                        state.roadRouteCasings[employeeId] = L.polyline([], {
-                            color: '#ffffff', weight: 7, opacity: .72, lineCap: 'round', lineJoin: 'round'
-                        }).addTo(state.map);
-                    }
-                    if (!state.roadRouteLines[employeeId]) {
-                        state.roadRouteLines[employeeId] = L.polyline([], {
-                            color: '#1688ff', weight: 4, opacity: .95, lineCap: 'round', lineJoin: 'round'
-                        }).addTo(state.map);
+                        if (!state.roadRouteCasings[employeeId]) {
+                            state.roadRouteCasings[employeeId] = L.polyline([], {
+                                color: '#ffffff', weight: 7, opacity: .72, lineCap: 'round', lineJoin: 'round'
+                            }).addTo(state.map);
+                        }
+                        if (!state.roadRouteLines[employeeId]) {
+                            state.roadRouteLines[employeeId] = L.polyline([], {
+                                color: '#1688ff', weight: 4, opacity: .95, lineCap: 'round', lineJoin: 'round'
+                            }).addTo(state.map);
+                        }
+
+                        const routeState = state.routeStates[employeeId];
+                        const routeNow = Date.now();
+
+                        routeState.lastRawPosition = position.slice();
+                        routeState.lastRawPositionAt = routeNow;
+
+                        window.payrollRequestJourneyRoute(
+                            routeState,
+                            position,
+                            office,
+                            { minMoveMeters: 25, minIntervalMs: 30000 }
+                        ).then(function(route) {
+                            if (!route || !state.markers[employeeId] || Number(selectedId) !== employeeId) return;
+                            const remaining = route.distanceMeters || window.payrollHaversineMeters(state.markers[employeeId].getLatLng(), office);
+                            state.roadRouteCasings[employeeId]?.setLatLngs(route.geometry);
+                            state.roadRouteLines[employeeId]?.setLatLngs(route.geometry);
+                            const routeDistance = window.payrollFormatRouteDistance(remaining);
+                            const eta = window.payrollFormatRouteDuration(route.durationSeconds);
+
+                            const distanceElement = document.querySelector(`[data-selected-route-distance="${employeeId}"]`);
+                            if (distanceElement) distanceElement.innerText = routeDistance;
+
+                            const etaElement = document.querySelector(`[data-selected-eta="${employeeId}"]`);
+                            if (etaElement) etaElement.innerText = eta;
+
+                            const hoverSpeed = window.payrollFormatSpeed(x.speedMps || state.markers[employeeId]._speedMps || 0);
+                            const hoverWithin = Boolean(x.isWithinAllowedRadius);
+
+                            if (state.markers[employeeId].getTooltip()) {
+                                state.markers[employeeId].setTooltipContent(
+                                    window.payrollCreateAdminTooltipHtml(
+                                        x, initials.toUpperCase(), hoverWithin, distance, routeDistance, eta, hoverSpeed
+                                    )
+                                );
+                            }
+                        }).catch(function() {});
+                    } else {
+                        // Unselected employees must never retain an old route.
+                        try { state.roadRouteLines[employeeId]?.remove(); } catch (e) {}
+                        try { state.roadRouteCasings[employeeId]?.remove(); } catch (e) {}
+                        delete state.roadRouteLines[employeeId];
+                        delete state.roadRouteCasings[employeeId];
+                        try { state.routeStates[employeeId]?.controller?.abort(); } catch (e) {}
+                        delete state.routeStates[employeeId];
                     }
 
                     // Throttled road routing: actual GPS points trigger route refreshes,

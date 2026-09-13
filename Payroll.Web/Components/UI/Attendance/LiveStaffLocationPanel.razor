@@ -2722,8 +2722,11 @@
         {
             // Company/settings/employee CRUD can change the current live-map
             // membership or geofence presentation. Refresh only this component,
-            // not the whole Blazor circuit/page.
+            // not the whole Blazor circuit/page. This is intentionally a
+            // database-backed invalidation, not a browser Refresh-button action.
             await RefreshLocations();
+            mapNeedsUpdate = true;
+            await InvokeAsync(StateHasChanged);
         }
         catch (Exception ex)
         {

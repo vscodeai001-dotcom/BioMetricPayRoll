@@ -36,7 +36,12 @@ public sealed class MobileTokenAuthenticationHandler : AuthenticationHandler<Aut
 
         var token = header["Bearer ".Length..].Trim();
         if (!_tokens.TryRead(token, out var payload))
+        {
+            // Tell the mobile client this is an authoritative authentication
+            // failure. Network errors never reach this handler.
+            Response.Headers["X-Mobile-Session-State"] = "REAUTH_REQUIRED";
             return AuthenticateResult.Fail("Invalid or expired mobile session.");
+        }
 
         await using var db = await _dbFactory.CreateDbContextAsync(Context.RequestAborted);
         var lockRecord = await db.EmployeeDeviceLocks

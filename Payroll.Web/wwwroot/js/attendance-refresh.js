@@ -129,7 +129,7 @@ window.attendanceRefresh = (function () {
                     // Deliver the application-wide invalidation immediately.
                     // Database writes are already the source of truth; there is
                     // intentionally no artificial debounce here.
-                    await notifyApplicationListeners(data);
+                    await notifyApplicationListeners("ApplicationDataChanged", data);
 
                 }
             );
