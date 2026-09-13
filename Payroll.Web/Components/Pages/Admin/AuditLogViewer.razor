@@ -54,7 +54,7 @@ else
                 @foreach (var log in logs)
                 {
                     <tr>
-                        <td style="white-space:nowrap;">@log.Timestamp.ToString("dd-MMM-yyyy HH:mm:ss")</td>
+                        <td style="white-space:nowrap;">@ToIndiaTime(log.Timestamp).ToString("dd-MMM-yyyy HH:mm:ss")</td>
                         <td class="fw-bold">@log.UserEmail</td>
                         <td>
                             <span class="badge @GetBadgeColor(log.ActionType)">@log.ActionType</span>
@@ -90,8 +90,10 @@ else
         {
             using var db = await DbFactory.CreateDbContextAsync();
             
-            var queryStart = startDate.Date;
-            var queryEnd = endDate.Date.AddDays(1).AddTicks(-1);
+            // Audit timestamps are persisted as UTC (timestamp without time zone).
+            // Convert the selected Indian business-date range to UTC for querying.
+            var queryStart = IndiaToUtc(startDate.Date);
+            var queryEndExclusive = IndiaToUtc(endDate.Date.AddDays(1));
 
             var features = await db.FeatureSettings.AsNoTracking().FirstOrDefaultAsync(f => f.Id == 1);
             if (features != null && !features.EnableAuditLog)
@@ -102,7 +104,7 @@ else
 
             logs = await db.AuditLogs
                 .AsNoTracking()
-                .Where(l => l.Timestamp >= queryStart && l.Timestamp <= queryEnd)
+                .Where(l => l.Timestamp >= queryStart && l.Timestamp < queryEndExclusive)
                 .OrderByDescending(l => l.Timestamp)
                 .Take(500) // Safety limit
                 .ToListAsync();
@@ -115,6 +117,19 @@ else
             isLoading = false;
         }
     }
+
+    private static readonly TimeZoneInfo IndiaTimeZone =
+        TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata");
+
+    private static DateTime ToIndiaTime(DateTime value) =>
+        TimeZoneInfo.ConvertTimeFromUtc(
+            DateTime.SpecifyKind(value, DateTimeKind.Utc),
+            IndiaTimeZone);
+
+    private static DateTime IndiaToUtc(DateTime indiaTime) =>
+        TimeZoneInfo.ConvertTimeToUtc(
+            DateTime.SpecifyKind(indiaTime, DateTimeKind.Unspecified),
+            IndiaTimeZone);
 
     private string GetBadgeColor(string action) => action switch
     {

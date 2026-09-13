@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Payroll.Shared.Data;
 using System.Security.Claims;
@@ -34,6 +34,7 @@ namespace Payroll.Web.Services
 
             var log = new AuditLog
             {
+                Timestamp = DateTime.UtcNow,
                 UserID = userId,
                 UserEmail = userEmail,
                 ActionType = actionType,

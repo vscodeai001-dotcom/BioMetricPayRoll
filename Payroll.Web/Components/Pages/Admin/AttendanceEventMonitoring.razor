@@ -46,7 +46,7 @@ else
             @foreach (var item in events)
             {
                 <tr>
-                    <td style="white-space:nowrap">@item.Timestamp.ToString("dd-MMM-yyyy HH:mm:ss")</td>
+                    <td style="white-space:nowrap">@ToIndiaTime(item.Timestamp).ToString("dd-MMM-yyyy HH:mm:ss")</td>
                     <td><div class="fw-semibold">@item.UserEmail</div><div class="small text-muted">@item.EntityID</div></td>
                     <td><span class="badge @Badge(item.EventType)">@item.EventType</span></td>
                     <td><pre class="small mb-0" style="white-space:pre-wrap;max-width:900px">@item.Details</pre></td>
@@ -72,8 +72,8 @@ else
         try
         {
             await using var db = await DbFactory.CreateDbContextAsync();
-            var from = startDate.Date;
-            var to = endDate.Date.AddDays(1);
+            var from = IndiaToUtc(startDate.Date);
+            var to = IndiaToUtc(endDate.Date.AddDays(1));
             var raw = await db.AuditLogs.AsNoTracking()
                 .Where(x => x.ActionType == "AUTH_SESSION" && x.EntityType == "EmployeeAttendanceSession" && x.Timestamp >= from && x.Timestamp < to)
                 .OrderByDescending(x => x.Timestamp).Take(1000).ToListAsync();
@@ -82,6 +82,19 @@ else
         }
         finally { loading = false; }
     }
+
+    private static readonly TimeZoneInfo IndiaTimeZone =
+        TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata");
+
+    private static DateTime ToIndiaTime(DateTime value) =>
+        TimeZoneInfo.ConvertTimeFromUtc(
+            DateTime.SpecifyKind(value, DateTimeKind.Utc),
+            IndiaTimeZone);
+
+    private static DateTime IndiaToUtc(DateTime indiaTime) =>
+        TimeZoneInfo.ConvertTimeToUtc(
+            DateTime.SpecifyKind(indiaTime, DateTimeKind.Unspecified),
+            IndiaTimeZone);
 
     private static string ExtractEvent(string? details)
     {
