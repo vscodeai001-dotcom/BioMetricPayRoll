@@ -808,7 +808,7 @@
                             // DAILY PUNCHES
                             // ------------------------------------------------
 
-                            var dayPunches =
+                            var dayPunchLogs =
                                 relevantLogs
                                     .Where(
                                         l =>
@@ -821,9 +821,14 @@
                                     .OrderBy(
                                         l =>
                                             l.PunchTime)
-                                    .Select(
+                                    .ThenBy(
                                         l =>
-                                            l.PunchTime)
+                                            l.LogID)
+                                    .ToList();
+
+                            var dayPunches =
+                                dayPunchLogs
+                                    .Select(l => l.PunchTime)
                                     .ToList();
 
                             dto.Punches =
@@ -833,6 +838,26 @@
                                         p =>
                                             p.ToString(
                                                 "HH:mm")));
+
+                            // Diagnostic-only raw event details.
+                            // IMPORTANT: this does not alter, deduplicate, or re-order
+                            // the attendance calculation input. It only exposes the
+                            // exact database event source/time so repeated HH:mm values
+                            // can be traced safely.
+                            dto.RawPunchDetails = dayPunchLogs
+                                .Select(l => new AttendanceLogDto.RawPunchDetailDto
+                                {
+                                    LogID = l.LogID,
+                                    PunchTime = l.PunchTime,
+                                    Source = string.IsNullOrWhiteSpace(l.DeviceID)
+                                        ? (string.IsNullOrWhiteSpace(l.LogType) ? "Unknown" : l.LogType!)
+                                        : l.DeviceID!,
+                                    DeviceID = l.DeviceID ?? string.Empty,
+                                    BiometricID = l.BiometricID ?? string.Empty,
+                                    LogType = l.LogType ?? string.Empty,
+                                    IsApproved = l.IsApproved
+                                })
+                                .ToList();
 
                             // ------------------------------------------------
                             // BREAKS

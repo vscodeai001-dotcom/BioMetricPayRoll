@@ -1,13 +1,46 @@
-﻿@using global::Payroll.Web.Components.Pages.Attendance
+@using global::Payroll.Web.Components.Pages.Attendance
 @using global::Payroll.Web.Models
 
 <style>
     .raw-punches-cell {
-        width: 18rem;
-        max-width: 18rem;
+        width: 24rem;
+        max-width: 24rem;
         padding: .25rem !important;
         white-space: normal;
         overflow-wrap: anywhere;
+        vertical-align: top;
+    }
+
+    .raw-punch-detail-list {
+        display: flex;
+        flex-direction: column;
+        gap: .15rem;
+    }
+
+    .raw-punch-detail {
+        display: flex;
+        align-items: center;
+        gap: .35rem;
+        line-height: 1.25;
+        border-bottom: 1px dotted rgba(128, 128, 128, .25);
+        padding-bottom: .1rem;
+    }
+
+    .raw-punch-time {
+        font-weight: 700;
+        color: var(--bs-body-color);
+        min-width: 4.8rem;
+    }
+
+    .raw-punch-source {
+        font-weight: 600;
+        color: var(--bs-info-text-emphasis, inherit);
+    }
+
+    .raw-punch-logid,
+    .raw-punch-type {
+        font-size: .75rem;
+        opacity: .75;
     }
 </style>
 
@@ -222,10 +255,32 @@ else
 
                 @* ------------------------------------------------
                            RAW PUNCHES
+                           Diagnostic view: exact timestamp + source/device + LogID.
+                           Existing calculation remains unchanged.
                            ------------------------------------------------ *@
-                <td class="small text-muted raw-punches-cell"
-                    title="@record.Punches">
-                    @record.Punches
+                <td class="small raw-punches-cell"
+                    title="Exact raw attendance events. Existing calculation is unchanged.">
+                    @if (record.RawPunchDetails != null && record.RawPunchDetails.Any())
+                    {
+                        <div class="raw-punch-detail-list">
+                            @foreach (var punch in record.RawPunchDetails)
+                            {
+                                <div class="raw-punch-detail">
+                                    <span class="raw-punch-time">@punch.PunchTime.ToString("HH:mm:ss")</span>
+                                    <span class="raw-punch-source">@punch.Source</span>
+                                    <span class="raw-punch-logid">#@punch.LogID</span>
+                                    @if (!string.IsNullOrWhiteSpace(punch.LogType))
+                                    {
+                                        <span class="raw-punch-type">@punch.LogType</span>
+                                    }
+                                </div>
+                            }
+                        </div>
+                    }
+                    else
+                    {
+                        @record.Punches
+                    }
                 </td>
 
                 @* ------------------------------------------------

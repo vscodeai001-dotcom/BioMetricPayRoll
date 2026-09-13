@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 
 namespace Payroll.Web.Models
 {
@@ -32,5 +32,20 @@ namespace Payroll.Web.Models
         public TimeOnly? LunchOut { get; set; }
 
         public string Punches { get; set; } = string.Empty;
+
+        // Diagnostic details for each raw attendance event.
+        // This is display/audit data only and does not affect attendance calculation.
+        public List<RawPunchDetailDto> RawPunchDetails { get; set; } = new();
+
+        public class RawPunchDetailDto
+        {
+            public int LogID { get; set; }
+            public DateTime PunchTime { get; set; }
+            public string Source { get; set; } = string.Empty;
+            public string DeviceID { get; set; } = string.Empty;
+            public string BiometricID { get; set; } = string.Empty;
+            public string LogType { get; set; } = string.Empty;
+            public bool IsApproved { get; set; }
+        }
     }
 }
