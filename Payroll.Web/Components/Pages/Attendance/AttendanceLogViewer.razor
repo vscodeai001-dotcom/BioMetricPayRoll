@@ -205,6 +205,11 @@
 
     private int _refreshVersion = 0;
 
+    // Prevent overlapping realtime refreshes and ignore callbacks that arrive
+    // after the component has been disposed or its Blazor circuit is gone.
+    private readonly SemaphoreSlim _refreshGate = new(1, 1);
+    private bool _disposed = false;
+
     private static TimeSpan GetDisplayScheduledDuration(
         TimeOnly? start,
         TimeOnly? end,
@@ -347,34 +352,65 @@
     [JSInvokable]
     public async Task RefreshFromNotification()
     {
+        if (_disposed)
+            return;
+
         var version =
             Interlocked.Increment(
                 ref _refreshVersion);
 
         try
         {
-            await InvokeAsync(
-                async () =>
-                {
-                    // ------------------------------------------------
-                    // A new punch notification does NOT automatically
-                    // mean a full re-process.
-                    //
-                    // LoadLogs checks the punch fingerprint and only
-                    // recalculates changed employee/date combinations.
-                    // ------------------------------------------------
+            await _refreshGate.WaitAsync();
 
-                    await LoadLogs(
-                        autoProcessNewPunches: true);
+            try
+            {
+                if (_disposed)
+                    return;
 
-                    if (
-                        version ==
-                        Volatile.Read(
-                            ref _refreshVersion))
+                await InvokeAsync(
+                    async () =>
                     {
-                        StateHasChanged();
-                    }
-                });
+                        if (_disposed)
+                            return;
+
+                        // ------------------------------------------------
+                        // Realtime attendance notifications can arrive in
+                        // bursts. Only one refresh is allowed at a time.
+                        // LoadLogs still uses the existing punch fingerprint
+                        // logic, so unchanged records are not recalculated.
+                        // ------------------------------------------------
+
+                        await LoadLogs(
+                            autoProcessNewPunches: true);
+
+                        if (
+                            !_disposed &&
+                            version ==
+                            Volatile.Read(
+                                ref _refreshVersion))
+                        {
+                            StateHasChanged();
+                        }
+                    });
+            }
+            finally
+            {
+                _refreshGate.Release();
+            }
+        }
+        catch (ObjectDisposedException)
+        {
+            // Component/circuit was disposed while a realtime callback was
+            // in flight. This is an expected lifecycle condition.
+        }
+        catch (InvalidOperationException ex)
+        {
+            // Blazor can reject an InvokeAsync when the circuit is no longer
+            // usable. Do not let that failure propagate back into JavaScript.
+            _logger.LogDebug(
+                ex,
+                "Attendance realtime refresh skipped because the component circuit is unavailable.");
         }
         catch (Exception ex)
         {
@@ -390,6 +426,9 @@
 
     public async ValueTask DisposeAsync()
     {
+        _disposed = true;
+        Interlocked.Increment(ref _refreshVersion);
+
         if (_dotNetRef != null)
         {
             try
@@ -407,6 +446,8 @@
 
             _dotNetRef = null;
         }
+
+        _refreshGate.Dispose();
     }
 
     // ============================================================

@@ -6,6 +6,9 @@ window.attendanceRefresh = (function () {
     let retryTimer = null;
 
     let viewerRef = null;
+    let viewerRefreshTimer = null;
+    let viewerRefreshInFlight = false;
+    let viewerRefreshPending = false;
     let listeners = [];
     let applicationListeners = [];
 
@@ -681,19 +684,73 @@ window.attendanceRefresh = (function () {
         if (!viewerRef)
             return;
 
+        // Attendance can generate several SignalR notifications in a very
+        // short period. Debounce them so the Blazor component receives one
+        // controlled refresh instead of a burst of concurrent JS -> .NET
+        // invocations.
+        viewerRefreshPending = true;
+
+        if (viewerRefreshTimer !== null) {
+            clearTimeout(viewerRefreshTimer);
+        }
+
+        viewerRefreshTimer = setTimeout(
+            flushViewerRefresh,
+            350
+        );
+    }
+
+
+    async function flushViewerRefresh() {
+
+        viewerRefreshTimer = null;
+
+        if (viewerRefreshInFlight || !viewerRefreshPending)
+            return;
+
+        if (!viewerRef) {
+            viewerRefreshPending = false;
+            return;
+        }
+
+        viewerRefreshPending = false;
+        viewerRefreshInFlight = true;
+
+        const currentViewerRef = viewerRef;
+
         try {
 
-            await viewerRef.invokeMethodAsync(
+            await currentViewerRef.invokeMethodAsync(
                 "RefreshFromNotification"
             );
 
         }
         catch (error) {
 
-            console.warn(
-                "Attendance viewer refresh failed:",
+            // A disposed Blazor component can remain referenced briefly while
+            // SignalR is delivering an event. Clear only that stale reference
+            // so future notifications do not repeatedly invoke a dead circuit.
+            if (viewerRef === currentViewerRef) {
+                viewerRef = null;
+            }
+
+            console.debug(
+                "Attendance viewer refresh skipped because the viewer is no longer available.",
                 error
             );
+        }
+        finally {
+
+            viewerRefreshInFlight = false;
+
+            // If another event arrived while the previous refresh was running,
+            // schedule exactly one follow-up refresh.
+            if (viewerRefreshPending && viewerRef) {
+                viewerRefreshTimer = setTimeout(
+                    flushViewerRefresh,
+                    100
+                );
+            }
         }
     }
 
@@ -808,6 +865,13 @@ window.attendanceRefresh = (function () {
 
         if (viewerRef === dotNetReference) {
             viewerRef = null;
+        }
+
+        viewerRefreshPending = false;
+
+        if (viewerRefreshTimer !== null) {
+            clearTimeout(viewerRefreshTimer);
+            viewerRefreshTimer = null;
         }
     }
 
