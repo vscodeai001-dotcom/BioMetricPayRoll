@@ -12,38 +12,61 @@ window.payrollEscapeHtml = function (value) {
 // THEME
 // ============================================================
 
-// Keep already-open tabs for the same browser in the user's selected theme.
-// The server-side per-user preference remains authoritative on circuit startup.
-// This is presentation-only and does not alter authentication or business data.
-try {
-    window.addEventListener('storage', function (event) {
-        if (event.key === 'payroll_theme' && (event.newValue === 'dark' || event.newValue === 'light')) {
-            if (window.themeInterop && typeof window.themeInterop.setThemeOnBody === 'function') {
-                window.themeInterop.setThemeOnBody(event.newValue);
-            }
-        }
-    });
-} catch (e) { }
-
+// Theme is persisted per authenticated user on the server.
+// Browser storage is only a small same-user/tab cache and is namespaced
+// by the authenticated user's stable key so one user can never inherit
+// another user's theme on the same browser.
 window.themeInterop = {
+    _themeStorageKey: function (userKey) {
+        var key = String(userKey || 'anonymous').trim().toLowerCase();
+        return 'payroll_theme_' + (key || 'anonymous');
+    },
+
     setThemeOnBody: function (theme) {
-        if (theme === 'dark') document.body.classList.add('dark');
-        else document.body.classList.remove('dark');
+        var normalized = theme === 'dark' ? 'dark' : 'light';
+        document.body.classList.toggle('dark', normalized === 'dark');
+        document.documentElement.setAttribute('data-theme', normalized);
     },
-    saveTheme: function (theme) {
-        try { localStorage.setItem('payroll_theme', theme); }
-        catch (e) { console.warn('Unable to save theme to localStorage', e); }
+
+    saveTheme: function (theme, userKey) {
+        var normalized = theme === 'dark' ? 'dark' : 'light';
+        try {
+            localStorage.setItem(this._themeStorageKey(userKey), normalized);
+        } catch (e) {
+            console.warn('Unable to save theme cache to localStorage', e);
+        }
+        this.setThemeOnBody(normalized);
     },
-    loadTheme: function () {
-        try { return localStorage.getItem('payroll_theme') || 'light'; }
-        catch (e) { console.warn('Unable to read theme from localStorage', e); return 'light'; }
+
+    loadTheme: function (userKey) {
+        try {
+            return localStorage.getItem(this._themeStorageKey(userKey)) || 'light';
+        } catch (e) {
+            console.warn('Unable to read theme cache from localStorage', e);
+            return 'light';
+        }
     },
-    applySavedTheme: function () {
-        var theme = this.loadTheme();
+
+    applySavedTheme: function (userKey) {
+        var theme = this.loadTheme(userKey);
         this.setThemeOnBody(theme);
         return theme;
     }
 };
+
+// Keep already-open tabs for the same authenticated user synchronized.
+// MainLayout passes the user-specific key when saving the preference.
+try {
+    window.addEventListener('storage', function (event) {
+        if (!event.key || event.key.indexOf('payroll_theme_') !== 0) return;
+        if (event.newValue !== 'dark' && event.newValue !== 'light') return;
+
+        if (window.themeInterop &&
+            typeof window.themeInterop.setThemeOnBody === 'function') {
+            window.themeInterop.setThemeOnBody(event.newValue);
+        }
+    });
+} catch (e) { }
 
 // ============================================================
 // GEOLOCATION - ROBUST CURRENT POSITION
