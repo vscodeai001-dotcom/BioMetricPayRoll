@@ -301,13 +301,14 @@ public sealed class MobileEmployeeController : ControllerBase
             request.Accuracy,
             distance.DistanceMeters,
             distance.AllowedRadiusMeters,
-            distance.IsWithinAllowedRadius);
+            distance.IsWithinAllowedRadius,
+            request.Speed);
 
         if (!sessionUpdated)
             return Conflict(new { success = false, message = "GPS session is no longer active." });
 
         await _geo.SaveLocationHistoryAsync(employeeId, sessionId, request.Latitude, request.Longitude,
-            distance.DistanceMeters, distance.AllowedRadiusMeters, distance.IsWithinAllowedRadius, request.Accuracy);
+            distance.DistanceMeters, distance.AllowedRadiusMeters, distance.IsWithinAllowedRadius, request.Accuracy, request.Speed);
 
         await using (var db = await _dbFactory.CreateDbContextAsync())
         {

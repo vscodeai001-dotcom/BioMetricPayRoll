@@ -12,8 +12,8 @@ public static class LiveLocationStore
     //
     // These values effectively ensure a session remains considered live
     // for years unless explicitly removed (e.g., on logout or session end).
-    public const int LiveTimeoutSeconds = 60 * 60 * 24 * 365 * 10; // ~10 years
-    public const int StaleTimeoutSeconds = 60 * 60 * 24 * 365 * 20; // ~20 years
+    public const int LiveTimeoutSeconds = 60; // 0-60s = Live
+    public const int StaleTimeoutSeconds = 180; // 60-180s = Stale; 180s+ = Offline
 
     /*
      * ============================================================
@@ -51,7 +51,9 @@ public static class LiveLocationStore
         double distanceMeters,
         int allowedRadiusMeters,
         bool isWithinAllowedRadius,
-        Guid sessionId)
+        Guid sessionId,
+        double speedMps = 0,
+        string movementState = "Stopped")
     {
         if (employeeId <= 0 ||
             sessionId == Guid.Empty ||
@@ -91,6 +93,8 @@ public static class LiveLocationStore
                         Longitude = longitude,
                         AccuracyMeters = safeAccuracy,
                         DistanceMeters = safeDistance,
+                        SpeedMps = IsValidPositiveNumber(speedMps) ? speedMps : 0,
+                        MovementState = movementState,
                         AllowedRadiusMeters = safeRadius,
                         IsWithinAllowedRadius = isWithinAllowedRadius,
                         LastUpdatedUtc = now,
@@ -130,6 +134,8 @@ public static class LiveLocationStore
                     Longitude = longitude,
                     AccuracyMeters = safeAccuracy,
                     DistanceMeters = safeDistance,
+                    SpeedMps = IsValidPositiveNumber(speedMps) ? speedMps : 0,
+                    MovementState = movementState,
                     AllowedRadiusMeters = safeRadius,
                     IsWithinAllowedRadius = isWithinAllowedRadius,
                     LastUpdatedUtc = now,
@@ -349,6 +355,10 @@ public sealed class LiveEmployeeLocation
     public double AccuracyMeters { get; init; }
 
     public double DistanceMeters { get; init; }
+
+    public double SpeedMps { get; init; }
+
+    public string MovementState { get; init; } = "Stopped";
 
     public int AllowedRadiusMeters { get; init; }
 

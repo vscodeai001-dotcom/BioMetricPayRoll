@@ -85,20 +85,29 @@ window.EmployeeGpsTracker = (function () {
         });
     }
 
-    function idbGetAllAndClear() {
+    function idbGetAll() {
+        return idbOpen().then(function (db) {
+            return new Promise(function (resolve, reject) {
+                try {
+                    const tx = db.transaction(IDB_STORE_NAME, 'readonly');
+                    const store = tx.objectStore(IDB_STORE_NAME);
+                    const req = store.getAll();
+                    req.onsuccess = function () { resolve(req.result || []); };
+                    req.onerror = function (e) { reject(e); };
+                }
+                catch (e) { reject(e); }
+            });
+        });
+    }
+
+    function idbDelete(id) {
         return idbOpen().then(function (db) {
             return new Promise(function (resolve, reject) {
                 try {
                     const tx = db.transaction(IDB_STORE_NAME, 'readwrite');
-                    const store = tx.objectStore(IDB_STORE_NAME);
-                    const req = store.getAll();
-                    req.onsuccess = function () {
-                        const items = req.result || [];
-                        const clearReq = store.clear();
-                        clearReq.onsuccess = function () { resolve(items); };
-                        clearReq.onerror = function (e) { reject(e); };
-                    };
-                    req.onerror = function (e) { reject(e); };
+                    tx.objectStore(IDB_STORE_NAME).delete(id);
+                    tx.oncomplete = function () { resolve(true); };
+                    tx.onerror = function (e) { reject(e); };
                 }
                 catch (e) { reject(e); }
             });
@@ -488,6 +497,7 @@ window.EmployeeGpsTracker = (function () {
                 latitude: coords.latitude,
                 longitude: coords.longitude,
                 accuracy: coords.accuracy,
+                speed: (typeof coords.speed === 'number' && isFinite(coords.speed) && coords.speed >= 0) ? coords.speed : null,
                 timestamp: now
             };
 
@@ -510,7 +520,9 @@ window.EmployeeGpsTracker = (function () {
             const locationData = {
                 latitude: coords.latitude,
                 longitude: coords.longitude,
-                accuracy: coords.accuracy
+                accuracy: coords.accuracy,
+                speed: (typeof coords.speed === 'number' && isFinite(coords.speed) && coords.speed >= 0) ? coords.speed : null,
+                capturedAtUtc: new Date(now).toISOString()
             };
 
             // IMPORTANT:
@@ -533,7 +545,9 @@ window.EmployeeGpsTracker = (function () {
     // Queues updates if network is offline
     // ============================================================
 
-    function sendLocationViaHttpApi(locationData) {
+    function sendLocationViaHttpApi(locationData, fromQueue) {
+
+        fromQueue = fromQueue === true;
 
         if (!employeeId || !apiEndpoint) {
             console.warn('Cannot send GPS via HTTP: employeeId or apiEndpoint not set');
@@ -546,11 +560,13 @@ window.EmployeeGpsTracker = (function () {
             latitude: locationData.latitude,
             longitude: locationData.longitude,
             accuracy: locationData.accuracy,
-            timestamp: new Date().toISOString()
+            speedMps: locationData.speed,
+            capturedAtUtc: locationData.capturedAtUtc || new Date().toISOString(),
+            timestamp: locationData.capturedAtUtc || new Date().toISOString()
         };
 
         const attemptSend = function (attempt) {
-            fetch(apiEndpoint, {
+            return fetch(apiEndpoint, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -561,23 +577,23 @@ window.EmployeeGpsTracker = (function () {
             .then(response => {
                 if (response.ok) {
                     console.log('GPS location sent via HTTP API');
-                    // reset attempts
                     if (retryAttemptsMap && retryAttemptsMap[payload.timestamp]) {
                         delete retryAttemptsMap[payload.timestamp];
                     }
+                    return true;
                 }
-                else {
-                    console.warn('HTTP API returned status ' + response.status);
-                    scheduleRetryOrQueue(locationData, attempt);
-                }
+                console.warn('HTTP API returned status ' + response.status);
+                if (!fromQueue) scheduleRetryOrQueue(locationData, attempt);
+                return false;
             })
             .catch(error => {
                 console.warn('Failed to send GPS via HTTP API, scheduling retry:', error);
-                scheduleRetryOrQueue(locationData, attempt);
+                if (!fromQueue) scheduleRetryOrQueue(locationData, attempt);
+                return false;
             });
         };
 
-        attemptSend(0);
+        return attemptSend(0);
     }
 
     function scheduleRetryOrQueue(locationData, previousAttempt) {
@@ -641,7 +657,9 @@ window.EmployeeGpsTracker = (function () {
                 latitude: locationData.latitude,
                 longitude: locationData.longitude,
                 accuracy: locationData.accuracy,
-                timestamp: new Date().toISOString()
+                speed: locationData.speed,
+                capturedAtUtc: locationData.capturedAtUtc || new Date().toISOString(),
+                timestamp: locationData.capturedAtUtc || new Date().toISOString()
             };
 
             idbAddLocation(record).then(function () {
@@ -675,48 +693,49 @@ window.EmployeeGpsTracker = (function () {
     // ============================================================
 
     function processQueuedLocations() {
-        // Try IndexedDB first
-        idbGetAllAndClear().then(function (items) {
-            if (!items || items.length === 0) {
-                // Fallback to localStorage
-                try {
-                    const queueJson = localStorage.getItem(LOCATION_QUEUE_STORAGE_KEY);
-                    if (!queueJson) return;
-                    const queue = JSON.parse(queueJson);
-                    if (!queue || queue.length === 0) return;
-                    console.log('Processing ' + queue.length + ' queued GPS locations (localStorage fallback)');
-                    queue.forEach(function (locationData, index) {
-                        setTimeout(function () { sendLocationViaHttpApi(locationData); }, index * 500);
-                    });
-                    localStorage.removeItem(LOCATION_QUEUE_STORAGE_KEY);
-                }
-                catch (e) {
-                    // ignore
-                }
+        // Never clear the queue before the server confirms receipt. A network
+        // drop during synchronization must not destroy offline GPS history.
+        idbGetAll().then(function (items) {
+            if (items && items.length > 0) {
+                console.log('Processing ' + items.length + ' queued GPS locations (IndexedDB)');
+                items.forEach(function (locationData, index) {
+                    setTimeout(function () {
+                        sendLocationViaHttpApi(locationData, true).then(function (ok) {
+                            if (ok && locationData.id != null) {
+                                idbDelete(locationData.id).catch(function () { });
+                            }
+                        }).catch(function () { });
+                    }, index * 350);
+                });
                 return;
             }
 
-            console.log('Processing ' + items.length + ' queued GPS locations (IndexedDB)');
-
-            items.forEach(function (locationData, index) {
-                setTimeout(function () { sendLocationViaHttpApi(locationData); }, index * 500);
-            });
-        }).catch(function (err) {
-            console.error('Failed to read IndexedDB queue, falling back to localStorage:', err);
+            // localStorage fallback is only removed after all records were
+            // successfully acknowledged by the API.
             try {
                 const queueJson = localStorage.getItem(LOCATION_QUEUE_STORAGE_KEY);
                 if (!queueJson) return;
                 const queue = JSON.parse(queueJson);
-                if (!queue || queue.length === 0) return;
+                if (!Array.isArray(queue) || queue.length === 0) return;
+
                 console.log('Processing ' + queue.length + ' queued GPS locations (localStorage fallback)');
+                let completed = 0;
                 queue.forEach(function (locationData, index) {
-                    setTimeout(function () { sendLocationViaHttpApi(locationData); }, index * 500);
+                    setTimeout(function () {
+                        sendLocationViaHttpApi(locationData, true).then(function (ok) {
+                            if (ok) completed++;
+                            if (completed === queue.length) {
+                                localStorage.removeItem(LOCATION_QUEUE_STORAGE_KEY);
+                            }
+                        }).catch(function () { });
+                    }, index * 350);
                 });
-                localStorage.removeItem(LOCATION_QUEUE_STORAGE_KEY);
             }
             catch (e) {
-                // ignore
+                console.warn('Failed to process localStorage GPS queue:', e);
             }
+        }).catch(function (err) {
+            console.error('Failed to read IndexedDB queue:', err);
         });
     }
 

@@ -20,6 +20,23 @@ namespace Payroll.Shared.Data
         /// </summary>
         public double AccuracyMeters { get; set; }
 
+        /// <summary>Device-reported or server-calculated instantaneous speed in metres/second.</summary>
+        public double SpeedMps { get; set; }
+
+        /// <summary>Movement classification derived from validated GPS speed.</summary>
+        public string MovementState { get; set; } = "Stopped";
+
+        /// <summary>Online for immediate delivery, OfflineSync for later device synchronization.</summary>
+        public string CaptureSource { get; set; } = "Online";
+
+        /// <summary>Original device capture time. For online points this normally equals receipt time.</summary>
+        public DateTime CapturedAtUtc { get; set; }
+
+        /// <summary>Offline batch identifier, when the point was synchronized later.</summary>
+        public Guid? SyncBatchId { get; set; }
+
+        public DateTime? SyncedAtUtc { get; set; }
+
         public double DistanceFromOfficeMeters { get; set; }
 
         public int AllowedRadiusMeters { get; set; }

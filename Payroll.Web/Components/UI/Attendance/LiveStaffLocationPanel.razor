@@ -8,6 +8,7 @@
 @inject IJSRuntime JSRuntime
 @inject LocationHistoryService LocationHistoryService
 @inject IDbContextFactory<AppDbContext> DbFactory
+@inject NavigationManager Navigation
 
 <div class="live-staff-card card border-0 shadow-sm mb-4 @(isPlaybackFullscreen ? "replay-fullscreen" : "")">
 
@@ -34,6 +35,14 @@
                 <span class="live-count-dot"></span>
                 @liveCount Live / @employees.Count
             </span>
+
+            <button type="button"
+                    class="btn btn-outline-secondary btn-sm"
+                    @onclick="OpenOfflineTracking"
+                    title="GPS connection and offline tracking">
+                <i class="bi bi-cloud-slash me-1"></i>
+                <span class="d-none d-md-inline">Offline Monitor</span>
+            </button>
 
             <button type="button"
                     class="btn btn-outline-primary btn-sm"
@@ -146,6 +155,14 @@
                             <div class="selected-metric">
                                 <span><i class="bi bi-hourglass-split"></i> Tracking</span>
                                 <strong>@FormatDuration(GetSessionDuration(selectedLocation))</strong>
+                            </div>
+                            <div class="selected-metric">
+                                <span><i class="bi bi-speedometer2"></i> Speed</span>
+                                <strong>@FormatSpeed(selectedLocation.SpeedMps)</strong>
+                            </div>
+                            <div class="selected-metric">
+                                <span><i class="bi bi-activity"></i> Movement</span>
+                                <strong>@selectedLocation.MovementState</strong>
                             </div>
                             <div class="selected-metric">
                                 <span><i class="bi bi-broadcast-pin"></i> Last update</span>
@@ -422,6 +439,8 @@
                                     <th>Time</th>
                                     <th>Result</th>
                                     <th>Accuracy</th>
+                                    <th>Speed</th>
+                                    <th>Movement</th>
                                     <th>Distance</th>
                                     <th>Allowed</th>
                                     <th>Geofence</th>
@@ -618,6 +637,36 @@
                         <div>
                             <small>GPS POINTS</small>
                             <strong>@selectedHistory.Count</strong>
+                        </div>
+
+                        <div>
+                            <small>TRAVEL</small>
+                            <strong>@FormatDistance(HistoryTravelDistance)</strong>
+                        </div>
+
+                        <div>
+                            <small>MOVING TIME</small>
+                            <strong>@FormatDuration(HistoryMovingTime)</strong>
+                        </div>
+
+                        <div>
+                            <small>STATIONARY TIME</small>
+                            <strong>@FormatDuration(HistoryStationaryTime)</strong>
+                        </div>
+
+                        <div>
+                            <small>IDLE TIME</small>
+                            <strong>@FormatDuration(HistoryIdleTime)</strong>
+                        </div>
+
+                        <div>
+                            <small>STOPS</small>
+                            <strong>@HistoryStopCount</strong>
+                        </div>
+
+                        <div>
+                            <small>MAX SPEED</small>
+                            <strong>@FormatSpeed(HistoryMaxSpeedMps)</strong>
                         </div>
 
                         <div>
@@ -831,6 +880,8 @@
                                         <td><span class="history-point-number">@(i + 1)</span></td>
                                         <td class="fw-semibold">@(ToLocalTime(point.RecordedAtUtc).ToString("HH:mm:ss"))</td>
                                         <td>@FormatAccuracy(point.AccuracyMeters)</td>
+                                        <td>@FormatSpeed(point.SpeedMps)</td>
+                                        <td><span class="badge bg-light text-dark">@point.MovementState</span></td>
                                         <td>@FormatDistance(point.DistanceFromOfficeMeters)</td>
                                         <td>@point.AllowedRadiusMeters m</td>
                                         <td>
@@ -2784,6 +2835,8 @@
                 Latitude = latitude,
                 Longitude = longitude,
                 AccuracyMeters = TryGetJsonDouble(json, "AccuracyMeters", out var accVal) ? accVal : 0,
+                SpeedMps = TryGetJsonDouble(json, "SpeedMps", out var speedVal) ? speedVal : 0,
+                MovementState = TryGetJsonString(json, "MovementState", out var stateVal) ? stateVal : "Stopped",
                 DistanceMeters = TryGetJsonDouble(json, "DistanceMeters", out var distVal) ? distVal : 0,
                 AllowedRadiusMeters = TryGetJsonInt(json, "AllowedRadiusMeters", out var radVal) ? radVal : 0,
                 IsWithinAllowedRadius = TryGetJsonBool(json, "IsWithinAllowedRadius", out var withinVal) ? withinVal : true,
@@ -2822,6 +2875,12 @@
             AccuracyMeters = TryGetJsonDouble(json, "AccuracyMeters", out var accuracyVal)
                 ? accuracyVal
                 : existing.AccuracyMeters,
+            SpeedMps = TryGetJsonDouble(json, "SpeedMps", out var speedVal)
+                ? speedVal
+                : existing.SpeedMps,
+            MovementState = TryGetJsonString(json, "MovementState", out var movementStateVal)
+                ? movementStateVal
+                : existing.MovementState,
             DistanceMeters = TryGetJsonDouble(json, "DistanceMeters", out var distanceVal)
                 ? distanceVal
                 : existing.DistanceMeters,
@@ -3136,6 +3195,8 @@
                         Latitude = session.LastLatitude!.Value,
                         Longitude = session.LastLongitude!.Value,
                         AccuracyMeters = session.LastAccuracyMeters ?? 0,
+                        SpeedMps = session.LastSpeedMps ?? 0,
+                        MovementState = session.LastMovementState ?? "Stopped",
                         DistanceMeters = session.LastDistanceFromOfficeMeters ?? 0,
                         AllowedRadiusMeters = session.LastAllowedRadiusMeters ?? 0,
                         IsWithinAllowedRadius = session.LastIsWithinAllowedRadius ?? false,
@@ -3205,6 +3266,12 @@
             Console.Error.WriteLine(
                 $"Admin GPS session-end refresh failed: {ex}");
         }
+    }
+
+
+    private void OpenOfflineTracking()
+    {
+        Navigation.NavigateTo("/admin/offline-tracking");
     }
 
 
@@ -3318,6 +3385,8 @@
                     AllowedRadiusMeters = x.AllowedRadiusMeters,
                     IsWithinAllowedRadius = x.IsWithinAllowedRadius,
                     AccuracyMeters = x.AccuracyMeters,
+                    SpeedMps = x.SpeedMps,
+                    MovementState = x.MovementState,
                     LastUpdatedUtc = x.LastUpdatedUtc,
                     SessionStartedUtc = x.SessionStartedUtc,
                     Status = GetLocationStatus(x).ToString()
@@ -3765,7 +3834,16 @@
                 var points = g.OrderBy(x => x.RecordedAtUtc).ToList();
                 double travel = 0;
                 for (int i = 1; i < points.Count; i++)
-                    travel += CalculateDistance(points[i - 1].Latitude, points[i - 1].Longitude, points[i].Latitude, points[i].Longitude);
+                {
+                    var previous = points[i - 1];
+                    var current = points[i];
+                    var seconds = (current.RecordedAtUtc - previous.RecordedAtUtc).TotalSeconds;
+                    var segment = CalculateDistance(previous.Latitude, previous.Longitude, current.Latitude, current.Longitude);
+                    var segmentSpeed = seconds > 0 ? segment / seconds : 0;
+                    if (previous.AccuracyMeters <= 80 && current.AccuracyMeters <= 80 &&
+                        seconds >= 1 && seconds <= 300 && segment >= 10 && segmentSpeed <= 55.56)
+                        travel += segment;
+                }
                 var accuracies = points.Where(x => x.AccuracyMeters > 0).Select(x => x.AccuracyMeters).ToList();
                 return new SessionSummary
                 {
@@ -4214,23 +4292,91 @@
             if (selectedHistory.Count < 2)
                 return 0;
 
+            var points = selectedHistory.OrderBy(x => x.RecordedAtUtc).ToList();
             double total = 0;
 
-            for (int i = 1;
-                 i < selectedHistory.Count;
-                 i++)
+            for (int i = 1; i < points.Count; i++)
             {
-                total += CalculateDistance(
-                    selectedHistory[i - 1].Latitude,
-                    selectedHistory[i - 1].Longitude,
-                    selectedHistory[i].Latitude,
-                    selectedHistory[i].Longitude);
+                var previous = points[i - 1];
+                var current = points[i];
+                var seconds = (current.RecordedAtUtc - previous.RecordedAtUtc).TotalSeconds;
+                var accuracyOk = current.AccuracyMeters <= 80 && previous.AccuracyMeters <= 80;
+                var segment = CalculateDistance(previous.Latitude, previous.Longitude, current.Latitude, current.Longitude);
+                var speed = seconds > 0 ? segment / seconds : 0;
+
+                if (accuracyOk && seconds >= 1 && seconds <= 300 && segment >= 10 && speed <= 55.56)
+                    total += segment;
             }
 
             return total;
         }
     }
 
+    private TimeSpan HistoryMovingTime => SumHistoryTime("Moving");
+    private TimeSpan HistoryStationaryTime => SumHistoryTime("Stopped");
+    private TimeSpan HistoryIdleTime => SumHistoryTime("Idle");
+
+    private TimeSpan SumHistoryTime(string state)
+    {
+        if (selectedHistory.Count < 2) return TimeSpan.Zero;
+        var points = selectedHistory.OrderBy(x => x.RecordedAtUtc).ToList();
+        double secondsTotal = 0;
+        for (int i = 1; i < points.Count; i++)
+        {
+            var previous = points[i - 1];
+            var current = points[i];
+            var seconds = (current.RecordedAtUtc - previous.RecordedAtUtc).TotalSeconds;
+            if (seconds >= 1 && seconds <= 300 &&
+                string.Equals(previous.MovementState, state, StringComparison.OrdinalIgnoreCase))
+                secondsTotal += seconds;
+        }
+        return TimeSpan.FromSeconds(secondsTotal);
+    }
+
+    private double HistoryMaxSpeedMps => selectedHistory.Count == 0
+        ? 0
+        : selectedHistory.Where(x => double.IsFinite(x.SpeedMps) && x.SpeedMps >= 0).Select(x => x.SpeedMps).DefaultIfEmpty().Max();
+
+    private int HistoryStopCount
+    {
+        get
+        {
+            if (selectedHistory.Count < 2) return 0;
+            var points = selectedHistory.OrderBy(x => x.RecordedAtUtc).ToList();
+            var count = 0;
+            var inStop = false;
+            DateTime? stopStart = null;
+
+            for (int i = 1; i < points.Count; i++)
+            {
+                var p = points[i - 1];
+                var c = points[i];
+                var seconds = (c.RecordedAtUtc - p.RecordedAtUtc).TotalSeconds;
+                var distance = CalculateDistance(p.Latitude, p.Longitude, c.Latitude, c.Longitude);
+                var stationary = seconds >= 1 && seconds <= 300 &&
+                                 distance <= 50 &&
+                                 string.Equals(p.MovementState, "Stopped", StringComparison.OrdinalIgnoreCase);
+
+                if (stationary)
+                {
+                    if (!inStop)
+                    {
+                        inStop = true;
+                        stopStart = p.RecordedAtUtc;
+                    }
+                }
+                else if (inStop)
+                {
+                    if (stopStart.HasValue && (p.RecordedAtUtc - stopStart.Value).TotalMinutes >= 5) count++;
+                    inStop = false;
+                    stopStart = null;
+                }
+            }
+
+            if (inStop && stopStart.HasValue && (points[^1].RecordedAtUtc - stopStart.Value).TotalMinutes >= 5) count++;
+            return count;
+        }
+    }
 
     private static double CalculateDistance(
         double lat1,
@@ -4411,6 +4557,13 @@
             ? $"{meters:F0} m"
             : $"{meters / 1000:F2} km";
 
+    private static string FormatSpeed(double speedMps)
+    {
+        if (!double.IsFinite(speedMps) || speedMps <= 0.05) return "0 km/h";
+        return $"{speedMps * 3.6:F1} km/h";
+    }
+
+
     private static string FormatAccuracy(double meters)
     {
         if (meters <= 0)
@@ -4585,6 +4738,10 @@
         public bool IsWithinAllowedRadius { get; set; }
 
         public double AccuracyMeters { get; set; }
+
+        public double SpeedMps { get; set; }
+
+        public string MovementState { get; set; } = "Stopped";
 
         public DateTime LastUpdatedUtc { get; set; }
 

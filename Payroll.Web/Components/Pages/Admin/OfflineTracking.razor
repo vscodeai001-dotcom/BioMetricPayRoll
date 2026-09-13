@@ -1,0 +1,206 @@
+@page "/admin/offline-tracking"
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.EntityFrameworkCore
+@using global::Payroll.Shared.Data
+@using global::Payroll.Web.Services
+@implements IAsyncDisposable
+@inject IDbContextFactory<AppDbContext> DbFactory
+@inject IJSRuntime JSRuntime
+@attribute [Authorize(Roles = "Admin, SuperAdmin")]
+
+<PageTitle>GPS Connection & Offline Tracking</PageTitle>
+
+<div class="container-fluid py-3 offline-tracking-page">
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+        <div>
+            <h3 class="fw-bold mb-1"><i class="bi bi-cloud-slash text-primary me-2"></i>GPS Connection & Offline Tracking</h3>
+            <p class="text-muted mb-0">Live connection health and the last known employee GPS state.</p>
+        </div>
+        <button class="btn btn-outline-primary" @onclick="Refresh" disabled="@loading">
+            <i class="bi bi-arrow-clockwise @(loading ? "spin" : "") me-1"></i>Refresh
+        </button>
+    </div>
+
+    <div class="row g-3 mb-4">
+        <div class="col-6 col-lg-3"><div class="card border-0 shadow-sm p-3"><small class="text-muted">Live</small><strong class="fs-3 text-success">@liveCount</strong></div></div>
+        <div class="col-6 col-lg-3"><div class="card border-0 shadow-sm p-3"><small class="text-muted">Stale</small><strong class="fs-3 text-warning">@staleCount</strong></div></div>
+        <div class="col-6 col-lg-3"><div class="card border-0 shadow-sm p-3"><small class="text-muted">Offline</small><strong class="fs-3 text-danger">@offlineCount</strong></div></div>
+        <div class="col-6 col-lg-3"><div class="card border-0 shadow-sm p-3"><small class="text-muted">Last refresh</small><strong class="fs-6">@lastRefreshText</strong></div></div>
+    </div>
+
+    @if (loading)
+    {
+        <div class="card border-0 shadow-sm p-4 text-center"><span class="spinner-border spinner-border-sm me-2"></span>Loading GPS connection status...</div>
+    }
+    else if (rows.Count == 0)
+    {
+        <div class="card border-0 shadow-sm p-4 text-center text-muted">No active GPS sessions are currently registered.</div>
+    }
+    else
+    {
+        <div class="card border-0 shadow-sm overflow-hidden">
+            <div class="table-responsive">
+                <table class="table table-hover align-middle mb-0">
+                    <thead><tr><th>Employee</th><th>Status</th><th>Last update</th><th>Age</th><th>Movement</th><th>Speed</th><th>Last location</th></tr></thead>
+                    <tbody>
+                    @foreach (var row in rows)
+                    {
+                        <tr>
+                            <td><strong>@row.EmployeeName</strong><div class="small text-muted">ID @row.EmployeeId</div></td>
+                            <td><span class="badge @row.StatusClass">@row.Status</span></td>
+                            <td>@ToLocal(row.LastUpdatedUtc).ToString("dd MMM yyyy HH:mm:ss")</td>
+                            <td>@FormatAge(row.Age)</td>
+                            <td>@row.MovementState</td>
+                            <td>@FormatSpeed(row.SpeedMps)</td>
+                            <td><code>@row.Latitude.ToString("F6"), @row.Longitude.ToString("F6")</code><div class="small text-muted">@row.Geofence</div></td>
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    }
+
+    <div class="card border-0 shadow-sm mt-4 p-4">
+        <div class="d-flex align-items-start gap-3">
+            <i class="bi bi-database-check fs-3 text-primary"></i>
+            <div>
+                <h5 class="fw-bold mb-1">Offline movement sync</h5>
+                <p class="text-muted mb-2">The web side is prepared to receive offline GPS batches. Android Phase 4 will add the device-side offline queue, connection-reason reporting, background collection, and chronological synchronization when the network returns.</p>
+                <div class="small text-muted">This screen intentionally does not guess whether a disconnect was caused by airplane mode, carrier loss, or another network problem. The Android device will report the exact reason when that phase is connected.</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+    .offline-tracking-page .card { border-radius: 14px; }
+    .offline-tracking-page .table thead th { white-space: nowrap; font-size: .78rem; text-transform: uppercase; letter-spacing: .03em; }
+    .offline-tracking-page code { font-size: .78rem; }
+</style>
+
+@code {
+    private bool loading;
+    private DateTime? lastRefresh;
+    private List<Row> rows = new();
+    private List<OfflineSyncRow> offlineSyncRows = new();
+    private PeriodicTimer? timer;
+    private CancellationTokenSource? cts;
+
+    private int liveCount => rows.Count(x => x.Status == "Live");
+    private int staleCount => rows.Count(x => x.Status == "Stale");
+    private int offlineCount => rows.Count(x => x.Status == "Offline");
+    private int offlineSyncCount => offlineSyncRows.Count;
+    private string lastRefreshText => lastRefresh.HasValue ? ToLocal(lastRefresh.Value).ToString("HH:mm:ss") : "-";
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Refresh();
+        cts = new CancellationTokenSource();
+        timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
+        _ = RefreshLoopAsync(cts.Token);
+    }
+
+    private async Task Refresh()
+    {
+        if (loading) return;
+        loading = true;
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var employees = await db.Employees.AsNoTracking().Where(e => !e.IsDeleted).ToDictionaryAsync(e => e.EmployeeID, e => e.Name);
+            offlineSyncRows = await (from point in db.EmployeeLocationHistory.AsNoTracking()
+                                      join employee in db.Employees.AsNoTracking() on point.EmployeeId equals employee.EmployeeID
+                                      where point.CaptureSource == "OfflineSync" && point.CapturedAtUtc >= DateTime.UtcNow.Date
+                                      orderby point.CapturedAtUtc descending
+                                      select new OfflineSyncRow
+                                      {
+                                          EmployeeName = employee.Name,
+                                          CapturedAtUtc = point.CapturedAtUtc,
+                                          SyncedAtUtc = point.SyncedAtUtc,
+                                          SpeedMps = point.SpeedMps,
+                                          MovementState = point.MovementState,
+                                          IsWithinAllowedRadius = point.IsWithinAllowedRadius,
+                                          Latitude = point.Latitude,
+                                          Longitude = point.Longitude
+                                      }).Take(500).ToListAsync();
+
+            rows = LiveLocationStore.GetAll().Select(location =>
+            {
+                var status = LiveLocationStore.GetStatus(location);
+                var age = LiveLocationStore.GetAge(location);
+                return new Row
+                {
+                    EmployeeId = location.EmployeeId,
+                    EmployeeName = employees.TryGetValue(location.EmployeeId, out var name) ? name : "Employee",
+                    Status = status.ToString(),
+                    StatusClass = status switch { LiveLocationStatus.Live => "bg-success-subtle text-success", LiveLocationStatus.Stale => "bg-warning-subtle text-warning-emphasis", _ => "bg-danger-subtle text-danger" },
+                    LastUpdatedUtc = location.LastUpdatedUtc,
+                    Age = age,
+                    MovementState = location.MovementState,
+                    SpeedMps = location.SpeedMps,
+                    Latitude = location.Latitude,
+                    Longitude = location.Longitude,
+                    Geofence = location.IsWithinAllowedRadius ? "Within range" : "Outside range"
+                };
+            }).OrderBy(x => x.Status == "Live" ? 0 : x.Status == "Stale" ? 1 : 2).ThenBy(x => x.EmployeeName).ToList();
+            lastRefresh = DateTime.UtcNow;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task RefreshLoopAsync(CancellationToken token)
+    {
+        if (timer == null) return;
+        try
+        {
+            while (await timer.WaitForNextTickAsync(token))
+            {
+                await InvokeAsync(async () => { await Refresh(); StateHasChanged(); });
+            }
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private static string FormatSpeed(double speedMps) => !double.IsFinite(speedMps) || speedMps <= .05 ? "0 km/h" : $"{speedMps * 3.6:F1} km/h";
+    private static string FormatAge(TimeSpan age) => age.TotalDays >= 1 ? $"{(int)age.TotalDays}d {age.Hours}h" : age.TotalHours >= 1 ? $"{(int)age.TotalHours}h {age.Minutes}m" : $"{Math.Max(0, (int)age.TotalMinutes)}m {Math.Max(0, age.Seconds)}s";
+    private static DateTime ToLocal(DateTime utc) => TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), TimeZoneInfo.FindSystemTimeZoneById(OperatingSystem.IsWindows() ? "India Standard Time" : "Asia/Kolkata"));
+
+    public async ValueTask DisposeAsync()
+    {
+        try { cts?.Cancel(); } catch { }
+        cts?.Dispose();
+        timer?.Dispose();
+        await Task.CompletedTask;
+    }
+
+    private sealed class OfflineSyncRow
+    {
+        public string EmployeeName { get; set; } = "Employee";
+        public DateTime CapturedAtUtc { get; set; }
+        public DateTime? SyncedAtUtc { get; set; }
+        public double SpeedMps { get; set; }
+        public string MovementState { get; set; } = "Stopped";
+        public bool IsWithinAllowedRadius { get; set; }
+        public double Latitude { get; set; }
+        public double Longitude { get; set; }
+    }
+
+    private sealed class Row
+    {
+        public int EmployeeId { get; set; }
+        public string EmployeeName { get; set; } = "";
+        public string Status { get; set; } = "Offline";
+        public string StatusClass { get; set; } = "bg-secondary";
+        public DateTime LastUpdatedUtc { get; set; }
+        public TimeSpan Age { get; set; }
+        public string MovementState { get; set; } = "Stopped";
+        public double SpeedMps { get; set; }
+        public double Latitude { get; set; }
+        public double Longitude { get; set; }
+        public string Geofence { get; set; } = "-";
+    }
+}

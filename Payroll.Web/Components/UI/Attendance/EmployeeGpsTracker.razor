@@ -406,7 +406,8 @@
                         accuracy,
                         distanceResult.DistanceMeters,
                         distanceResult.AllowedRadiusMeters,
-                        distanceResult.IsWithinAllowedRadius);
+                        distanceResult.IsWithinAllowedRadius,
+                        coords.Speed);
 
                 if (!sessionUpdated)
                 {
@@ -445,7 +446,10 @@
                         distanceResult.DistanceMeters,
                         distanceResult.AllowedRadiusMeters,
                         distanceResult.IsWithinAllowedRadius,
-                        accuracy);
+                        accuracy,
+                        coords.Speed,
+                        null,
+                        coords.CapturedAtUtc);
                 }
                 catch (Exception historyEx)
                 {
@@ -468,6 +472,8 @@
                         Latitude = coords.Latitude,
                         Longitude = coords.Longitude,
                         AccuracyMeters = accuracy,
+                        SpeedMps = coords.Speed,
+                        MovementState = GeoLocationService.ClassifyMovement(coords.Speed),
                         DistanceMeters = distanceResult.DistanceMeters,
                         AllowedRadiusMeters = distanceResult.AllowedRadiusMeters,
                         IsWithinAllowedRadius = distanceResult.IsWithinAllowedRadius,
@@ -689,5 +695,9 @@
         public double Longitude { get; set; }
 
         public double Accuracy { get; set; }
+
+        public double Speed { get; set; }
+
+        public DateTime CapturedAtUtc { get; set; } = DateTime.UtcNow;
     }
 }
