@@ -158,13 +158,12 @@
                 "payrollDocumentTitle",
                 Navigation.Uri);
 
-            var savedTheme = persistedTheme;
-
-            if (string.IsNullOrWhiteSpace(savedTheme))
-            {
-                savedTheme = await JSRuntime.InvokeAsync<string>(
-                    "themeInterop.loadTheme");
-            }
+            // For an authenticated user the database preference is authoritative.
+            // Never inherit another user's browser-local theme when this circuit
+            // starts with no saved preference.
+            var savedTheme = !string.IsNullOrWhiteSpace(persistedTheme)
+                ? persistedTheme
+                : "light";
 
             await JSRuntime.InvokeVoidAsync(
                 "themeInterop.setThemeOnBody",
