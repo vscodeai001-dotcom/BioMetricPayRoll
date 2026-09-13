@@ -117,7 +117,12 @@ public class GpsSessionCleanupService : BackgroundService
             // Their explicit ANDROID device lease is therefore reconciled
             // separately. Browser sessions keep the existing indefinite
             // device-lock semantics.
-            await ReconcileAbandonedMobileSessionsAsync(db, stoppingToken);
+            //
+            // UPDATE: To ensure 24/7 connectivity and prevent "401 Disconnected"
+            // errors, we no longer automatically remove ANDROID locks.
+            // Mobile sessions are now authoritative and permanent until
+            // an explicit logout or device replacement occurs.
+            // await ReconcileAbandonedMobileSessionsAsync(db, stoppingToken);
 
             // ================================================================
             // PHASE 2: MARK SESSIONS AS TIMED OUT (30+ minutes no updates)

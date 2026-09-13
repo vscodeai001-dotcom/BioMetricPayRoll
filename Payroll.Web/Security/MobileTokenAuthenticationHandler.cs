@@ -70,7 +70,10 @@ public sealed class MobileTokenAuthenticationHandler : AuthenticationHandler<Aut
         }
 
         lockRecord.LastSeenAtUtc = DateTime.UtcNow;
-        await db.SaveChangesAsync(Context.RequestAborted);
+
+        // Ensure the mobile heartbeat is saved even if the request is aborted
+        // by a rapid socket close or poor network.
+        await db.SaveChangesAsync(CancellationToken.None);
 
         var employee = await db.Employees
             .AsNoTracking()
