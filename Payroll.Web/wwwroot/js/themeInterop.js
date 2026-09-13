@@ -1687,7 +1687,6 @@ window.payrollCreateAdminTooltipHtml = function (data, initials, withinRange, di
            `<span><small>Road Distance</small><b>${tooltipDistance}</b></span>` +
            `<span><small>ETA</small><b>${tooltipEta}</b></span>` +
            `<span><small>Speed</small><b>${tooltipSpeed}</b></span>` +
-           `<span><small>Movement</small><b>${window.escapeAdminHtml(data.movementState || 'Stopped')}</b></span>` +
            `<span><small>Allowed Radius</small><b>${data.allowedRadiusMeters || 0} m</b></span>` +
            `<span><small>Accuracy</small><b>±${Math.round(data.accuracyMeters || 0)} m</b></span>` +
            `</div></div>`;

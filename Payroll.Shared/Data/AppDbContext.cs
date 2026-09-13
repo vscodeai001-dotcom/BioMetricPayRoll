@@ -287,33 +287,6 @@ public class AppDbContext
                     "accuracy_meters")
                 .IsRequired();
 
-            entity.Property(x => x.SpeedMps)
-                .HasColumnName("speed_mps")
-                .IsRequired();
-
-            entity.Property(x => x.MovementState)
-                .HasColumnName("movement_state")
-                .HasMaxLength(20)
-                .IsRequired();
-
-            entity.Property(x => x.CaptureSource)
-                .HasColumnName("capture_source")
-                .HasMaxLength(20)
-                .IsRequired();
-
-            entity.Property(x => x.CapturedAtUtc)
-                .HasColumnName("captured_at_utc")
-                .IsRequired();
-
-            entity.Property(x => x.SyncBatchId)
-                .HasColumnName("sync_batch_id");
-
-            entity.Property(x => x.SyncedAtUtc)
-                .HasColumnName("synced_at_utc");
-
-            entity.HasIndex(x => new { x.EmployeeId, x.CaptureSource, x.CapturedAtUtc });
-            entity.HasIndex(x => x.SyncBatchId);
-
 
             entity.Property(x => x.DistanceFromOfficeMeters)
                 .IsRequired();

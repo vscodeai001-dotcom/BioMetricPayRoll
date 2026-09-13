@@ -38,19 +38,6 @@ public class EmployeeGpsSession
     [Column("last_accuracy_meters")]
     public double? LastAccuracyMeters { get; set; }
 
-    [Column("last_speed_mps")]
-    public double? LastSpeedMps { get; set; }
-
-    [Column("last_movement_state")]
-    [MaxLength(20)]
-    public string? LastMovementState { get; set; }
-
-    [Column("total_moving_seconds")]
-    public double TotalMovingSeconds { get; set; }
-
-    [Column("total_stationary_seconds")]
-    public double TotalStationarySeconds { get; set; }
-
     [Column("last_distance_from_office_meters")]
     public double? LastDistanceFromOfficeMeters { get; set; }
 

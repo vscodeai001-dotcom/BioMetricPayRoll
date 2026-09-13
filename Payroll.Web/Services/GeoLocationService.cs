@@ -306,8 +306,7 @@ public class GeoLocationService
         double accuracyMeters,
         double distanceMeters,
         int allowedRadiusMeters,
-        bool isWithinAllowedRadius,
-        double? speedMps = null)
+        bool isWithinAllowedRadius)
     {
         if (employeeId <= 0 ||
             sessionId == Guid.Empty ||
@@ -380,64 +379,6 @@ public class GeoLocationService
                 var safeDistance = NormalizeDistance(distanceMeters);
                 var now = DateTime.UtcNow;
                 var previousLocationState = session.LastIsWithinAllowedRadius;
-
-                // Phase 1 GPS analytics: calculate a validated segment from the
-                // previous accepted fix. Never add distance-from-office to the
-                // travel total. GPS accuracy and time-gap guards suppress common
-                // GPS jumps and long disconnected gaps.
-                var segmentDistanceMeters = 0d;
-                var segmentSeconds = 0d;
-                var calculatedSpeedMps =
-                    speedMps.HasValue &&
-                    double.IsFinite(speedMps.Value) &&
-                    speedMps.Value >= 0 &&
-                    speedMps.Value <= 55.56 &&
-                    safeAccuracy <= 80
-                        ? speedMps.Value
-                        : 0d;
-
-                if (session.LastLatitude.HasValue &&
-                    session.LastLongitude.HasValue &&
-                    session.LastUpdateAtUtc > DateTime.MinValue)
-                {
-                    segmentSeconds = (now - session.LastUpdateAtUtc).TotalSeconds;
-                    if (segmentSeconds >= 1 && segmentSeconds <= 300)
-                    {
-                        segmentDistanceMeters = CalculateDistance(
-                            session.LastLatitude.Value,
-                            session.LastLongitude!.Value,
-                            latitude,
-                            longitude);
-
-                        var accuracyAllowsSegment =
-                            safeAccuracy <= 80 &&
-                            (session.LastAccuracyMeters ?? safeAccuracy) <= 80;
-
-                        var candidateSpeed = segmentSeconds > 0
-                            ? segmentDistanceMeters / segmentSeconds
-                            : 0;
-
-                        // 55.56 m/s = 200 km/h. Higher values are treated as
-                        // GPS jumps, not real movement, for this field-sales
-                        // tracker.
-                        if (!accuracyAllowsSegment || candidateSpeed > 55.56)
-                        {
-                            segmentDistanceMeters = 0;
-                            candidateSpeed = 0;
-                        }
-
-                        calculatedSpeedMps =
-                            speedMps.HasValue &&
-                            double.IsFinite(speedMps.Value) &&
-                            speedMps.Value >= 0 &&
-                            speedMps.Value <= 55.56 &&
-                            safeAccuracy <= 80
-                                ? speedMps.Value
-                                : candidateSpeed;
-                    }
-                }
-
-                var movementState = ClassifyMovement(calculatedSpeedMps);
 
                 var stableLocationState = ResolveStableGeofenceState(
                     previousLocationState,
@@ -512,17 +453,7 @@ public class GeoLocationService
                     allowedRadiusMeters < 0 ? 0 : allowedRadiusMeters;
 
                 session.TotalPoints++;
-                session.TotalDistanceMeters += segmentDistanceMeters;
-                session.LastSpeedMps = calculatedSpeedMps;
-                session.LastMovementState = movementState;
-
-                // Only count a bounded interval between fixes. Idle time is
-                // deliberately separate from moving/stationary totals.
-                var boundedSeconds = Math.Min(Math.Max(segmentSeconds, 0), 300);
-                if (movementState == "Moving")
-                    session.TotalMovingSeconds += boundedSeconds;
-                else if (movementState == "Stopped")
-                    session.TotalStationarySeconds += boundedSeconds;
+                session.TotalDistanceMeters += safeDistance;
 
                 if (session.TotalPoints == 1)
                 {
@@ -549,9 +480,7 @@ public class GeoLocationService
                     safeDistance,
                     allowedRadiusMeters,
                     isWithinAllowedRadius,
-                    sessionId,
-                    calculatedSpeedMps,
-                    movementState);
+                    sessionId);
 
                 if (!liveUpdated)
                 {
@@ -577,8 +506,6 @@ public class GeoLocationService
                             Timestamp = now,
                             DistanceMeters = safeDistance,
                             AccuracyMeters = safeAccuracy,
-                            SpeedMps = calculatedSpeedMps,
-                            MovementState = movementState,
                             AllowedRadiusMeters = allowedRadiusMeters,
                             IsWithinAllowedRadius = isWithinAllowedRadius
                         });
@@ -1386,12 +1313,7 @@ public class GeoLocationService
         double distanceMeters,
         int allowedRadiusMeters,
         bool isWithinAllowedRadius,
-        double accuracyMeters = 0,
-        double? speedMps = null,
-        string? movementState = null,
-        DateTime? capturedAtUtc = null,
-        string captureSource = "Online",
-        Guid? syncBatchId = null)
+        double accuracyMeters = 0)
     {
         if (employeeId <= 0 ||
             sessionId == Guid.Empty ||
@@ -1408,27 +1330,6 @@ public class GeoLocationService
             await using var db =
                 await _dbFactory.CreateDbContextAsync();
 
-            var previous = await db.EmployeeLocationHistory
-                .AsNoTracking()
-                .Where(x => x.EmployeeId == employeeId && x.SessionId == sessionId)
-                .OrderByDescending(x => x.RecordedAtUtc)
-                .FirstOrDefaultAsync();
-
-            var recordTime = capturedAtUtc.HasValue && capturedAtUtc.Value > DateTime.MinValue
-                ? DateTime.SpecifyKind(capturedAtUtc.Value, DateTimeKind.Utc)
-                : DateTime.UtcNow;
-
-            var resolvedSpeed = speedMps.HasValue &&
-                                double.IsFinite(speedMps.Value) &&
-                                speedMps.Value >= 0 &&
-                                speedMps.Value <= 55.56
-                ? speedMps.Value
-                : CalculateHistorySpeed(previous, latitude, longitude, recordTime, safeAccuracy);
-
-            var resolvedMovement = string.IsNullOrWhiteSpace(movementState)
-                ? ClassifyMovement(resolvedSpeed)
-                : NormalizeMovementState(movementState);
-
             var record = new EmployeeLocationHistory
             {
                 EmployeeId = employeeId,
@@ -1436,19 +1337,13 @@ public class GeoLocationService
                 Latitude = latitude,
                 Longitude = longitude,
                 AccuracyMeters = safeAccuracy,
-                SpeedMps = resolvedSpeed,
-                MovementState = resolvedMovement,
-                CaptureSource = string.Equals(captureSource, "OfflineSync", StringComparison.OrdinalIgnoreCase) ? "OfflineSync" : "Online",
-                CapturedAtUtc = recordTime,
-                SyncBatchId = syncBatchId,
-                SyncedAtUtc = string.Equals(captureSource, "OfflineSync", StringComparison.OrdinalIgnoreCase) ? DateTime.UtcNow : null,
                 DistanceFromOfficeMeters = NormalizeDistance(distanceMeters),
                 AllowedRadiusMeters =
                     allowedRadiusMeters < 0
                         ? 0
                         : allowedRadiusMeters,
                 IsWithinAllowedRadius = isWithinAllowedRadius,
-                RecordedAtUtc = recordTime
+                RecordedAtUtc = DateTime.UtcNow
             };
 
             db.EmployeeLocationHistory.Add(record);
@@ -1465,50 +1360,6 @@ public class GeoLocationService
                 "Failed to save GPS history for employee {EmployeeId}",
                 employeeId);
         }
-    }
-
-    // ================================================================
-    // PHASE 1 GPS ANALYTICS HELPERS
-    // ================================================================
-
-    public static string ClassifyMovement(double speedMps)
-    {
-        if (!double.IsFinite(speedMps) || speedMps < 0.5)
-            return "Stopped";
-
-        if (speedMps < 2.0)
-            return "Idle";
-
-        return "Moving";
-    }
-
-    private static string NormalizeMovementState(string value)
-    {
-        var normalized = value.Trim();
-        return normalized.Equals("Moving", StringComparison.OrdinalIgnoreCase) ? "Moving"
-            : normalized.Equals("Idle", StringComparison.OrdinalIgnoreCase) ? "Idle"
-            : "Stopped";
-    }
-
-    private static double CalculateHistorySpeed(
-        EmployeeLocationHistory? previous,
-        double latitude,
-        double longitude,
-        DateTime currentTimeUtc,
-        double accuracyMeters)
-    {
-        if (previous == null || accuracyMeters > 80 || previous.AccuracyMeters > 80)
-            return 0;
-
-        var seconds = (currentTimeUtc - previous.RecordedAtUtc).TotalSeconds;
-        if (seconds < 1 || seconds > 300)
-            return 0;
-
-        var distance = CalculateDistance(
-            previous.Latitude, previous.Longitude, latitude, longitude);
-
-        var speed = distance / seconds;
-        return double.IsFinite(speed) && speed <= 55.56 ? speed : 0;
     }
 
     // ================================================================

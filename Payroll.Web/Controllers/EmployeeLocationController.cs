@@ -148,8 +148,7 @@ public sealed class EmployeeLocationController : ControllerBase
                     accuracy,
                     distanceResult.DistanceMeters,
                     distanceResult.AllowedRadiusMeters,
-                    distanceResult.IsWithinAllowedRadius,
-                    request.SpeedMps);
+                    distanceResult.IsWithinAllowedRadius);
 
             if (!sessionUpdated)
             {
@@ -175,10 +174,7 @@ public sealed class EmployeeLocationController : ControllerBase
                     distanceResult.DistanceMeters,
                     distanceResult.AllowedRadiusMeters,
                     distanceResult.IsWithinAllowedRadius,
-                    accuracy,
-                    request.SpeedMps,
-                    null,
-                    request.CapturedAtUtc);
+                    accuracy);
             }
             catch (Exception historyEx)
             {
@@ -267,13 +263,9 @@ public sealed class EmployeeLocationController : ControllerBase
         /// </summary>
         public double Accuracy { get; set; }
 
-        /// <summary>Device-reported speed in metres/second. Null/invalid values are server-calculated. </summary>
-        public double? SpeedMps { get; set; }
-
-        /// <summary>Client capture time. Used for accurate history and future offline synchronization. </summary>
-        public DateTime CapturedAtUtc { get; set; } = DateTime.UtcNow;
-
-        /// <summary>Legacy alias retained for compatibility with existing clients.</summary>
+        /// <summary>
+        /// Timestamp when location was captured
+        /// </summary>
         public DateTime Timestamp { get; set; } = DateTime.UtcNow;
     }
 
