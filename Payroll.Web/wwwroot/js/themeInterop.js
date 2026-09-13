@@ -17,9 +17,17 @@ window.payrollEscapeHtml = function (value) {
 // by the authenticated user's stable key so one user can never inherit
 // another user's theme on the same browser.
 window.themeInterop = {
+    _activeUserKey: null,
+
     _themeStorageKey: function (userKey) {
         var key = String(userKey || 'anonymous').trim().toLowerCase();
         return 'payroll_theme_' + (key || 'anonymous');
+    },
+
+    setActiveUser: function (userKey) {
+        var key = String(userKey || '').trim();
+        this._activeUserKey = key || null;
+        return this._activeUserKey;
     },
 
     setThemeOnBody: function (theme) {
@@ -61,10 +69,21 @@ try {
         if (!event.key || event.key.indexOf('payroll_theme_') !== 0) return;
         if (event.newValue !== 'dark' && event.newValue !== 'light') return;
 
-        if (window.themeInterop &&
-            typeof window.themeInterop.setThemeOnBody === 'function') {
-            window.themeInterop.setThemeOnBody(event.newValue);
+        var interop = window.themeInterop;
+        if (!interop ||
+            typeof interop.setThemeOnBody !== 'function') {
+            return;
         }
+
+        // Storage events are origin-wide. Only the authenticated user's
+        // namespace may change the theme of this tab.
+        var activeKey = interop._activeUserKey
+            ? interop._themeStorageKey(interop._activeUserKey)
+            : null;
+
+        if (!activeKey || event.key !== activeKey) return;
+
+        interop.setThemeOnBody(event.newValue);
     });
 } catch (e) { }
 
@@ -1727,11 +1746,58 @@ window.payrollEnsureAdminTooltipVisibility = function () {
                 display: block !important;
                 visibility: visible !important;
                 opacity: 1 !important;
-                pointer-events: auto !important;
+                pointer-events: none !important;
             }
         `;
         document.head.appendChild(style);
     } catch (_) {}
+};
+
+window.payrollKeepAdminTooltipVisible = function (map, marker) {
+    if (!map || !marker || marker._payrollTooltipVisibilityBound) return;
+    marker._payrollTooltipVisibilityBound = true;
+
+    marker.on('tooltipopen', function (event) {
+        try {
+            window.requestAnimationFrame(function () {
+                try {
+                    var tooltip = event && event.tooltip;
+                    var element = tooltip && tooltip.getElement
+                        ? tooltip.getElement()
+                        : null;
+                    var mapElement = map.getContainer();
+
+                    if (!element || !mapElement) return;
+
+                    var rect = element.getBoundingClientRect();
+                    var mapRect = mapElement.getBoundingClientRect();
+                    var padding = 12;
+                    var dx = 0;
+                    var dy = 0;
+
+                    if (rect.left < mapRect.left + padding) {
+                        dx = rect.left - (mapRect.left + padding);
+                    } else if (rect.right > mapRect.right - padding) {
+                        dx = rect.right - (mapRect.right - padding);
+                    }
+
+                    if (rect.top < mapRect.top + padding) {
+                        dy = rect.top - (mapRect.top + padding);
+                    } else if (rect.bottom > mapRect.bottom - padding) {
+                        dy = rect.bottom - (mapRect.bottom - padding);
+                    }
+
+                    if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+                        map.panBy([dx, dy], {
+                            animate: true,
+                            duration: 0.22,
+                            noMoveStart: true
+                        });
+                    }
+                } catch (_) {}
+            });
+        } catch (_) {}
+    });
 };
 
 window.payrollCreateAdminTooltipHtml = function (data, initials, withinRange, distance, tooltipDistance, tooltipEta, tooltipSpeed) {
@@ -3395,6 +3461,13 @@ window.updateAdminLiveStaffMap =
                         }
 
                         markerCreated = true;
+
+                        if (typeof window.payrollKeepAdminTooltipVisible === 'function') {
+                            window.payrollKeepAdminTooltipVisible(
+                                state.map,
+                                state.markers[employeeId]
+                            );
+                        }
                     }
                     else {
                         state.markers[
@@ -3416,6 +3489,13 @@ window.updateAdminLiveStaffMap =
                                 } catch (e) { }
                             });
                             state.markerDotNetRef = dotNetRef;
+                        }
+
+                        if (typeof window.payrollKeepAdminTooltipVisible === 'function') {
+                            window.payrollKeepAdminTooltipVisible(
+                                state.map,
+                                state.markers[employeeId]
+                            );
                         }
 
                         const now = Date.now();
@@ -3704,54 +3784,9 @@ window.updateAdminLiveStaffMap =
                         delete state.routeStates[employeeId];
                     }
 
-                    // Throttled road routing: actual GPS points trigger route refreshes,
-                    // while marker motion remains smoothly interpolated in the browser.
-                    const routeState = state.routeStates[employeeId];
-                    const routeNow = Date.now();
-
-                    routeState.lastRawPosition = position.slice();
-                    routeState.lastRawPositionAt = routeNow;
-
-                    window.payrollRequestJourneyRoute(
-                        routeState,
-                        position,
-                        office,
-                        { minMoveMeters: 25, minIntervalMs: 30000 }
-                    ).then(function(route) {
-                        if (!route || !state.markers[employeeId]) return;
-                        const remaining = route.distanceMeters || window.payrollHaversineMeters(state.markers[employeeId].getLatLng(), office);
-                        state.roadRouteCasings[employeeId]?.setLatLngs(route.geometry);
-                        state.roadRouteLines[employeeId]?.setLatLngs(route.geometry);
-                        const routeDistance = window.payrollFormatRouteDistance(remaining);
-                        const eta = window.payrollFormatRouteDuration(route.durationSeconds);
-
-                        const distanceElement = document.querySelector(`[data-selected-route-distance="${employeeId}"]`);
-                        if (distanceElement) {
-                            distanceElement.innerText = routeDistance;
-                        }
-
-                        const etaElement = document.querySelector(`[data-selected-eta="${employeeId}"]`);
-                        if (etaElement) {
-                            etaElement.innerText = eta;
-                        }
-
-                        const name = window.payrollEscapeHtml(x.name || 'Employee');
-                        const hoverSpeed = window.payrollFormatSpeed(x.speedMps || state.markers[employeeId]._speedMps || 0);
-                        const hoverWithin = Boolean(x.isWithinAllowedRadius);
-                        const cleanName = name.replace(/<[^>]*>/g, '').trim();
-                        const parts = cleanName.split(/\s+/).filter(Boolean);
-                        const hoverInitials = initials.toUpperCase();
-
-                        if (state.markers[employeeId].getTooltip()) {
-                            state.markers[employeeId].setTooltipContent(
-                                window.payrollCreateAdminTooltipHtml(
-                                    x, hoverInitials, hoverWithin, distance, routeDistance, eta, hoverSpeed
-                                )
-                            );
-                        }
-                    }).catch(function() {});
-
-                    // Throttled road routing
+                    // Route generation is intentionally handled only by the
+                    // selected-employee branch above. Unselected employees never
+                    // recreate or dereference a deleted route state.
                 });
 
             // --------------------------------------------------------

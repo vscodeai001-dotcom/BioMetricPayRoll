@@ -1323,7 +1323,12 @@
     .admin-office-tooltip {
         z-index: 10000 !important;
         overflow: visible !important;
-        max-width: min(360px, calc(100vw - 32px));
+        max-width: min(380px, calc(100vw - 24px));
+        pointer-events: none !important;
+    }
+
+    .admin-live-hover-tooltip .leaflet-tooltip-content {
+        overflow: visible !important;
     }
 
     .admin-live-hover-card {
@@ -1427,7 +1432,6 @@
     .clickable { cursor: pointer; }
     .clickable:hover { background-color: rgba(0,0,0,.02); }
     body.dark .clickable:hover { background-color: rgba(255,255,255,.02); }
-    }
 
     .payroll-user-marker { background: transparent !important; border: 0 !important; }
     .payroll-map-user {
