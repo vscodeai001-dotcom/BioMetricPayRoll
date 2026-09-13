@@ -55,16 +55,12 @@ window.attendanceRefresh = (function () {
                         10000,
                         30000
                     ])
+                    .withServerTimeout(60000)
+                    .withKeepAliveInterval(15000)
                     .configureLogging(
                         signalR.LogLevel.Warning
                     )
                     .build();
-
-            // Explicitly align the browser connection with the server
-            // keep-alive/timeout policy. This is especially important
-            // behind Render's reverse proxy.
-            connection.keepAliveIntervalInMilliseconds = 15000;
-            connection.serverTimeoutInMilliseconds = 60000;
 
 
             /*
@@ -140,39 +136,17 @@ window.attendanceRefresh = (function () {
 
 
             // LOCATION HEALTH (periodic status of sessions)
-            // This is a browser-side health event only. It is deliberately
-            // not converted into LocationChanged, which is reserved for
-            // actual GPS position updates. This avoids a 30-second Blazor
-            // refresh storm and keeps the realtime circuit lighter.
             connection.on(
                 "LocationHealth",
-                function (data) {
+                async function (data) {
                     console.log('LocationHealth', data);
-                    window.dispatchEvent(
-                        new CustomEvent(
-                            'location-health-updated',
-                            { detail: data }
-                        )
-                    );
-                }
-            );
 
-            // Match the server-side geography settings event so SignalR
-            // never reports "No client method ... found" for this event.
-            connection.on(
-                "GeoSettingsChanged",
-                function (data) {
-                    console.log(
-                        "GeoSettingsChanged",
-                        data
-                    );
+                    // Dispatch event for admin UI to update status/age indicators
+                    window.dispatchEvent(new CustomEvent('location-health-updated', { detail: data }));
 
-                    window.dispatchEvent(
-                        new CustomEvent(
-                            'geo-settings-changed',
-                            { detail: data }
-                        )
-                    );
+                    // Also notify registered Blazor listeners so components refresh lightweight state
+                    await notifyViewer();
+                    await notifyListeners('LocationChanged', data);
                 }
             );
 
@@ -391,6 +365,45 @@ window.attendanceRefresh = (function () {
              * Admin listeners
              *
              */
+
+            /*
+             * ==========================================================
+             * GEO SETTINGS CHANGED
+             * ==========================================================
+             *
+             * The server broadcasts this event when office GPS/radius
+             * settings change. Register the client method explicitly so
+             * SignalR never reports:
+             * "No client method with the name 'geosettingschanged' found."
+             *
+             * Keep this lightweight: domain components can react to the
+             * event without forcing an attendance/database refresh.
+             */
+            connection.on(
+                "GeoSettingsChanged",
+                async function (data) {
+
+                    console.log(
+                        "GeoSettingsChanged",
+                        data
+                    );
+
+                    window.dispatchEvent(
+                        new CustomEvent(
+                            "geo-settings-changed",
+                            {
+                                detail: data
+                            }
+                        )
+                    );
+
+                    await notifyListeners(
+                        "GeoSettingsChanged",
+                        data
+                    );
+                }
+            );
+
 
             /*
              * ==========================================================
@@ -964,16 +977,44 @@ window.attendanceRefresh = (function () {
     }
 
 
-    // Compatibility API retained for existing components. LocationHealth
-    // is now handled entirely in the browser and must not invoke a Blazor
-    // callback every 30 seconds.
+    // Allow Blazor components to register for periodic LocationHealth bridge
     function registerLocationHealth(dotNetReference) {
-        return true;
+        try {
+            const handler = function (ev) {
+                try {
+                    const detail = ev.detail;
+                    // A navigation/disposal can invalidate the reference while
+                    // the browser event listener is still queued. Ignore that
+                    // transient lifecycle condition.
+                    dotNetReference.invokeMethodAsync('LocationChanged', null)
+                        .catch(function () {
+                            try {
+                                unregisterLocationHealth(dotNetReference);
+                            }
+                            catch (cleanupError) { }
+                        });
+                }
+                catch (e) { }
+            };
+
+            window.addEventListener('location-health-updated', handler);
+
+            // store handler on the dotNetReference so unregister can remove
+            dotNetReference._locationHealthHandler = handler;
+        }
+        catch (e) { }
     }
 
     function unregisterLocationHealth(dotNetReference) {
-        return true;
+        try {
+            if (dotNetReference && dotNetReference._locationHealthHandler) {
+                window.removeEventListener('location-health-updated', dotNetReference._locationHealthHandler);
+                dotNetReference._locationHealthHandler = null;
+            }
+        }
+        catch (e) { }
     }
+
 
     return {
 

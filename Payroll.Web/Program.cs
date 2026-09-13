@@ -152,10 +152,8 @@ builder.Host.UseWindowsService();
 
 builder.Services.AddSignalR(options =>
 {
-    // Keep the realtime attendance/location connection alive through
-    // Render/proxy idle periods. The client timeout is intentionally
-    // longer than the keep-alive interval so a missed ping does not
-    // immediately tear down the Blazor circuit.
+    // Keep the Render/Browser SignalR connection alive through
+    // idle periods and allow enough time for transient network gaps.
     options.KeepAliveInterval = TimeSpan.FromSeconds(15);
     options.ClientTimeoutInterval = TimeSpan.FromSeconds(60);
 });
