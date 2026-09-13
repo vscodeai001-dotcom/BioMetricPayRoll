@@ -1671,6 +1671,33 @@ window.payrollFormatSpeed = function (metersPerSecond) {
     return `${kmh.toFixed(1)} km/h`;
 };
 
+window.payrollEnsureAdminTooltipVisibility = function () {
+    try {
+        const styleId = 'payroll-admin-tooltip-visibility-fix';
+        if (document.getElementById(styleId)) return;
+        const style = document.createElement('style');
+        style.id = styleId;
+        style.textContent = `
+            .admin-live-hover-tooltip,
+            .admin-live-hover-tooltip .leaflet-popup-content-wrapper,
+            .admin-live-hover-tooltip .leaflet-popup-content,
+            .admin-office-tooltip {
+                visibility: visible !important;
+                opacity: 1 !important;
+                overflow: visible !important;
+                z-index: 10000 !important;
+            }
+            .admin-live-hover-card {
+                display: block !important;
+                visibility: visible !important;
+                opacity: 1 !important;
+                pointer-events: auto !important;
+            }
+        `;
+        document.head.appendChild(style);
+    } catch (_) {}
+};
+
 window.payrollCreateAdminTooltipHtml = function (data, initials, withinRange, distance, tooltipDistance, tooltipEta, tooltipSpeed) {
     const safeName = window.escapeAdminHtml(data.name || 'Employee');
     const statusText = withinRange ? 'Within range' : 'Outside range';

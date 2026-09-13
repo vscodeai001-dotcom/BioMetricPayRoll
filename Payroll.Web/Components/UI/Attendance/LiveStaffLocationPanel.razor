@@ -1314,7 +1314,25 @@
     }
 
     .live-staff-details {
-        display: none !important;
+        display: block !important;
+        position: relative;
+        z-index: 1000;
+    }
+
+    .admin-live-hover-tooltip,
+    .admin-office-tooltip {
+        z-index: 10000 !important;
+        overflow: visible !important;
+        max-width: min(360px, calc(100vw - 32px));
+    }
+
+    .admin-live-hover-card {
+        min-width: 245px;
+        max-width: 340px;
+        padding: 6px;
+        color: #f8fafc;
+        visibility: visible !important;
+        opacity: 1 !important;
     }
 
     .live-staff-body {

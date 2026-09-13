@@ -512,6 +512,12 @@ public class GeoLocationService
 
                 try
                 {
+                    // Broadcast the same authoritative live-store snapshot that
+                    // the admin map uses. This makes a GPS update self-contained:
+                    // Android does not have to wait for a manual refresh or a
+                    // second HTTP request just to obtain speed/movement details.
+                    var live = LiveLocationStore.Get(employeeId);
+
                     await _hubContext.Clients.All.SendAsync(
                         "LocationChanged",
                         new
@@ -520,11 +526,13 @@ public class GeoLocationService
                             SessionId = sessionId,
                             Latitude = latitude,
                             Longitude = longitude,
-                            Timestamp = now,
-                            DistanceMeters = safeDistance,
-                            AccuracyMeters = safeAccuracy,
-                            AllowedRadiusMeters = allowedRadiusMeters,
-                            IsWithinAllowedRadius = isWithinAllowedRadius
+                            Timestamp = live?.LastUpdatedUtc ?? captureTime,
+                            DistanceMeters = live?.DistanceMeters ?? safeDistance,
+                            AccuracyMeters = live?.AccuracyMeters ?? safeAccuracy,
+                            AllowedRadiusMeters = live?.AllowedRadiusMeters ?? allowedRadiusMeters,
+                            IsWithinAllowedRadius = live?.IsWithinAllowedRadius ?? isWithinAllowedRadius,
+                            SpeedMps = live?.SpeedMps ?? 0,
+                            MovementState = live?.MovementState ?? "Stopped"
                         });
                 }
                 catch (Exception signalREx)
