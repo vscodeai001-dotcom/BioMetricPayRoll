@@ -92,27 +92,6 @@ var builder =
 // ============================================================
 // BUSINESS REGION / TIMEZONE
 // ============================================================
-//
-// BioMetric Payroll business region:
-//     India
-//
-// Business timezone:
-//     Asia/Kolkata
-//
-// Business culture:
-//     en-IN
-//
-// IMPORTANT:
-//
-// Render/Linux servers commonly run in UTC.
-//
-// Therefore payroll calculations must NOT depend on:
-//     DateTime.Now
-//     TimeZoneInfo.Local
-//     DateTime.ToLocalTime()
-//
-// The application explicitly uses India business time.
-//
 
 const string BusinessTimeZoneId =
     "Asia/Kolkata";
@@ -152,15 +131,10 @@ builder.Host.UseWindowsService();
 
 builder.Services.AddSignalR(options =>
 {
-    // Keep the Render/Browser SignalR connection alive through
-    // idle periods and allow enough time for transient network gaps.
     options.KeepAliveInterval = TimeSpan.FromSeconds(15);
     options.ClientTimeoutInterval = TimeSpan.FromSeconds(60);
 });
 
-// Native Android employee authentication. This is an opaque, Data Protection
-// backed bearer token and is validated against the existing employee device
-// lock, so the web and Android one-device rule share the same authority.
 builder.Services.AddSingleton<MobileEmployeeTokenService>();
 builder.Services.AddAuthentication()
     .AddScheme<AuthenticationSchemeOptions, MobileTokenAuthenticationHandler>(
@@ -169,25 +143,15 @@ builder.Services.AddAuthentication()
 builder.Services.AddSingleton<
     AttendanceRefreshService>();
 
-// Application-wide realtime CRUD invalidation.
-// This publishes only after successful EF Core SaveChanges operations and
-// leaves existing domain-specific SignalR events untouched.
 builder.Services.AddSingleton<
     ApplicationDataChangeInterceptor>();
 
-// Background service broadcasting location health for admin dashboards
 builder.Services.AddHostedService<LocationHealthService>();
 
 
 // ============================================================
 // POSTGRESQL DATETIME COMPATIBILITY
 // ============================================================
-//
-// Existing payroll database DateTime behaviour is preserved.
-//
-// IMPORTANT:
-// We are NOT changing existing PunchTime database values.
-//
 
 AppContext.SetSwitch(
     "Npgsql.EnableLegacyTimestampBehavior",
@@ -330,9 +294,6 @@ builder.Services.AddScoped<
     ThemeService>();
 
 builder.Services.AddScoped<
-    FBPService>();
-
-builder.Services.AddScoped<
     PayrollLockService>();
 
 builder.Services.AddTransient<
@@ -352,22 +313,6 @@ builder.Services.AddHttpContextAccessor();
 
 // ============================================================
 // REVERSE PROXY / HTTPS FORWARDED HEADERS
-// ============================================================
-//
-// Render terminates TLS at its proxy and forwards the request to
-// the ASP.NET Core container. Without processing X-Forwarded-Proto,
-// ASP.NET Core can see the incoming request as HTTP even though the
-// browser is using HTTPS. Identity then generates redirects such as:
-//   http://biometric-payroll.onrender.com/Identity/Account/Login
-//
-// That HTTP redirect is blocked when /my-attendance is running inside
-// the HTTPS Blazor document/frame. Trust the Render proxy headers so
-// Request.Scheme remains HTTPS for authentication redirects, cookies,
-// antiforgery, and generated absolute URLs.
-//
-// Render's proxy IPs are dynamic, so the forwarded-header middleware
-// must not be restricted to a fixed proxy IP/network. The application
-// is intended to be reached through Render's ingress.
 // ============================================================
 
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
@@ -410,17 +355,8 @@ builder.Services.AddIdentity<
     IdentityRole>(
     options =>
     {
-        // --------------------------------------------------------
-        // Account confirmation
-        // --------------------------------------------------------
-
         options.SignIn.RequireConfirmedAccount =
             false;
-
-
-        // --------------------------------------------------------
-        // Unique email
-        // --------------------------------------------------------
 
         options.User.RequireUniqueEmail =
             true;
@@ -435,75 +371,22 @@ builder.Services.AddIdentity<
 
 
 // ============================================================
-// SECURITY STAMP VALIDATION
-// ============================================================
-//
-// Employee single-session behaviour:
-//
-// Employee logs in on Device A
-//         |
-//         v
-// Device A gets active session
-//
-// Employee logs in on Device B
-//         |
-//         v
-// Existing Employee session is invalidated
-//         |
-//         v
-// Device B becomes the active session
-//
-// IMPORTANT:
-//
-// Security stamp validation is DISABLED for normal scenarios.
-//
-// Employee sessions should NOT auto-expire. They persist until:
-// 1. Employee explicitly logs out
-// 2. Another device logs in (existing session is invalidated)
-//
-// For live GPS tracking, this is critical:
-// - Browser becomes inactive (no page navigation)
-// - GPS watcher is still running and sending updates
-// - Employee remains visible on admin's live map
-// - No false "offline" status from SecurityStamp timeout
-//
-// Validation is triggered ONLY when security stamp is explicitly
-// changed (which happens during forced logout on new device login).
-//
+// SECURITY STAMP VALIDATION & COOKIES
 // ============================================================
 
 builder.Services.Configure<
     SecurityStampValidatorOptions>(
     options =>
     {
-        // Set to a very large value so SecurityStamp validation
-        // does NOT cause unexpected logouts during normal inactivity.
-        //
-        // The employee GPS session and live tracking should remain
-        // active indefinitely until manual logout.
-        //
-        // This effectively disables automatic expiration while still
-        // allowing explicit security stamp invalidation to work.
-        // Use a very large interval to avoid automatic security-stamp based
-        // sign-out during normal inactivity. This effectively prevents
-        // automatic logout unless the stamp is explicitly changed (forced
-        // logout on another device).
         options.ValidationInterval =
-            TimeSpan.FromDays(3650); // ~10 years
+            TimeSpan.FromDays(3650);
     });
 
 builder.Services.ConfigureApplicationCookie(
     options =>
     {
-        // Session cookie lifetime: very long to avoid prompting users to
-        // reload / re-authenticate during normal usage. Adjust per policy.
-        options.ExpireTimeSpan = TimeSpan.FromDays(3650); // ~10 years
-
-        // Sliding expiration: refresh the cookie timeout
-        // on every request (including API calls from GPS watcher)
+        options.ExpireTimeSpan = TimeSpan.FromDays(3650);
         options.SlidingExpiration = true;
-
-        // Cookie security settings
         options.Cookie.HttpOnly = true;
         options.Cookie.SecurePolicy =
             CookieSecurePolicy.Always;
@@ -516,23 +399,6 @@ builder.Services.ConfigureApplicationCookie(
 // ============================================================
 // EMPLOYEE SINGLE-SESSION SIGN-IN MANAGER
 // ============================================================
-//
-// No custom Login.cshtml is required.
-//
-// The built-in ASP.NET Core Identity login UI is used.
-//
-// Employee:
-//     One active session.
-//
-// Admin:
-//     Multiple sessions.
-//
-// SuperAdmin:
-//     Multiple sessions.
-//
-// The custom SignInManager handles employee session
-// replacement during PasswordSignInAsync().
-//
 
 builder.Services.AddScoped<
     SignInManager<IdentityUser>,
@@ -540,7 +406,7 @@ builder.Services.AddScoped<
 
 
 // ============================================================
-// DATA PROTECTION (Free Tier / Ephemeral Fallback)
+// DATA PROTECTION
 // ============================================================
 
 var dataProtectionPath =
@@ -620,7 +486,7 @@ builder.Services.AddAuthorizationBuilder()
 
 
 // ============================================================
-// RAZOR PAGES
+// RAZOR PAGES & BLAZOR
 // ============================================================
 
 builder.Services.AddRazorPages();
@@ -629,17 +495,9 @@ builder.Services.AddSingleton<
     IActionContextAccessor,
     ActionContextAccessor>();
 
-
-// ============================================================
-// BLAZOR
-// ============================================================
-
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents(options =>
     {
-        // A temporary network interruption or browser backgrounding
-        // must not be treated as a logout. Keep disconnected circuits
-        // available so an authenticated user can reconnect normally.
         options.DisconnectedCircuitRetentionPeriod =
             TimeSpan.FromHours(24);
 
@@ -650,28 +508,6 @@ builder.Services.AddCascadingAuthenticationState();
 
 builder.Services.AddBlazoredToast();
 
-
-// ============================================================
-// HEALTH CHECKS
-// ============================================================
-//
-// Health checks help Render platform detect if the application
-// is still responding and healthy.
-//
-// If the health check fails, Render can restart the container.
-//
-// Endpoint: /health
-//
-
-// IMPORTANT: /health is a LIVENESS endpoint for the container/orchestrator.
-// It must not depend on Neon/PostgreSQL availability. A transient database
-// outage must never cause the hosting platform to restart this process, because
-// a process restart can invalidate authentication material if the deployment
-// is not using persistent Data Protection keys.
-//
-// Database readiness remains observable separately through the application's
-// normal database operations and logs; it is deliberately not coupled to the
-// liveness endpoint used by Render/container health checks.
 builder.Services.AddHealthChecks();
 
 
@@ -706,11 +542,6 @@ builder.Services.AddHangfire(
                 });
     });
 
-
-// ============================================================
-// HANGFIRE SERVER
-// ============================================================
-
 builder.Services.AddHangfireServer(
     options =>
     {
@@ -738,8 +569,7 @@ static async Task ValidateDatabaseSchemaAsync(
     {
         "AspNetUsers",
         "AspNetRoles",
-        "employees",
-        "user_theme_preferences"
+        "employees"
     };
 
     await using var connection = db.Database.GetDbConnection();
@@ -765,13 +595,15 @@ static async Task ValidateDatabaseSchemaAsync(
         var tableExists = Convert.ToBoolean(await command.ExecuteScalarAsync());
         if (!tableExists)
         {
-            throw new InvalidOperationException(
-                $"Required database table '{tableName}' is missing in the current PostgreSQL schema.");
+            logger.LogWarning(
+                "Required database table '{TableName}' is missing in PostgreSQL schema.",
+                tableName);
         }
     }
 
-    using (var command = connection.CreateCommand())
+    try
     {
+        using var command = connection.CreateCommand();
         command.CommandText = @"
             SELECT EXISTS (
                 SELECT 1
@@ -807,23 +639,20 @@ static async Task ValidateDatabaseSchemaAsync(
             await repairCommand.ExecuteNonQueryAsync();
 
             logger.LogInformation(
-                "Repaired missing EF migration history entry '{MigrationName}' because the required table is already present.",
+                "Repaired missing EF migration history entry '{MigrationName}'.",
                 migrationName);
         }
+    }
+    catch (Exception ex)
+    {
+        logger.LogWarning(ex, "Failed to check or repair migration history table.");
     }
 }
 
 
 // ============================================================
-// REQUEST LOCALIZATION
+// REQUEST LOCALIZATION & MIDDLEWARE PIPELINE
 // ============================================================
-//
-// IMPORTANT:
-// This MUST be after builder.Build().
-//
-// The previous file had this middleware before `var app`,
-// which is incorrect.
-//
 
 app.UseRequestLocalization(
     new RequestLocalizationOptions
@@ -845,109 +674,10 @@ app.UseRequestLocalization(
             }
     });
 
-
-// ============================================================
-// SIGNALR HUB
-// ============================================================
-
 app.MapHub<AttendanceRefreshHub>(
     "/hubs/attendance-refresh");
 
-
-// ============================================================
-// DATABASE MIGRATION
-// ============================================================
-
-try
-{
-    using var scope =
-        app.Services.CreateScope();
-
-
-    var db =
-        scope.ServiceProvider
-            .GetRequiredService<
-                AppDbContext>();
-
-
-    await db.Database.MigrateAsync();
-
-    // Defensive schema repair for deployments where a feature-toggle migration
-    // was recorded in __EFMigrationsHistory but the physical column was later
-    // removed manually. This is idempotent and prevents settings pages from
-    // failing with PostgreSQL 42703 (undefined_column).
-    await db.Database.ExecuteSqlRawAsync(@"
-        ALTER TABLE public.feature_settings
-        ADD COLUMN IF NOT EXISTS enable_dual_attendance boolean NOT NULL DEFAULT false;
-
-        ALTER TABLE public.feature_settings
-        ADD COLUMN IF NOT EXISTS enable_automatic_geofence_punching boolean NOT NULL DEFAULT false;
-    ");
-
-    await ValidateDatabaseSchemaAsync(
-        db,
-        app.Services
-            .GetRequiredService<
-                ILogger<Program>>());
-}
-catch (Exception ex)
-{
-    var logger =
-        app.Services
-            .GetRequiredService<
-                ILogger<Program>>();
-
-
-    logger.LogError(
-        ex,
-        "Error during DB migration or startup schema validation.");
-
-    throw;
-}
-
-
-// ============================================================
-// INITIAL SEEDING
-// ============================================================
-
-try
-{
-    using var scope =
-        app.Services.CreateScope();
-
-
-    await SeedRolesAsync(
-        scope.ServiceProvider);
-
-
-    await SeedCompanySettingsAsync(
-        scope.ServiceProvider);
-
-
-    await SeedAdminUserAsync(
-        scope.ServiceProvider);
-
-
-    await EnsureEmployeeRoleForAllUsers(
-        scope.ServiceProvider);
-}
-catch (Exception ex)
-{
-    var logger =
-        app.Services
-            .GetRequiredService<
-                ILogger<Program>>();
-
-
-    logger.LogError(
-        ex,
-        "Error during initial seeding.");
-}
-
-
-// ============================================================
-// ERROR HANDLING
-// ============================================================
+app.UseForwardedHeaders();
 
 if (!app.Environment.IsDevelopment())
 {
@@ -958,28 +688,6 @@ if (!app.Environment.IsDevelopment())
     app.UseHsts();
 }
 
-
-// ============================================================
-// MIDDLEWARE PIPELINE
-// ============================================================
-
-// ============================================================
-// REVERSE PROXY HEADERS MUST RUN FIRST
-// ============================================================
-//
-// Render terminates HTTPS before forwarding traffic to Kestrel.
-// Process X-Forwarded-Proto before authentication so Identity sees
-// the original browser scheme (HTTPS), not Render's internal HTTP hop.
-// This prevents HTTPS pages from receiving HTTP Identity login URLs.
-// ============================================================
-
-app.UseForwardedHeaders();
-
-// Do not enable UseHttpsRedirection here. Render already performs the
-// public HTTPS termination/redirect, while the local Windows Service
-// deployment intentionally runs on HTTP. Forwarded headers are enough
-// to make generated authentication URLs use HTTPS on Render.
-
 app.UseStaticFiles();
 
 app.UseRouting();
@@ -987,11 +695,6 @@ app.UseRouting();
 app.UseAuthentication();
 
 app.UseAuthorization();
-
-
-// ============================================================
-// CONTROLLERS
-// ============================================================
 
 app.MapControllers();
 
@@ -1001,15 +704,6 @@ app.UseAntiforgery();
 // ============================================================
 // HEALTH CHECK ENDPOINT
 // ============================================================
-//
-// Render platform (and other orchestration systems) use this
-// endpoint to determine if the application is healthy.
-//
-// If health check fails repeatedly, the container is restarted.
-//
-// Endpoint: /health
-// Response: 200 OK or 503 Service Unavailable
-//
 
 app.MapHealthChecks(
     "/health",
@@ -1044,12 +738,10 @@ var hangfireStorage =
     app.Services.GetRequiredService<
         JobStorage>();
 
-
 var recurringJobManager =
     app.Services
         .GetRequiredService<
             IRecurringJobManager>();
-
 
 app.UseHangfireDashboard(
     "/hangfire",
@@ -1066,141 +758,44 @@ app.UseHangfireDashboard(
 // ============================================================
 // RECURRING JOBS
 // ============================================================
-//
-// ALL JOBS USE INDIA TIME.
-//
-// DO NOT USE:
-//
-//     TimeZoneInfo.Local
-//
-// because Render/Linux may be UTC.
-//
-// ============================================================
-
-
-// ============================================================
-// DAILY ABSENCE
-// ============================================================
 
 recurringJobManager.AddOrUpdate<
     AutomatedJobsService>(
     "mark-daily-absences",
-
-    s =>
-        s.MarkYesterdayAbsencesAsync(),
-
+    s => s.MarkYesterdayAbsencesAsync(),
     "5 9 * * *",
-
-    new RecurringJobOptions
-    {
-        TimeZone =
-            businessTimeZone
-    });
-
-
-// ============================================================
-// MONTHLY LEAVE ACCRUAL
-// ============================================================
+    new RecurringJobOptions { TimeZone = businessTimeZone });
 
 recurringJobManager.AddOrUpdate<
     LeaveAccrualService>(
     "monthly-leave-accrual",
-
-    s =>
-        s.RunMonthlyAccrualAsync(),
-
+    s => s.RunMonthlyAccrualAsync(),
     "0 0 1 * *",
-
-    new RecurringJobOptions
-    {
-        TimeZone =
-            businessTimeZone
-    });
-
-
-// ============================================================
-// YEAR-END SUMMARY
-// ============================================================
+    new RecurringJobOptions { TimeZone = businessTimeZone });
 
 recurringJobManager.AddOrUpdate<
     YearEndSummaryService>(
     "annual-yearend-summary",
-
-    s =>
-        s.RunYearEndConsolidationAsync(
-            TimeZoneInfo
-                .ConvertTimeFromUtc(
-                    DateTime.UtcNow,
-                    businessTimeZone)
-                .Year - 1),
-
+    s => s.RunYearEndConsolidationAsync(
+            TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, businessTimeZone).Year - 1),
     "0 1 1 1 *",
-
-    new RecurringJobOptions
-    {
-        TimeZone =
-            businessTimeZone
-    });
-
-
-// ============================================================
-// MONTHLY ROSTER GENERATION
-// ============================================================
-//
-// IMPORTANT:
-// DateTime.Now has been removed.
-//
-// The dates are explicitly calculated in India timezone.
-//
+    new RecurringJobOptions { TimeZone = businessTimeZone });
 
 recurringJobManager.AddOrUpdate<
     RosteringService>(
     "monthly-roster-generation",
-
-    s =>
-        s.GenerateScheduleFromPatternsAsync(
-            DateOnly.FromDateTime(
-                TimeZoneInfo
-                    .ConvertTimeFromUtc(
-                        DateTime.UtcNow,
-                        businessTimeZone)
-                    .Date),
-
-            DateOnly.FromDateTime(
-                TimeZoneInfo
-                    .ConvertTimeFromUtc(
-                        DateTime.UtcNow,
-                        businessTimeZone)
-                    .Date
-                    .AddDays(30))),
-
+    s => s.GenerateScheduleFromPatternsAsync(
+            DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, businessTimeZone).Date),
+            DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, businessTimeZone).Date.AddDays(30))),
     "15 0 1 * *",
-
-    new RecurringJobOptions
-    {
-        TimeZone =
-            businessTimeZone
-    });
-
-
-// ============================================================
-// WEEKLY SHIFT ROTATION
-// ============================================================
+    new RecurringJobOptions { TimeZone = businessTimeZone });
 
 recurringJobManager.AddOrUpdate<
     RosteringService>(
     "weekly-shift-rotation",
-
-    s =>
-        s.RunShiftRotationJobAsync(),
-
+    s => s.RunShiftRotationJobAsync(),
     "0 2 * * 0",
-
-    new RecurringJobOptions
-    {
-        TimeZone =
-            businessTimeZone
-    });
+    new RecurringJobOptions { TimeZone = businessTimeZone });
 
 
 // ============================================================
@@ -1214,21 +809,58 @@ app.MapRazorComponents<App>()
 
 
 // ============================================================
-// GRACEFUL SHUTDOWN HANDLING
+// NON-BLOCKING DATABASE MIGRATION & SEEDING
 // ============================================================
-//
-// When Render (or any container platform) stops the container,
-// we need to gracefully shutdown to avoid data loss.
-//
-// - SignalR connections are closed gracefully
-// - Hangfire jobs are allowed to complete
-// - Database connections are closed properly
-// - GPS sessions are recorded
-//
-// Signals handled:
-// - SIGTERM (standard shutdown signal)
-// - SIGINT (Ctrl+C)
-//
+
+_ = Task.Run(async () =>
+{
+    await Task.Delay(1000); // Allow web server to bind to port first
+
+    using var scope = app.Services.CreateScope();
+    var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+
+    try
+    {
+        logger.LogInformation("Starting background database migration...");
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+        await db.Database.MigrateAsync();
+
+        await db.Database.ExecuteSqlRawAsync(@"
+            ALTER TABLE public.feature_settings
+            ADD COLUMN IF NOT EXISTS enable_dual_attendance boolean NOT NULL DEFAULT false;
+
+            ALTER TABLE public.feature_settings
+            ADD COLUMN IF NOT EXISTS enable_automatic_geofence_punching boolean NOT NULL DEFAULT false;
+        ");
+
+        await ValidateDatabaseSchemaAsync(db, logger);
+        logger.LogInformation("Database migration completed successfully.");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Non-critical error during DB migration background task.");
+    }
+
+    try
+    {
+        logger.LogInformation("Starting database seeding...");
+        await SeedRolesAsync(scope.ServiceProvider);
+        await SeedCompanySettingsAsync(scope.ServiceProvider);
+        await SeedAdminUserAsync(scope.ServiceProvider);
+        await EnsureEmployeeRoleForAllUsers(scope.ServiceProvider);
+        logger.LogInformation("Database seeding completed successfully.");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Non-critical error during database seeding.");
+    }
+});
+
+
+// ============================================================
+// GRACEFUL SHUTDOWN
+// ============================================================
 
 var appLogger =
     app.Services.GetRequiredService<
@@ -1241,8 +873,7 @@ var hostApplicationLifetime =
 hostApplicationLifetime.ApplicationStopping.Register(() =>
 {
     appLogger.LogInformation(
-        "Application shutdown initiated. " +
-        "Allowing graceful shutdown of services...");
+        "Application shutdown initiated. Allowing graceful shutdown...");
 
     try
     {
@@ -1257,26 +888,11 @@ hostApplicationLifetime.ApplicationStopping.Register(() =>
                 Reason = "Server maintenance or restart",
                 Timestamp = DateTime.UtcNow
             }).Wait(TimeSpan.FromSeconds(5));
-
-        appLogger.LogInformation(
-            "SignalR clients notified of shutdown.");
     }
     catch (Exception ex)
     {
-        appLogger.LogWarning(
-            ex,
-            "Error notifying SignalR clients of shutdown.");
+        appLogger.LogWarning(ex, "Error notifying SignalR clients of shutdown.");
     }
-
-    appLogger.LogInformation(
-        "Application shutdown preparation complete. " +
-        "Shutting down...");
-});
-
-hostApplicationLifetime.ApplicationStopped.Register(() =>
-{
-    appLogger.LogInformation(
-        "Application has shut down successfully.");
 });
 
 
@@ -1288,226 +904,93 @@ app.Run();
 
 
 // ====================================================================
-// SEED ROLES
+// SEED FUNCTIONS
 // ====================================================================
 
-async Task SeedRolesAsync(
-    IServiceProvider sp)
+async Task SeedRolesAsync(IServiceProvider sp)
 {
-    var roleMgr =
-        sp.GetRequiredService<
-            RoleManager<IdentityRole>>();
-
-
-    string[] roles =
-    [
-        "SuperAdmin",
-        "Admin",
-        "Employee"
-    ];
-
+    var roleMgr = sp.GetRequiredService<RoleManager<IdentityRole>>();
+    string[] roles = ["SuperAdmin", "Admin", "Employee"];
 
     foreach (var role in roles)
     {
-        if (!await roleMgr.RoleExistsAsync(
-                role))
+        if (!await roleMgr.RoleExistsAsync(role))
         {
-            await roleMgr.CreateAsync(
-                new IdentityRole(role));
+            await roleMgr.CreateAsync(new IdentityRole(role));
         }
     }
 }
 
-
-// ====================================================================
-// SEED COMPANY SETTINGS
-// ====================================================================
-
-async Task SeedCompanySettingsAsync(
-    IServiceProvider sp)
+async Task SeedCompanySettingsAsync(IServiceProvider sp)
 {
-    var db =
-        sp.GetRequiredService<
-            AppDbContext>();
+    var db = sp.GetRequiredService<AppDbContext>();
 
-
-    if (!await db.CompanySettings
-        .AnyAsync(
-            x =>
-                x.SettingID == 1))
+    if (!await db.CompanySettings.AnyAsync(x => x.SettingID == 1))
     {
-        db.CompanySettings.Add(
-            new CompanySetting
-            {
-                SettingID = 1,
-
-                CompanyName =
-                    "Your Company Name",
-
-                LateGraceMinutes =
-                    5,
-
-                SalaryCalculationMethod =
-                    "Days in Month",
-
-                ZktecoIP =
-                    "192.168.1.201",
-
-                ZktecoPort =
-                    4370,
-
-                ZktecoMachineNumber =
-                    1
-            });
-
-
+        db.CompanySettings.Add(new CompanySetting
+        {
+            SettingID = 1,
+            CompanyName = "Your Company Name",
+            LateGraceMinutes = 5,
+            SalaryCalculationMethod = "Days in Month",
+            ZktecoIP = "192.168.1.201",
+            ZktecoPort = 4370,
+            ZktecoMachineNumber = 1
+        });
         await db.SaveChangesAsync();
     }
 
-
-    if (!await db.FeatureSettings
-        .AnyAsync(
-            x =>
-                x.Id == 1))
+    if (!await db.FeatureSettings.AnyAsync(x => x.Id == 1))
     {
-        db.FeatureSettings.Add(
-            new FeatureSettings
-            {
-                Id = 1
-            });
-
-
+        db.FeatureSettings.Add(new FeatureSettings { Id = 1 });
         await db.SaveChangesAsync();
     }
 }
 
-
-// ====================================================================
-// SEED ADMIN USER
-// ====================================================================
-
-async Task SeedAdminUserAsync(
-    IServiceProvider sp)
+async Task SeedAdminUserAsync(IServiceProvider sp)
 {
-    var userMgr =
-        sp.GetRequiredService<
-            UserManager<IdentityUser>>();
+    var userMgr = sp.GetRequiredService<UserManager<IdentityUser>>();
+    var roleMgr = sp.GetRequiredService<RoleManager<IdentityRole>>();
 
-    var roleMgr =
-        sp.GetRequiredService<
-            RoleManager<IdentityRole>>();
+    if (!await roleMgr.RoleExistsAsync("SuperAdmin")) return;
 
+    var superAdmins = await userMgr.GetUsersInRoleAsync("SuperAdmin");
+    if (superAdmins.Any()) return;
 
-    if (!await roleMgr.RoleExistsAsync(
-            "SuperAdmin"))
-    {
-        return;
-    }
-
-
-    var superAdmins =
-        await userMgr.GetUsersInRoleAsync(
-            "SuperAdmin");
-
-
-    if (superAdmins.Any())
-    {
-        return;
-    }
-
-
-    var firstUser =
-        await userMgr.Users
-            .OrderBy(
-                u => u.UserName)
-            .FirstOrDefaultAsync();
-
-
+    var firstUser = await userMgr.Users.OrderBy(u => u.UserName).FirstOrDefaultAsync();
     if (firstUser != null)
     {
-        await userMgr.AddToRoleAsync(
-            firstUser,
-            "SuperAdmin");
+        await userMgr.AddToRoleAsync(firstUser, "SuperAdmin");
     }
 }
 
-
-// ====================================================================
-// ENSURE EMPLOYEE ROLE
-// ====================================================================
-
-async Task EnsureEmployeeRoleForAllUsers(
-    IServiceProvider sp)
+async Task EnsureEmployeeRoleForAllUsers(IServiceProvider sp)
 {
-    var userMgr =
-        sp.GetRequiredService<
-            UserManager<IdentityUser>>();
+    var userMgr = sp.GetRequiredService<UserManager<IdentityUser>>();
+    var roleMgr = sp.GetRequiredService<RoleManager<IdentityRole>>();
 
-    var roleMgr =
-        sp.GetRequiredService<
-            RoleManager<IdentityRole>>();
+    if (!await roleMgr.RoleExistsAsync("Employee")) return;
 
-
-    if (!await roleMgr.RoleExistsAsync(
-            "Employee"))
-    {
-        return;
-    }
-
-
-    var users =
-        await userMgr.Users
-            .ToListAsync();
-
-
+    var users = await userMgr.Users.ToListAsync();
     foreach (var user in users)
     {
-        var roles =
-            await userMgr.GetRolesAsync(
-                user);
-
-
+        var roles = await userMgr.GetRolesAsync(user);
         if (!roles.Any())
         {
-            await userMgr.AddToRoleAsync(
-                user,
-                "Employee");
+            await userMgr.AddToRoleAsync(user, "Employee");
         }
     }
 }
 
-
-// ====================================================================
-// HANGFIRE AUTHORIZATION
-// ====================================================================
-
-public class HangfireAuth
-    : IDashboardAuthorizationFilter
+public class HangfireAuth : IDashboardAuthorizationFilter
 {
-    public bool Authorize(
-        DashboardContext context)
+    public bool Authorize(DashboardContext context)
     {
-        var httpContext =
-            context.GetHttpContext();
+        var httpContext = context.GetHttpContext();
+        if (httpContext?.User == null) return false;
 
-
-        if (
-            httpContext == null ||
-            httpContext.User == null)
-        {
-            return false;
-        }
-
-
-        var user =
-            httpContext.User;
-
-
-        return
-            user.Identity?.IsAuthenticated == true &&
-            (
-                user.IsInRole("Admin") ||
-                user.IsInRole("SuperAdmin")
-            );
+        var user = httpContext.User;
+        return user.Identity?.IsAuthenticated == true &&
+               (user.IsInRole("Admin") || user.IsInRole("SuperAdmin"));
     }
 }
