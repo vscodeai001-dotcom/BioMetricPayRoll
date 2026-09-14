@@ -540,42 +540,14 @@ builder.Services.AddScoped<
 
 
 // ============================================================
-// DATA PROTECTION
+// DATA PROTECTION (Free Tier / Ephemeral Fallback)
 // ============================================================
-//
-// IMPORTANT FOR PRODUCTION / CONTAINERS:
-//
-// ASP.NET Core Data Protection is used for:
-// - Authentication cookies
-// - Protected claims
-// - CSRF tokens
-// - Session data
-//
-// On container restart, ephemeral keys cause authentication failures.
-//
-// CONFIGURATION:
-// 1. Key storage: Persistent file system (e.g., /data volume)
-// 2. Key encryption: Environment variable (optional)
-//
-// For Docker/Render:
-// - Mount a persistent volume at /data/dataprotection
-// - Container automatically uses this for keys
-// - Keys survive container restarts
-//
 
-// Configure Data Protection key storage. Prefer an application-local folder
-// inside the content root so keys persist across restarts in typical
-// hosting environments. Allow overriding via DATA_PROTECTION_PATH env var
-// for distributed setups (shared volume, etc.).
 var dataProtectionPath =
     Environment.GetEnvironmentVariable("DATA_PROTECTION_PATH");
 
 if (string.IsNullOrWhiteSpace(dataProtectionPath))
 {
-    // Render/container deployments commonly mount their persistent disk at
-    // /data. Prefer it when available so authentication/DataProtection keys
-    // survive an application process/container restart. Local development
-    // continues to use the project-local directory.
     dataProtectionPath =
         builder.Environment.IsProduction() && Directory.Exists("/data")
             ? "/data/dataprotection"
@@ -584,9 +556,6 @@ if (string.IsNullOrWhiteSpace(dataProtectionPath))
 
 try
 {
-    // Production authentication must never silently fall back to ephemeral
-    // Data Protection keys. A container replacement with a new key ring would
-    // invalidate all existing Web cookies and mobile bearer tokens.
     if (!Directory.Exists(dataProtectionPath))
     {
         Directory.CreateDirectory(dataProtectionPath);
@@ -602,14 +571,11 @@ try
 }
 catch (Exception dpEx)
 {
-    if (builder.Environment.IsProduction())
-    {
-        throw new InvalidOperationException(
-            $"Persistent Data Protection storage is required in Production. Path: {dataProtectionPath}. Attach a persistent disk/volume and ensure it is writable.",
-            dpEx);
-    }
+    Console.WriteLine($"[Warning] Persistent Data Protection directory not accessible ({dataProtectionPath}): {dpEx.Message}. Falling back to Ephemeral Data Protection keys.");
 
-    Console.WriteLine($"Data Protection key storage configuration failed in Development. Path: {dataProtectionPath}. Error: {dpEx.Message}");
+    builder.Services.AddDataProtection()
+        .SetApplicationName("BioMetricPayroll")
+        .UseEphemeralDataProtectionProvider();
 }
 
 
