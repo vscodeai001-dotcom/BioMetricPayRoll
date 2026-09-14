@@ -1323,7 +1323,12 @@
     .admin-office-tooltip {
         z-index: 10000 !important;
         overflow: visible !important;
-        max-width: min(360px, calc(100vw - 32px));
+        max-width: min(380px, calc(100vw - 24px));
+        pointer-events: none !important;
+    }
+
+    .admin-live-hover-tooltip .leaflet-tooltip-content {
+        overflow: visible !important;
     }
 
     .admin-live-hover-card {
@@ -1427,7 +1432,6 @@
     .clickable { cursor: pointer; }
     .clickable:hover { background-color: rgba(0,0,0,.02); }
     body.dark .clickable:hover { background-color: rgba(255,255,255,.02); }
-    }
 
     .payroll-user-marker { background: transparent !important; border: 0 !important; }
     .payroll-map-user {
@@ -2713,6 +2717,50 @@
     }
 
     [JSInvokable]
+    public async Task ApplicationDataChanged(object? data = null)
+    {
+        if (disposed)
+            return;
+
+        try
+        {
+            // Company/settings/employee CRUD can change the current live-map
+            // membership or geofence presentation. Refresh only this component,
+            // not the whole Blazor circuit/page. This is intentionally a
+            // database-backed invalidation, not a browser Refresh-button action.
+            await RefreshLocations();
+            mapNeedsUpdate = true;
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine(
+                $"Admin live map application realtime refresh failed: {ex}");
+        }
+    }
+
+    [JSInvokable]
+    public async Task GeoSettingsChanged(object? data = null)
+    {
+        if (disposed)
+            return;
+
+        try
+        {
+            // Radius/office changes are an explicit realtime test path.
+            // Re-read authoritative CompanySettings so the live circle,
+            // selected card and inside/outside presentation immediately use
+            // the current value without changing historical audit rows.
+            await RefreshLocations();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine(
+                $"Admin live map geo-settings realtime refresh failed: {ex}");
+        }
+    }
+
+    [JSInvokable]
     public async Task SessionStarted(object? data = null)
     {
         if (disposed)
@@ -3324,6 +3372,17 @@
             {
                 await JSRuntime.InvokeVoidAsync(
                     "attendanceRefresh.registerLocationHealth",
+                    liveLocationSignalRReference);
+            }
+            catch { }
+
+            // Subscribe this live-map component directly to the centralized
+            // application invalidation stream. This avoids relying on a full
+            // route refresh for current live state.
+            try
+            {
+                await JSRuntime.InvokeVoidAsync(
+                    "attendanceRefresh.registerApplication",
                     liveLocationSignalRReference);
             }
             catch { }
@@ -4573,6 +4632,14 @@
             {
                 await JSRuntime.InvokeVoidAsync(
                     "attendanceRefresh.unregisterLocationHealth",
+                    liveLocationSignalRReference);
+            }
+            catch { }
+
+            try
+            {
+                await JSRuntime.InvokeVoidAsync(
+                    "attendanceRefresh.unregisterApplication",
                     liveLocationSignalRReference);
             }
             catch { }

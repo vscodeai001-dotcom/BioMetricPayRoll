@@ -158,17 +158,41 @@
                 "payrollDocumentTitle",
                 Navigation.Uri);
 
-            var savedTheme = persistedTheme;
-
-            if (string.IsNullOrWhiteSpace(savedTheme))
+            // Bind this browser tab to the authenticated user's theme namespace
+            // before any cross-tab storage event can be applied.
+            if (!string.IsNullOrWhiteSpace(themeUserId))
             {
-                savedTheme = await JSRuntime.InvokeAsync<string>(
-                    "themeInterop.loadTheme");
+                await JSRuntime.InvokeVoidAsync(
+                    "themeInterop.setActiveUser",
+                    themeUserId);
             }
 
+            // The database preference is authoritative. If it was temporarily
+            // unavailable during circuit startup, use only this user's namespaced
+            // browser cache instead of forcing the application back to light mode.
+            var savedTheme = persistedTheme;
+
+            if (string.IsNullOrWhiteSpace(savedTheme) &&
+                !string.IsNullOrWhiteSpace(themeUserId))
+            {
+                try
+                {
+                    savedTheme = await JSRuntime.InvokeAsync<string>(
+                        "themeInterop.loadTheme",
+                        themeUserId);
+                }
+                catch
+                {
+                    savedTheme = null;
+                }
+            }
+
+            savedTheme = savedTheme == "dark" ? "dark" : "light";
+
             await JSRuntime.InvokeVoidAsync(
-                "themeInterop.setThemeOnBody",
-                savedTheme);
+                "themeInterop.saveTheme",
+                savedTheme,
+                themeUserId);
 
             Theme.SetTheme(savedTheme);
 
@@ -250,16 +274,24 @@
                 ? "dark"
                 : "light";
 
-        await JSRuntime.InvokeVoidAsync(
-            "themeInterop.saveTheme",
-            newTheme);
-
         var authState =
             await AuthState.GetAuthenticationStateAsync();
 
         var userId =
             authState.User.FindFirst(
                 System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+
+        if (!string.IsNullOrWhiteSpace(themeUserId))
+        {
+            await JSRuntime.InvokeVoidAsync(
+                "themeInterop.setActiveUser",
+                themeUserId);
+
+            await JSRuntime.InvokeVoidAsync(
+                "themeInterop.saveTheme",
+                newTheme,
+                themeUserId);
+        }
 
         if (!string.IsNullOrWhiteSpace(themeUserId) && Theme != null)
         {

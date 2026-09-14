@@ -62,7 +62,7 @@ public class GpsSessionCleanupService : BackgroundService
 
         _mobileSessionLeaseSeconds = configuration.GetValue<int>(
             "GpsSessionCleanup:MobileSessionLeaseSeconds",
-            600);
+            315360000); // 10 years; automatic lease expiry is disabled
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -111,25 +111,20 @@ public class GpsSessionCleanupService : BackgroundService
             // still-authenticated tracking session.
             // ================================================================
 
-            // Intentionally no automatic GPS-session termination.
-            // Stale/live presentation is handled independently by
-            // LiveLocationStore/LocationHealthService.
-
-            // Mobile applications can disappear without sending Logout
-            // (for example uninstall, OS force-stop, or lost local token).
-            // Their explicit ANDROID device lease is therefore reconciled
-            // separately. Browser sessions keep the existing indefinite
-            // device-lock semantics.
+            // 24/7 SESSION POLICY:
+            // NEVER infer logout/session termination from elapsed time,
+            // LastSeenAtUtc, missing GPS fixes, missing SignalR traffic,
+            // backgrounding, network loss, or process inactivity.
             //
-            // UPDATE: To ensure 24/7 connectivity and prevent "401 Disconnected"
-            // errors, we no longer automatically remove ANDROID locks.
-            // Mobile sessions are now authoritative and permanent until
-            // an explicit logout or device replacement occurs.
-            // await ReconcileAbandonedMobileSessionsAsync(db, stoppingToken);
+            // Session termination is action-driven only:
+            //   1. explicit manual logout
+            //   2. authoritative second-device replacement
+            //   3. another existing explicit session-ending operation
+            //
+            // This hosted service intentionally performs NO automatic
+            // mobile lock removal and NO automatic GPS-session termination.
+            // Live/offline presentation is handled separately.
 
-            // No automatic timeout pass. Session end is action-driven only:
-            // explicit logout, second-device replacement, or another existing
-            // authoritative session-ending operation.
         }
         catch (Exception ex)
         {
