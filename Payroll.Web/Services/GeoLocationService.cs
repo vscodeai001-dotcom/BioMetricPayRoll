@@ -1338,10 +1338,7 @@ public class GeoLocationService
         double distanceMeters,
         int allowedRadiusMeters,
         bool isWithinAllowedRadius,
-        double accuracyMeters = 0,
-        DateTime? capturedAtUtc = null,
-        string captureSource = "Online",
-        Guid? syncBatchId = null)
+        double accuracyMeters = 0)
     {
         if (employeeId <= 0 ||
             sessionId == Guid.Empty ||
@@ -1358,11 +1355,6 @@ public class GeoLocationService
             await using var db =
                 await _dbFactory.CreateDbContextAsync();
 
-            var serverRecordedAtUtc = DateTime.UtcNow;
-            var originalCaptureUtc = capturedAtUtc ?? serverRecordedAtUtc;
-            if (originalCaptureUtc > serverRecordedAtUtc.AddMinutes(5))
-                originalCaptureUtc = serverRecordedAtUtc;
-
             var record = new EmployeeLocationHistory
             {
                 EmployeeId = employeeId,
@@ -1376,13 +1368,7 @@ public class GeoLocationService
                         ? 0
                         : allowedRadiusMeters,
                 IsWithinAllowedRadius = isWithinAllowedRadius,
-                RecordedAtUtc = serverRecordedAtUtc,
-                CaptureSource = string.IsNullOrWhiteSpace(captureSource) ? "Online" : captureSource,
-                CapturedAtUtc = originalCaptureUtc,
-                SyncBatchId = syncBatchId,
-                SyncedAtUtc = string.Equals(captureSource, "OfflineSync", StringComparison.OrdinalIgnoreCase)
-                    ? serverRecordedAtUtc
-                    : null
+                RecordedAtUtc = DateTime.UtcNow
             };
 
             db.EmployeeLocationHistory.Add(record);

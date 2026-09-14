@@ -12,81 +12,25 @@ window.payrollEscapeHtml = function (value) {
 // THEME
 // ============================================================
 
-// Theme is persisted per authenticated user on the server.
-// Browser storage is only a small same-user/tab cache and is namespaced
-// by the authenticated user's stable key so one user can never inherit
-// another user's theme on the same browser.
 window.themeInterop = {
-    _activeUserKey: null,
-
-    _themeStorageKey: function (userKey) {
-        var key = String(userKey || 'anonymous').trim().toLowerCase();
-        return 'payroll_theme_' + (key || 'anonymous');
-    },
-
-    setActiveUser: function (userKey) {
-        var key = String(userKey || '').trim();
-        this._activeUserKey = key || null;
-        return this._activeUserKey;
-    },
-
     setThemeOnBody: function (theme) {
-        var normalized = theme === 'dark' ? 'dark' : 'light';
-        document.body.classList.toggle('dark', normalized === 'dark');
-        document.documentElement.setAttribute('data-theme', normalized);
-        document.documentElement.setAttribute('data-bs-theme', normalized);
+        if (theme === 'dark') document.body.classList.add('dark');
+        else document.body.classList.remove('dark');
     },
-
-    saveTheme: function (theme, userKey) {
-        var normalized = theme === 'dark' ? 'dark' : 'light';
-        try {
-            localStorage.setItem(this._themeStorageKey(userKey), normalized);
-        } catch (e) {
-            console.warn('Unable to save theme cache to localStorage', e);
-        }
-        this.setThemeOnBody(normalized);
+    saveTheme: function (theme) {
+        try { localStorage.setItem('payroll_theme', theme); }
+        catch (e) { console.warn('Unable to save theme to localStorage', e); }
     },
-
-    loadTheme: function (userKey) {
-        try {
-            return localStorage.getItem(this._themeStorageKey(userKey)) || 'light';
-        } catch (e) {
-            console.warn('Unable to read theme cache from localStorage', e);
-            return 'light';
-        }
+    loadTheme: function () {
+        try { return localStorage.getItem('payroll_theme') || 'light'; }
+        catch (e) { console.warn('Unable to read theme from localStorage', e); return 'light'; }
     },
-
-    applySavedTheme: function (userKey) {
-        var theme = this.loadTheme(userKey);
+    applySavedTheme: function () {
+        var theme = this.loadTheme();
         this.setThemeOnBody(theme);
         return theme;
     }
 };
-
-// Keep already-open tabs for the same authenticated user synchronized.
-// MainLayout passes the user-specific key when saving the preference.
-try {
-    window.addEventListener('storage', function (event) {
-        if (!event.key || event.key.indexOf('payroll_theme_') !== 0) return;
-        if (event.newValue !== 'dark' && event.newValue !== 'light') return;
-
-        var interop = window.themeInterop;
-        if (!interop ||
-            typeof interop.setThemeOnBody !== 'function') {
-            return;
-        }
-
-        // Storage events are origin-wide. Only the authenticated user's
-        // namespace may change the theme of this tab.
-        var activeKey = interop._activeUserKey
-            ? interop._themeStorageKey(interop._activeUserKey)
-            : null;
-
-        if (!activeKey || event.key !== activeKey) return;
-
-        interop.setThemeOnBody(event.newValue);
-    });
-} catch (e) { }
 
 // ============================================================
 // GEOLOCATION - ROBUST CURRENT POSITION
@@ -1747,58 +1691,11 @@ window.payrollEnsureAdminTooltipVisibility = function () {
                 display: block !important;
                 visibility: visible !important;
                 opacity: 1 !important;
-                pointer-events: none !important;
+                pointer-events: auto !important;
             }
         `;
         document.head.appendChild(style);
     } catch (_) {}
-};
-
-window.payrollKeepAdminTooltipVisible = function (map, marker) {
-    if (!map || !marker || marker._payrollTooltipVisibilityBound) return;
-    marker._payrollTooltipVisibilityBound = true;
-
-    marker.on('tooltipopen', function (event) {
-        try {
-            window.requestAnimationFrame(function () {
-                try {
-                    var tooltip = event && event.tooltip;
-                    var element = tooltip && tooltip.getElement
-                        ? tooltip.getElement()
-                        : null;
-                    var mapElement = map.getContainer();
-
-                    if (!element || !mapElement) return;
-
-                    var rect = element.getBoundingClientRect();
-                    var mapRect = mapElement.getBoundingClientRect();
-                    var padding = 12;
-                    var dx = 0;
-                    var dy = 0;
-
-                    if (rect.left < mapRect.left + padding) {
-                        dx = rect.left - (mapRect.left + padding);
-                    } else if (rect.right > mapRect.right - padding) {
-                        dx = rect.right - (mapRect.right - padding);
-                    }
-
-                    if (rect.top < mapRect.top + padding) {
-                        dy = rect.top - (mapRect.top + padding);
-                    } else if (rect.bottom > mapRect.bottom - padding) {
-                        dy = rect.bottom - (mapRect.bottom - padding);
-                    }
-
-                    if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
-                        map.panBy([dx, dy], {
-                            animate: true,
-                            duration: 0.22,
-                            noMoveStart: true
-                        });
-                    }
-                } catch (_) {}
-            });
-        } catch (_) {}
-    });
 };
 
 window.payrollCreateAdminTooltipHtml = function (data, initials, withinRange, distance, tooltipDistance, tooltipEta, tooltipSpeed) {
@@ -3462,13 +3359,6 @@ window.updateAdminLiveStaffMap =
                         }
 
                         markerCreated = true;
-
-                        if (typeof window.payrollKeepAdminTooltipVisible === 'function') {
-                            window.payrollKeepAdminTooltipVisible(
-                                state.map,
-                                state.markers[employeeId]
-                            );
-                        }
                     }
                     else {
                         state.markers[
@@ -3490,13 +3380,6 @@ window.updateAdminLiveStaffMap =
                                 } catch (e) { }
                             });
                             state.markerDotNetRef = dotNetRef;
-                        }
-
-                        if (typeof window.payrollKeepAdminTooltipVisible === 'function') {
-                            window.payrollKeepAdminTooltipVisible(
-                                state.map,
-                                state.markers[employeeId]
-                            );
                         }
 
                         const now = Date.now();
@@ -3583,18 +3466,15 @@ window.updateAdminLiveStaffMap =
                         state.lastLocationAt[employeeId] = Date.now();
                     }
 
-                    // Default live map is marker-only. The selected employee
-                    // may show the existing route/trail; unselected employees
-                    // never create or display route lines.
-                    if (isSelected && points.length > 1) {
+                    if (points.length > 1) {
                         if (!state.trails[employeeId]) {
                             state.trails[employeeId] = L.polyline(
                                 points,
                                 {
                                     color: markerColor,
-                                    weight: 5,
-                                    opacity: .9,
-                                    dashArray: null
+                                    weight: isSelected ? 5 : 3,
+                                    opacity: isSelected ? .9 : .45,
+                                    dashArray: isSelected ? null : '5,7'
                                 }
                             ).addTo(state.map);
                         }
@@ -3602,15 +3482,11 @@ window.updateAdminLiveStaffMap =
                             state.trails[employeeId].setLatLngs(points);
                             state.trails[employeeId].setStyle({
                                 color: markerColor,
-                                weight: 5,
-                                opacity: .9,
-                                dashArray: null
+                                weight: isSelected ? 5 : 3,
+                                opacity: isSelected ? .9 : .45,
+                                dashArray: isSelected ? null : '5,7'
                             });
                         }
-                    }
-                    else if (state.trails[employeeId]) {
-                        try { state.map.removeLayer(state.trails[employeeId]); } catch (e) { }
-                        delete state.trails[employeeId];
                     }
 
                     if (hasCollisionOffset) {
@@ -3716,78 +3592,72 @@ window.updateAdminLiveStaffMap =
                         });
                     }
 
-                    // Road routing is a selected-employee detail only.
-                    // The default live map shows every employee marker but does
-                    // not draw employee-to-office routes. This keeps the map
-                    // readable and avoids a route line for every employee.
-                    if (isSelected) {
-                        const lineOptions = {
-                            color: markerColor,
-                            weight: 2,
-                            opacity: .8,
-                            dashArray: '6,6'
-                        };
+                    const lineOptions = {
+                        color: markerColor,
+                        weight: 2,
+                        opacity: .8,
+                        dashArray: '6,6'
+                    };
 
-                        if (!state.roadRouteCasings[employeeId]) {
-                            state.roadRouteCasings[employeeId] = L.polyline([], {
-                                color: '#ffffff', weight: 7, opacity: .72, lineCap: 'round', lineJoin: 'round'
-                            }).addTo(state.map);
-                        }
-                        if (!state.roadRouteLines[employeeId]) {
-                            state.roadRouteLines[employeeId] = L.polyline([], {
-                                color: '#1688ff', weight: 4, opacity: .95, lineCap: 'round', lineJoin: 'round'
-                            }).addTo(state.map);
-                        }
-
-                        const routeState = state.routeStates[employeeId];
-                        const routeNow = Date.now();
-
-                        routeState.lastRawPosition = position.slice();
-                        routeState.lastRawPositionAt = routeNow;
-
-                        window.payrollRequestJourneyRoute(
-                            routeState,
-                            position,
-                            office,
-                            { minMoveMeters: 25, minIntervalMs: 30000 }
-                        ).then(function(route) {
-                            if (!route || !state.markers[employeeId] || Number(selectedId) !== employeeId) return;
-                            const remaining = route.distanceMeters || window.payrollHaversineMeters(state.markers[employeeId].getLatLng(), office);
-                            state.roadRouteCasings[employeeId]?.setLatLngs(route.geometry);
-                            state.roadRouteLines[employeeId]?.setLatLngs(route.geometry);
-                            const routeDistance = window.payrollFormatRouteDistance(remaining);
-                            const eta = window.payrollFormatRouteDuration(route.durationSeconds);
-
-                            const distanceElement = document.querySelector(`[data-selected-route-distance="${employeeId}"]`);
-                            if (distanceElement) distanceElement.innerText = routeDistance;
-
-                            const etaElement = document.querySelector(`[data-selected-eta="${employeeId}"]`);
-                            if (etaElement) etaElement.innerText = eta;
-
-                            const hoverSpeed = window.payrollFormatSpeed(x.speedMps || state.markers[employeeId]._speedMps || 0);
-                            const hoverWithin = Boolean(x.isWithinAllowedRadius);
-
-                            if (state.markers[employeeId].getTooltip()) {
-                                state.markers[employeeId].setTooltipContent(
-                                    window.payrollCreateAdminTooltipHtml(
-                                        x, initials.toUpperCase(), hoverWithin, distance, routeDistance, eta, hoverSpeed
-                                    )
-                                );
-                            }
-                        }).catch(function() {});
-                    } else {
-                        // Unselected employees must never retain an old route.
-                        try { state.roadRouteLines[employeeId]?.remove(); } catch (e) {}
-                        try { state.roadRouteCasings[employeeId]?.remove(); } catch (e) {}
-                        delete state.roadRouteLines[employeeId];
-                        delete state.roadRouteCasings[employeeId];
-                        try { state.routeStates[employeeId]?.controller?.abort(); } catch (e) {}
-                        delete state.routeStates[employeeId];
+                    if (!state.roadRouteCasings[employeeId]) {
+                        state.roadRouteCasings[employeeId] = L.polyline([], {
+                            color: '#ffffff', weight: 7, opacity: .72, lineCap: 'round', lineJoin: 'round'
+                        }).addTo(state.map);
+                    }
+                    if (!state.roadRouteLines[employeeId]) {
+                        state.roadRouteLines[employeeId] = L.polyline([], {
+                            color: '#1688ff', weight: 4, opacity: .95, lineCap: 'round', lineJoin: 'round'
+                        }).addTo(state.map);
                     }
 
-                    // Route generation is intentionally handled only by the
-                    // selected-employee branch above. Unselected employees never
-                    // recreate or dereference a deleted route state.
+                    // Throttled road routing: actual GPS points trigger route refreshes,
+                    // while marker motion remains smoothly interpolated in the browser.
+                    const routeState = state.routeStates[employeeId];
+                    const routeNow = Date.now();
+
+                    routeState.lastRawPosition = position.slice();
+                    routeState.lastRawPositionAt = routeNow;
+
+                    window.payrollRequestJourneyRoute(
+                        routeState,
+                        position,
+                        office,
+                        { minMoveMeters: 25, minIntervalMs: 30000 }
+                    ).then(function(route) {
+                        if (!route || !state.markers[employeeId]) return;
+                        const remaining = route.distanceMeters || window.payrollHaversineMeters(state.markers[employeeId].getLatLng(), office);
+                        state.roadRouteCasings[employeeId]?.setLatLngs(route.geometry);
+                        state.roadRouteLines[employeeId]?.setLatLngs(route.geometry);
+                        const routeDistance = window.payrollFormatRouteDistance(remaining);
+                        const eta = window.payrollFormatRouteDuration(route.durationSeconds);
+
+                        const distanceElement = document.querySelector(`[data-selected-route-distance="${employeeId}"]`);
+                        if (distanceElement) {
+                            distanceElement.innerText = routeDistance;
+                        }
+
+                        const etaElement = document.querySelector(`[data-selected-eta="${employeeId}"]`);
+                        if (etaElement) {
+                            etaElement.innerText = eta;
+                        }
+
+                        const name = window.payrollEscapeHtml(x.name || 'Employee');
+                        const hoverSpeed = window.payrollFormatSpeed(x.speedMps || state.markers[employeeId]._speedMps || 0);
+                        const hoverWithin = Boolean(x.isWithinAllowedRadius);
+                        const cleanName = name.replace(/<[^>]*>/g, '').trim();
+                        const parts = cleanName.split(/\s+/).filter(Boolean);
+                        const hoverInitials = initials.toUpperCase();
+
+                        if (state.markers[employeeId].getTooltip()) {
+                            state.markers[employeeId].setTooltipContent(
+                                window.payrollCreateAdminTooltipHtml(
+                                    x, hoverInitials, hoverWithin, distance, routeDistance, eta, hoverSpeed
+                                )
+                            );
+                        }
+                    }).catch(function() {});
+
+                    // Throttled road routing
                 });
 
             // --------------------------------------------------------

@@ -21,7 +21,7 @@
         // This prevents a light-mode flash when the user previously selected dark mode.
         (function () {
             try {
-                var theme = 'light';
+                var theme = localStorage.getItem('payroll_theme') === 'dark' ? 'dark' : 'light';
                 if (theme === 'dark') document.body.classList.add('dark');
             } catch (e) { }
         })();
@@ -53,7 +53,7 @@
     <!-- Identity page scripts -->
     @await RenderSectionAsync("Scripts", required: false)
 
-    <script src="~/js/themeInterop.js?v=20260914-theme-session-v11"></script>
+    <script src="~/js/themeInterop.js?v=20260907-identity-theme"></script>
     <!-- APPLY DARK/LIGHT THEME WHEN PAGE LOADS -->
     <script>
         (function () {
@@ -62,7 +62,7 @@
                     apply: function (theme) {
                         var value = theme === 'dark' ? 'dark' : 'light';
                         window.themeInterop.setThemeOnBody(value);
-                        window.themeInterop.saveTheme(value, 'anonymous');
+                        window.themeInterop.saveTheme(value);
                         var icon = document.getElementById('identityThemeIcon');
                         if (icon) {
                             icon.className = value === 'dark' ? 'bi bi-sun-fill' : 'bi bi-moon-fill';
@@ -80,7 +80,7 @@
                     }
                 };
 
-                window.identityTheme.apply(window.themeInterop.loadTheme('anonymous'));
+                window.identityTheme.apply(window.themeInterop.loadTheme());
             } catch (e) {
                 console.warn('Theme init failed', e);
             }

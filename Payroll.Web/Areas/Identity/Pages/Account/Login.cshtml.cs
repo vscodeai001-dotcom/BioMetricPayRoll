@@ -444,7 +444,7 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
 
                 await _signInManager.SignInWithClaimsAsync(
                     user,
-                    true,
+                    Input.RememberMe,
                     claims);
             }
             catch (Exception ex)
@@ -487,7 +487,7 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
                     IsEssential = true,
 
                     MaxAge =
-                        TimeSpan.FromDays(3650),
+                        TimeSpan.FromDays(365),
 
                     Path = "/"
                 });

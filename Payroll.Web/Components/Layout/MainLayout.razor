@@ -158,51 +158,17 @@
                 "payrollDocumentTitle",
                 Navigation.Uri);
 
-            // Bind this browser tab to the authenticated user's theme namespace
-            // before any cross-tab storage event can be applied.
-            if (!string.IsNullOrWhiteSpace(themeUserId))
-            {
-                await JSRuntime.InvokeVoidAsync(
-                    "themeInterop.setActiveUser",
-                    themeUserId);
-            }
-
-            // The database preference is authoritative. If it was temporarily
-            // unavailable during circuit startup, use only this user's namespaced
-            // browser cache instead of forcing the application back to light mode.
-            // The database preference is authoritative for authenticated users.
-            // Re-read it once after JS becomes interactive so a newly opened tab
-            // cannot inherit another circuit's in-memory ThemeService value.
             var savedTheme = persistedTheme;
-            if (!string.IsNullOrWhiteSpace(themeUserId))
+
+            if (string.IsNullOrWhiteSpace(savedTheme))
             {
-                try
-                {
-                    savedTheme = await Theme.GetThemeAsync(themeUserId) ?? savedTheme;
-                }
-                catch { }
-
-                if (string.IsNullOrWhiteSpace(savedTheme))
-                {
-                    try
-                    {
-                        savedTheme = await JSRuntime.InvokeAsync<string>(
-                            "themeInterop.loadTheme",
-                            themeUserId);
-                    }
-                    catch
-                    {
-                        savedTheme = null;
-                    }
-                }
+                savedTheme = await JSRuntime.InvokeAsync<string>(
+                    "themeInterop.loadTheme");
             }
-
-            savedTheme = savedTheme == "dark" ? "dark" : "light";
 
             await JSRuntime.InvokeVoidAsync(
-                "themeInterop.saveTheme",
-                savedTheme,
-                themeUserId);
+                "themeInterop.setThemeOnBody",
+                savedTheme);
 
             Theme.SetTheme(savedTheme);
 
@@ -284,24 +250,16 @@
                 ? "dark"
                 : "light";
 
+        await JSRuntime.InvokeVoidAsync(
+            "themeInterop.saveTheme",
+            newTheme);
+
         var authState =
             await AuthState.GetAuthenticationStateAsync();
 
         var userId =
             authState.User.FindFirst(
                 System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
-
-        if (!string.IsNullOrWhiteSpace(themeUserId))
-        {
-            await JSRuntime.InvokeVoidAsync(
-                "themeInterop.setActiveUser",
-                themeUserId);
-
-            await JSRuntime.InvokeVoidAsync(
-                "themeInterop.saveTheme",
-                newTheme,
-                themeUserId);
-        }
 
         if (!string.IsNullOrWhiteSpace(themeUserId) && Theme != null)
         {

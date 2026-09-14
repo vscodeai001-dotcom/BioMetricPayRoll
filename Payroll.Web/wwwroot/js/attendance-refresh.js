@@ -129,7 +129,7 @@ window.attendanceRefresh = (function () {
                     // Deliver the application-wide invalidation immediately.
                     // Database writes are already the source of truth; there is
                     // intentionally no artificial debounce here.
-                    await notifyApplicationListeners("ApplicationDataChanged", data);
+                    await notifyApplicationListeners(data);
 
                 }
             );
@@ -700,13 +700,9 @@ window.attendanceRefresh = (function () {
                 const targetMethod = typeof data === "undefined" ? "ApplicationDataChanged" : (typeof methodName === "string" ? methodName : "ApplicationDataChanged");
                 const payload = typeof data === "undefined" ? methodName : data;
 
-                // Application-wide listeners currently consume the event as an
-                // invalidation signal. Do not marshal the arbitrary SignalR
-                // payload into Blazor JS interop. This also prevents disposed
-                // circuit references from producing parameter-registration
-                // errors in the browser console.
                 await listener.invokeMethodAsync(
-                    targetMethod
+                    targetMethod,
+                    payload
                 );
             }
             catch (error) {

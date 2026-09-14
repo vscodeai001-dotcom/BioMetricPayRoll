@@ -339,24 +339,13 @@ public sealed class MobileEmployeeController : ControllerBase
             request.Accuracy,
             distance.DistanceMeters,
             distance.AllowedRadiusMeters,
-            distance.IsWithinAllowedRadius,
-            capturedAtUtc: ToCapturedUtc(request.Timestamp));
+            distance.IsWithinAllowedRadius);
 
         if (!sessionUpdated)
             return Conflict(new { success = false, message = "GPS session is no longer active." });
 
-        await _geo.SaveLocationHistoryAsync(
-            employeeId,
-            sessionId,
-            request.Latitude,
-            request.Longitude,
-            distance.DistanceMeters,
-            distance.AllowedRadiusMeters,
-            distance.IsWithinAllowedRadius,
-            request.Accuracy,
-            ToCapturedUtc(request.Timestamp),
-            string.IsNullOrWhiteSpace(request.CaptureSource) ? "Online" : request.CaptureSource,
-            request.SyncBatchId);
+        await _geo.SaveLocationHistoryAsync(employeeId, sessionId, request.Latitude, request.Longitude,
+            distance.DistanceMeters, distance.AllowedRadiusMeters, distance.IsWithinAllowedRadius, request.Accuracy);
 
         await using (var db = await _dbFactory.CreateDbContextAsync())
         {
@@ -780,36 +769,6 @@ public sealed class MobileEmployeeController : ControllerBase
         public double Speed { get; set; }
         public long Timestamp { get; set; }
         public int BatteryLevel { get; set; }
-
-        // Offline-capable clients may supply the original capture identity/time.
-        // These are transport metadata only and do not change business rules.
-        public string? ClientEventId { get; set; }
-        public long Sequence { get; set; }
-        public string? CaptureSource { get; set; }
-        public Guid? SyncBatchId { get; set; }
-    }
-
-    private static DateTime ToCapturedUtc(long timestamp)
-    {
-        if (timestamp <= 0)
-            return DateTime.UtcNow;
-
-        try
-        {
-            var value = DateTimeOffset.FromUnixTimeMilliseconds(timestamp).UtcDateTime;
-            var now = DateTime.UtcNow;
-
-            // Reject impossible future timestamps while preserving genuine
-            // offline timestamps. The GPS business decision remains unchanged.
-            if (value > now.AddMinutes(5))
-                return now;
-
-            return value;
-        }
-        catch
-        {
-            return DateTime.UtcNow;
-        }
     }
 
     public sealed class EmployeePunchRequest { public string Type { get; set; } = "IN"; public double Latitude { get; set; } public double Longitude { get; set; } public double Accuracy { get; set; } }
