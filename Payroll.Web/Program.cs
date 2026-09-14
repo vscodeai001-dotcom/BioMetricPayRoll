@@ -178,6 +178,11 @@ builder.Services.AddSingleton<
 // Background service broadcasting location health for admin dashboards
 builder.Services.AddHostedService<LocationHealthService>();
 
+// Keep the Web process alive if Neon is temporarily unavailable at startup.
+// Database-backed requests recover automatically once connectivity returns.
+// This does not create a second database or alter the existing schema.
+builder.Services.AddHostedService<NeonDatabaseRecoveryService>();
+
 
 // ============================================================
 // POSTGRESQL DATETIME COMPATIBILITY
@@ -508,6 +513,8 @@ builder.Services.ConfigureApplicationCookie(
         options.Cookie.SecurePolicy =
             CookieSecurePolicy.Always;
         options.Cookie.SameSite = SameSiteMode.Lax;
+        options.Cookie.IsEssential = true;
+        options.Cookie.MaxAge = TimeSpan.FromDays(3650);
     });
 
 
@@ -538,42 +545,14 @@ builder.Services.AddScoped<
 
 
 // ============================================================
-// DATA PROTECTION
+// DATA PROTECTION (Free Tier / Ephemeral Fallback)
 // ============================================================
-//
-// IMPORTANT FOR PRODUCTION / CONTAINERS:
-//
-// ASP.NET Core Data Protection is used for:
-// - Authentication cookies
-// - Protected claims
-// - CSRF tokens
-// - Session data
-//
-// On container restart, ephemeral keys cause authentication failures.
-//
-// CONFIGURATION:
-// 1. Key storage: Persistent file system (e.g., /data volume)
-// 2. Key encryption: Environment variable (optional)
-//
-// For Docker/Render:
-// - Mount a persistent volume at /data/dataprotection
-// - Container automatically uses this for keys
-// - Keys survive container restarts
-//
 
-// Configure Data Protection key storage. Prefer an application-local folder
-// inside the content root so keys persist across restarts in typical
-// hosting environments. Allow overriding via DATA_PROTECTION_PATH env var
-// for distributed setups (shared volume, etc.).
 var dataProtectionPath =
     Environment.GetEnvironmentVariable("DATA_PROTECTION_PATH");
 
 if (string.IsNullOrWhiteSpace(dataProtectionPath))
 {
-    // Render/container deployments commonly mount their persistent disk at
-    // /data. Prefer it when available so authentication/DataProtection keys
-    // survive an application process/container restart. Local development
-    // continues to use the project-local directory.
     dataProtectionPath =
         builder.Environment.IsProduction() && Directory.Exists("/data")
             ? "/data/dataprotection"
@@ -582,11 +561,14 @@ if (string.IsNullOrWhiteSpace(dataProtectionPath))
 
 try
 {
-    // Ensure the directory exists and is writable
     if (!Directory.Exists(dataProtectionPath))
     {
         Directory.CreateDirectory(dataProtectionPath);
     }
+
+    var probePath = Path.Combine(dataProtectionPath, ".write-probe");
+    File.WriteAllText(probePath, DateTime.UtcNow.ToString("O"));
+    File.Delete(probePath);
 
     builder.Services.AddDataProtection()
         .SetApplicationName("BioMetricPayroll")
@@ -594,9 +576,11 @@ try
 }
 catch (Exception dpEx)
 {
-    // If persisting to file system fails fall back to default in-memory keys
-    // but log the error so operators can fix permissions or volume mounts.
-    Console.WriteLine($"Data Protection key storage configuration failed. Using default in-memory storage. Path: {dataProtectionPath}. Error: {dpEx.Message}");
+    Console.WriteLine($"[Warning] Persistent Data Protection directory not accessible ({dataProtectionPath}): {dpEx.Message}. Falling back to Ephemeral Data Protection keys.");
+
+    builder.Services.AddDataProtection()
+        .SetApplicationName("BioMetricPayroll")
+        .UseEphemeralDataProtectionProvider();
 }
 
 
@@ -684,10 +668,16 @@ builder.Services.AddBlazoredToast();
 // Endpoint: /health
 //
 
-builder.Services.AddHealthChecks()
-    .AddDbContextCheck<AppDbContext>(
-        name: "database",
-        tags: new[] { "ready" });
+// IMPORTANT: /health is a LIVENESS endpoint for the container/orchestrator.
+// It must not depend on Neon/PostgreSQL availability. A transient database
+// outage must never cause the hosting platform to restart this process, because
+// a process restart can invalidate authentication material if the deployment
+// is not using persistent Data Protection keys.
+//
+// Database readiness remains observable separately through the application's
+// normal database operations and logs; it is deliberately not coupled to the
+// liveness endpoint used by Render/container health checks.
+builder.Services.AddHealthChecks();
 
 
 // ============================================================
@@ -915,9 +905,8 @@ catch (Exception ex)
 
     logger.LogError(
         ex,
-        "Error during DB migration or startup schema validation.");
-
-    throw;
+        "Initial Neon database migration/schema validation was unavailable. " +
+        "Keeping the Web process alive; the background Neon recovery service will retry.");
 }
 
 
