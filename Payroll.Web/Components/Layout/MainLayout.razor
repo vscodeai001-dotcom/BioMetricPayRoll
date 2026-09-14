@@ -170,20 +170,30 @@
             // The database preference is authoritative. If it was temporarily
             // unavailable during circuit startup, use only this user's namespaced
             // browser cache instead of forcing the application back to light mode.
+            // The database preference is authoritative for authenticated users.
+            // Re-read it once after JS becomes interactive so a newly opened tab
+            // cannot inherit another circuit's in-memory ThemeService value.
             var savedTheme = persistedTheme;
-
-            if (string.IsNullOrWhiteSpace(savedTheme) &&
-                !string.IsNullOrWhiteSpace(themeUserId))
+            if (!string.IsNullOrWhiteSpace(themeUserId))
             {
                 try
                 {
-                    savedTheme = await JSRuntime.InvokeAsync<string>(
-                        "themeInterop.loadTheme",
-                        themeUserId);
+                    savedTheme = await Theme.GetThemeAsync(themeUserId) ?? savedTheme;
                 }
-                catch
+                catch { }
+
+                if (string.IsNullOrWhiteSpace(savedTheme))
                 {
-                    savedTheme = null;
+                    try
+                    {
+                        savedTheme = await JSRuntime.InvokeAsync<string>(
+                            "themeInterop.loadTheme",
+                            themeUserId);
+                    }
+                    catch
+                    {
+                        savedTheme = null;
+                    }
                 }
             }
 

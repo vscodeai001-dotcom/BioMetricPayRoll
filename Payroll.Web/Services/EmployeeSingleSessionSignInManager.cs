@@ -479,7 +479,7 @@ namespace Payroll.Web.Services
 
                 await SignInWithClaimsAsync(
                     user,
-                    isPersistent,
+                    true,
                     claims);
 
 
@@ -514,7 +514,7 @@ namespace Payroll.Web.Services
                         IsEssential = true,
 
                         MaxAge =
-                            TimeSpan.FromDays(365),
+                            TimeSpan.FromDays(3650),
 
                         Path = "/"
                     });

@@ -508,6 +508,8 @@ builder.Services.ConfigureApplicationCookie(
         options.Cookie.SecurePolicy =
             CookieSecurePolicy.Always;
         options.Cookie.SameSite = SameSiteMode.Lax;
+        options.Cookie.IsEssential = true;
+        options.Cookie.MaxAge = TimeSpan.FromDays(3650);
     });
 
 
@@ -582,11 +584,17 @@ if (string.IsNullOrWhiteSpace(dataProtectionPath))
 
 try
 {
-    // Ensure the directory exists and is writable
+    // Production authentication must never silently fall back to ephemeral
+    // Data Protection keys. A container replacement with a new key ring would
+    // invalidate all existing Web cookies and mobile bearer tokens.
     if (!Directory.Exists(dataProtectionPath))
     {
         Directory.CreateDirectory(dataProtectionPath);
     }
+
+    var probePath = Path.Combine(dataProtectionPath, ".write-probe");
+    File.WriteAllText(probePath, DateTime.UtcNow.ToString("O"));
+    File.Delete(probePath);
 
     builder.Services.AddDataProtection()
         .SetApplicationName("BioMetricPayroll")
@@ -594,9 +602,14 @@ try
 }
 catch (Exception dpEx)
 {
-    // If persisting to file system fails fall back to default in-memory keys
-    // but log the error so operators can fix permissions or volume mounts.
-    Console.WriteLine($"Data Protection key storage configuration failed. Using default in-memory storage. Path: {dataProtectionPath}. Error: {dpEx.Message}");
+    if (builder.Environment.IsProduction())
+    {
+        throw new InvalidOperationException(
+            $"Persistent Data Protection storage is required in Production. Path: {dataProtectionPath}. Attach a persistent disk/volume and ensure it is writable.",
+            dpEx);
+    }
+
+    Console.WriteLine($"Data Protection key storage configuration failed in Development. Path: {dataProtectionPath}. Error: {dpEx.Message}");
 }
 
 

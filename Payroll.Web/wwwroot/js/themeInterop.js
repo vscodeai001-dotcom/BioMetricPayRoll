@@ -34,6 +34,7 @@ window.themeInterop = {
         var normalized = theme === 'dark' ? 'dark' : 'light';
         document.body.classList.toggle('dark', normalized === 'dark');
         document.documentElement.setAttribute('data-theme', normalized);
+        document.documentElement.setAttribute('data-bs-theme', normalized);
     },
 
     saveTheme: function (theme, userKey) {
