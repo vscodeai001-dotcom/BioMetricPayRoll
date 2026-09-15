@@ -172,6 +172,9 @@
             // browser cache instead of forcing the application back to light mode.
             var savedTheme = persistedTheme;
 
+            // The server preference is authoritative. Browser storage is only
+            // a per-user cache/fallback. Never replace a saved server value
+            // with another user's or anonymous browser value.
             if (string.IsNullOrWhiteSpace(savedTheme) &&
                 !string.IsNullOrWhiteSpace(themeUserId))
             {
@@ -187,12 +190,26 @@
                 }
             }
 
-            savedTheme = savedTheme == "dark" ? "dark" : "light";
-
-            await JSRuntime.InvokeVoidAsync(
-                "themeInterop.saveTheme",
+            savedTheme = string.Equals(
                 savedTheme,
-                themeUserId);
+                "dark",
+                StringComparison.OrdinalIgnoreCase)
+                ? "dark"
+                : "light";
+
+            if (!string.IsNullOrWhiteSpace(themeUserId))
+            {
+                await JSRuntime.InvokeVoidAsync(
+                    "themeInterop.saveTheme",
+                    savedTheme,
+                    themeUserId);
+            }
+            else
+            {
+                await JSRuntime.InvokeVoidAsync(
+                    "themeInterop.setThemeOnBody",
+                    "light");
+            }
 
             Theme.SetTheme(savedTheme);
 
@@ -203,7 +220,7 @@
         {
             _logger.LogWarning(
                 ex,
-                "Failed to run themeInterop.applySavedTheme().");
+                "Failed to initialize the authenticated user's theme.");
         }
     }
 
@@ -273,13 +290,6 @@
             current == "light"
                 ? "dark"
                 : "light";
-
-        var authState =
-            await AuthState.GetAuthenticationStateAsync();
-
-        var userId =
-            authState.User.FindFirst(
-                System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
 
         if (!string.IsNullOrWhiteSpace(themeUserId))
         {

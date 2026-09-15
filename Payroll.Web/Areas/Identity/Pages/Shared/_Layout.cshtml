@@ -17,14 +17,11 @@
 
 <body>
     <script>
-        // Apply the same persisted application theme immediately on Identity pages.
-        // This prevents a light-mode flash when the user previously selected dark mode.
-        (function () {
-            try {
-                var theme = localStorage.getItem('payroll_theme') === 'dark' ? 'dark' : 'light';
-                if (theme === 'dark') document.body.classList.add('dark');
-            } catch (e) { }
-        })();
+        // Identity pages run before an authenticated user is known.
+        // Therefore they always start in the application's default light theme.
+        // The authenticated MainLayout loads the user's saved preference after login.
+        document.body.classList.remove('dark');
+        document.documentElement.setAttribute('data-theme', 'light');
     </script>
 
     <header class="identity-header">
@@ -62,7 +59,6 @@
                     apply: function (theme) {
                         var value = theme === 'dark' ? 'dark' : 'light';
                         window.themeInterop.setThemeOnBody(value);
-                        window.themeInterop.saveTheme(value);
                         var icon = document.getElementById('identityThemeIcon');
                         if (icon) {
                             icon.className = value === 'dark' ? 'bi bi-sun-fill' : 'bi bi-moon-fill';
@@ -80,7 +76,10 @@
                     }
                 };
 
-                window.identityTheme.apply(window.themeInterop.loadTheme());
+                // No authenticated user exists on Identity pages, so the
+                // default is light. MainLayout restores the user's saved theme
+                // immediately after successful authentication.
+                window.identityTheme.apply('light');
             } catch (e) {
                 console.warn('Theme init failed', e);
             }

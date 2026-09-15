@@ -9,6 +9,29 @@ window.payrollEscapeHtml = function (value) {
 };
 
 // ============================================================
+// DOCUMENT TITLE
+// ============================================================
+
+// MainLayout invokes this helper during the first render and on navigation.
+// Keep it deliberately conservative so HeadOutlet/PageTitle remains the
+// authoritative title when a page provides one. The fallback prevents a
+// missing JS function from generating a Blazor JSInterop exception.
+window.payrollDocumentTitle = function (location) {
+    try {
+        var current = document.title || '';
+        if (current.trim()) {
+            return current;
+        }
+
+        document.title = 'Payroll.Web';
+        return document.title;
+    } catch (e) {
+        console.warn('Unable to set document title', e);
+        return '';
+    }
+};
+
+// ============================================================
 // THEME
 // ============================================================
 
@@ -20,8 +43,11 @@ window.themeInterop = {
     _activeUserKey: null,
 
     _themeStorageKey: function (userKey) {
-        var key = String(userKey || 'anonymous').trim().toLowerCase();
-        return 'payroll_theme_' + (key || 'anonymous');
+        var key = String(userKey || '').trim().toLowerCase();
+
+        // Never use one shared browser key for authenticated users.
+        // A missing user key means there is no user-specific cache.
+        return key ? 'payroll_theme_' + key : null;
     },
 
     setActiveUser: function (userKey) {
@@ -38,19 +64,31 @@ window.themeInterop = {
 
     saveTheme: function (theme, userKey) {
         var normalized = theme === 'dark' ? 'dark' : 'light';
-        try {
-            localStorage.setItem(this._themeStorageKey(userKey), normalized);
-        } catch (e) {
-            console.warn('Unable to save theme cache to localStorage', e);
+        var storageKey = this._themeStorageKey(userKey);
+
+        if (storageKey) {
+            try {
+                localStorage.setItem(storageKey, normalized);
+            } catch (e) {
+                console.warn('Unable to save user theme cache to localStorage', e);
+            }
         }
+
         this.setThemeOnBody(normalized);
+        return normalized;
     },
 
     loadTheme: function (userKey) {
+        var storageKey = this._themeStorageKey(userKey);
+
+        if (!storageKey) {
+            return 'light';
+        }
+
         try {
-            return localStorage.getItem(this._themeStorageKey(userKey)) || 'light';
+            return localStorage.getItem(storageKey) || 'light';
         } catch (e) {
-            console.warn('Unable to read theme cache from localStorage', e);
+            console.warn('Unable to read user theme cache from localStorage', e);
             return 'light';
         }
     },

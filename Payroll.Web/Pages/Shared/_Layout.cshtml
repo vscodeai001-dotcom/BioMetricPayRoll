@@ -1,4 +1,4 @@
-﻿@using Microsoft.AspNetCore.Identity
+@using Microsoft.AspNetCore.Identity
 @using Microsoft.AspNetCore.Mvc
 @using Microsoft.AspNetCore.Mvc.Routing
 @using Microsoft.AspNetCore.Mvc.Infrastructure
@@ -33,17 +33,10 @@
     @await RenderSectionAsync("Scripts", required: false)
 
     <script>
-        (function () {
-            // Read theme preference from localStorage
-            let theme = localStorage.getItem('payroll_theme') || 'light';
-
-            // Apply the 'dark' class to the body if the preference is dark
-            if (theme === 'dark') {
-                document.body.classList.add('dark');
-            } else {
-                document.body.classList.remove('dark');
-            }
-        })();
+        // This legacy layout can render before an authenticated user is known.
+        // Never read a global theme key that could belong to another user.
+        document.body.classList.remove('dark');
+        document.documentElement.setAttribute('data-theme', 'light');
     </script>
 
 </body>
