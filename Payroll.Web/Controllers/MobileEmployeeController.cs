@@ -113,6 +113,7 @@ public sealed class MobileEmployeeController : ControllerBase
         var roles = await _userManager.GetRolesAsync(user);
         var primaryRole = roles.FirstOrDefault() ?? "Employee";
         var isAdmin = primaryRole.Contains("Admin", StringComparison.OrdinalIgnoreCase);
+        var isSuperAdmin = string.Equals(primaryRole, "SuperAdmin", StringComparison.OrdinalIgnoreCase);
 
         if (employee == null && !isAdmin)
             return Unauthorized(new { success = false, code = "NOT_LINKED", message = "Identity account verified, but no active payroll link found." });
@@ -120,12 +121,20 @@ public sealed class MobileEmployeeController : ControllerBase
         var suppliedDeviceId = request.DeviceId.Trim();
         var mobileDeviceId = NormalizeMobileDeviceId(suppliedDeviceId);
 
-        var existing = await db.EmployeeDeviceLocks.FirstOrDefaultAsync(x => x.UserId == user.Id);
+        // Admin and SuperAdmin are not employee accounts and must never be
+        // blocked by the employee single-device policy. Employee session
+        // behavior remains unchanged.
+        var enforceSingleDevicePolicy = !isAdmin && !isSuperAdmin;
+
+        var existing = enforceSingleDevicePolicy
+            ? await db.EmployeeDeviceLocks.FirstOrDefaultAsync(x => x.UserId == user.Id)
+            : null;
+
         var sameDevice = existing != null &&
             (string.Equals(existing.DeviceId, mobileDeviceId, StringComparison.Ordinal) ||
              string.Equals(existing.DeviceId, suppliedDeviceId, StringComparison.Ordinal));
 
-        if (existing != null && !sameDevice && !request.ForceReplace)
+        if (enforceSingleDevicePolicy && existing != null && !sameDevice && !request.ForceReplace)
         {
             await _attendanceMonitor.RecordAsync(
                 "SECOND_DEVICE_ATTEMPT", user.Id, user.Email ?? emailIdentifier, mobileDeviceId, "Android",
@@ -141,7 +150,7 @@ public sealed class MobileEmployeeController : ControllerBase
             });
         }
 
-        if (existing != null && sameDevice &&
+        if (enforceSingleDevicePolicy && existing != null && sameDevice &&
             !string.Equals(existing.DeviceId, mobileDeviceId, StringComparison.Ordinal))
         {
             // Migrate a legacy mobile lock to the explicit mobile namespace.
@@ -150,7 +159,7 @@ public sealed class MobileEmployeeController : ControllerBase
             await db.SaveChangesAsync();
         }
 
-        if (existing != null && !sameDevice)
+        if (enforceSingleDevicePolicy && existing != null && !sameDevice)
         {
             await _attendanceMonitor.RecordAsync(
                 "FORCE_LOGOUT_REQUESTED", user.Id, user.Email ?? emailIdentifier, mobileDeviceId, "Android",
@@ -188,22 +197,25 @@ public sealed class MobileEmployeeController : ControllerBase
             existing = null;
         }
 
-        if (existing == null)
+        if (enforceSingleDevicePolicy)
         {
-            db.EmployeeDeviceLocks.Add(new EmployeeDeviceLock
+            if (existing == null)
             {
-                Id = Guid.NewGuid(),
-                UserId = user.Id,
-                DeviceId = mobileDeviceId,
-                CreatedAtUtc = DateTime.UtcNow,
-                LastSeenAtUtc = DateTime.UtcNow
-            });
-            await db.SaveChangesAsync();
-        }
-        else
-        {
-            existing.LastSeenAtUtc = DateTime.UtcNow;
-            await db.SaveChangesAsync();
+                db.EmployeeDeviceLocks.Add(new EmployeeDeviceLock
+                {
+                    Id = Guid.NewGuid(),
+                    UserId = user.Id,
+                    DeviceId = mobileDeviceId,
+                    CreatedAtUtc = DateTime.UtcNow,
+                    LastSeenAtUtc = DateTime.UtcNow
+                });
+                await db.SaveChangesAsync();
+            }
+            else
+            {
+                existing.LastSeenAtUtc = DateTime.UtcNow;
+                await db.SaveChangesAsync();
+            }
         }
 
         await _attendanceMonitor.RecordAsync(
