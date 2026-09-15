@@ -7,8 +7,6 @@
     private DotNetObjectReference<ApplicationRealtimeRefreshListener>? _dotNetRef;
     private bool _registered;
     private bool _disposed;
-    private bool _refreshScheduled;
-    private DateTime _lastRefreshUtc = DateTime.MinValue;
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {

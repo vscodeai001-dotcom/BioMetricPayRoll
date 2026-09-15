@@ -1,6 +1,5 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
-using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.AspNetCore.Http;
 using System.Security.Claims;
 using Payroll.Shared.Data;
@@ -26,7 +25,6 @@ public sealed class ApplicationDataChangeInterceptor : SaveChangesInterceptor
     {
         public bool Notify;
         public AttendanceRefreshService.ApplicationDataChange[] Changes { get; set; } = Array.Empty<AttendanceRefreshService.ApplicationDataChange>();
-        public EntityEntry[] Entries { get; set; } = Array.Empty<EntityEntry>();
         public double? OfficeLatitude;
         public double? OfficeLongitude;
         public int? GeoRadiusMeters;
@@ -194,9 +192,8 @@ public sealed class ApplicationDataChangeInterceptor : SaveChangesInterceptor
             await _refreshService.NotifyApplicationDataChangedAsync(
                 pending.Changes);
 
-            // Firebase is the shared durable SSOT. The local SQLite transaction has
-            // already committed, so Firebase synchronization is independent
-            // of the existing business transaction.
+            // Firebase is the shared realtime SSOT. A Firebase write failure
+            // must never roll back a successful local compatibility transaction.
             var actorUid = _httpContextAccessor.HttpContext?.User
                 ?.FindFirstValue(ClaimTypes.NameIdentifier);
             var role = _httpContextAccessor.HttpContext?.User
@@ -209,8 +206,9 @@ public sealed class ApplicationDataChangeInterceptor : SaveChangesInterceptor
                 pending.Changes.Cast<object>().ToArray(),
                 ownerUid);
 
-            // Publish the actual committed local-projection row snapshots to Firebase.
-            // This never changes business calculations.
+            // Publish the actual committed local row snapshots as a Firebase
+            // compatibility projection. This is best-effort and never participates
+            // in the local transaction. Existing UI behaviour is untouched.
             if (!string.IsNullOrWhiteSpace(ownerUid))
             {
                 _ = _firebase.PublishCommittedChangesAsync(

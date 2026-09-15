@@ -1,5 +1,4 @@
 using System.ComponentModel.DataAnnotations;
-using System.Data;
 using System.Security.Claims;
 
 using Microsoft.AspNetCore.Authorization;
@@ -7,7 +6,6 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.RazorPages;
 using Microsoft.EntityFrameworkCore;
-
 
 using Payroll.Shared.Data;
 using Payroll.Web.Services;
@@ -720,30 +718,47 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
             await using var db =
                 await _dbFactory.CreateDbContextAsync();
 
-            var existing =
-                await db.EmployeeDeviceLocks
-                    .FirstOrDefaultAsync(x => x.UserId == userId);
-
-            if (existing != null)
-                return EmployeeLockResult.AlreadyActive;
-
-            db.EmployeeDeviceLocks.Add(new EmployeeDeviceLock
-            {
-                Id = Guid.NewGuid(),
-                UserId = userId,
-                DeviceId = deviceId,
-                CreatedAtUtc = DateTime.UtcNow,
-                LastSeenAtUtc = DateTime.UtcNow
-            });
+            await using var transaction =
+                await db.Database.BeginTransactionAsync();
 
             try
             {
-                await db.SaveChangesAsync();
+                var existing = await db.EmployeeDeviceLocks
+                    .FirstOrDefaultAsync(x => x.UserId == userId);
+
+                if (existing != null)
+                {
+                    await transaction.RollbackAsync();
+                    return EmployeeLockResult.AlreadyActive;
+                }
+
+                var now = DateTime.UtcNow;
+                db.EmployeeDeviceLocks.Add(new EmployeeDeviceLock
+                {
+                    Id = Guid.NewGuid(),
+                    UserId = userId,
+                    DeviceId = deviceId,
+                    CreatedAtUtc = now,
+                    LastSeenAtUtc = now
+                });
+
+                try
+                {
+                    await db.SaveChangesAsync();
+                }
+                catch (DbUpdateException)
+                {
+                    await transaction.RollbackAsync();
+                    return EmployeeLockResult.AlreadyActive;
+                }
+
+                await transaction.CommitAsync();
                 return EmployeeLockResult.Acquired;
             }
-            catch (DbUpdateException)
+            catch
             {
-                return EmployeeLockResult.AlreadyActive;
+                try { await transaction.RollbackAsync(); } catch { }
+                throw;
             }
         }
 
@@ -773,29 +788,31 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
 
             try
             {
-                var existing =
-                    await db.EmployeeDeviceLocks
-                        .FirstOrDefaultAsync(x => x.UserId == userId);
+                var existingLocks = await db.EmployeeDeviceLocks
+                    .Where(x => x.UserId == userId)
+                    .ToListAsync();
 
-                if (existing != null)
+                if (existingLocks.Count > 0)
+                    db.EmployeeDeviceLocks.RemoveRange(existingLocks);
+
+                var now = DateTime.UtcNow;
+                db.EmployeeDeviceLocks.Add(new EmployeeDeviceLock
                 {
-                    existing.DeviceId = newDeviceId;
-                    existing.LastSeenAtUtc = DateTime.UtcNow;
-                }
-                else
-                {
-                    db.EmployeeDeviceLocks.Add(new EmployeeDeviceLock
-                    {
-                        Id = Guid.NewGuid(),
-                        UserId = userId,
-                        DeviceId = newDeviceId,
-                        CreatedAtUtc = DateTime.UtcNow,
-                        LastSeenAtUtc = DateTime.UtcNow
-                    });
-                }
+                    Id = Guid.NewGuid(),
+                    UserId = userId,
+                    DeviceId = newDeviceId,
+                    CreatedAtUtc = now,
+                    LastSeenAtUtc = now
+                });
 
                 await db.SaveChangesAsync();
                 await transaction.CommitAsync();
+
+                _logger.LogWarning(
+                    "EMPLOYEE ACTIVE SESSION REPLACED. UserId={UserId}, NewDeviceId={DeviceId}",
+                    userId,
+                    newDeviceId);
+
                 return true;
             }
             catch (Exception ex)

@@ -4,12 +4,9 @@ namespace Payroll.Web.Services
 {
     public class ThemeService
     {
-        private const string ThemePreferenceTableName = "public.user_theme_preferences";
-
         private readonly IDbContextFactory<AppDbContext> _dbFactory;
 
-        public ThemeService(
-            IDbContextFactory<AppDbContext> dbFactory)
+        public ThemeService(IDbContextFactory<AppDbContext> dbFactory)
         {
             _dbFactory = dbFactory;
         }
@@ -37,24 +34,11 @@ namespace Payroll.Web.Services
 
             await using var db = await _dbFactory.CreateDbContextAsync();
 
-            try
-            {
-                return await db.UserThemePreferences
-                    .AsNoTracking()
-                    .Where(x => x.UserId == userId)
-                    .Select(x => x.Theme)
-                    .FirstOrDefaultAsync();
-            }
-            catch (PostgresException ex) when (ex.SqlState == "42P01")
-            {
-                await EnsureThemePreferencesTableAsync(db);
-
-                return await db.UserThemePreferences
-                    .AsNoTracking()
-                    .Where(x => x.UserId == userId)
-                    .Select(x => x.Theme)
-                    .FirstOrDefaultAsync();
-            }
+            return await db.UserThemePreferences
+                .AsNoTracking()
+                .Where(x => x.UserId == userId)
+                .Select(x => x.Theme)
+                .FirstOrDefaultAsync();
         }
 
         public async Task SaveThemeAsync(string userId, string theme)
@@ -66,58 +50,25 @@ namespace Payroll.Web.Services
 
             await using var db = await _dbFactory.CreateDbContextAsync();
 
-            try
+            var preference = await db.UserThemePreferences
+                .FirstOrDefaultAsync(x => x.UserId == userId);
+
+            if (preference == null)
             {
-                var preference = await db.UserThemePreferences
-                    .FirstOrDefaultAsync(x => x.UserId == userId);
-
-                if (preference == null)
+                db.UserThemePreferences.Add(new Payroll.Shared.Data.UserThemePreference
                 {
-                    db.UserThemePreferences.Add(new Payroll.Shared.Data.UserThemePreference
-                    {
-                        UserId = userId,
-                        Theme = theme,
-                        UpdatedAtUtc = DateTime.UtcNow
-                    });
-                }
-                else
-                {
-                    preference.Theme = theme;
-                    preference.UpdatedAtUtc = DateTime.UtcNow;
-                }
-
-                await db.SaveChangesAsync();
+                    UserId = userId,
+                    Theme = theme,
+                    UpdatedAtUtc = DateTime.UtcNow
+                });
             }
-            catch (PostgresException ex) when (ex.SqlState == "42P01")
+            else
             {
-                await EnsureThemePreferencesTableAsync(db);
-
-                var preference = await db.UserThemePreferences
-                    .FirstOrDefaultAsync(x => x.UserId == userId);
-
-                if (preference == null)
-                {
-                    db.UserThemePreferences.Add(new Payroll.Shared.Data.UserThemePreference
-                    {
-                        UserId = userId,
-                        Theme = theme,
-                        UpdatedAtUtc = DateTime.UtcNow
-                    });
-                }
-                else
-                {
-                    preference.Theme = theme;
-                    preference.UpdatedAtUtc = DateTime.UtcNow;
-                }
-
-                await db.SaveChangesAsync();
+                preference.Theme = theme;
+                preference.UpdatedAtUtc = DateTime.UtcNow;
             }
-        }
 
-        private async Task EnsureThemePreferencesTableAsync(AppDbContext db)
-        {
-            // Created by startup EnsureCreated.
-            await Task.CompletedTask;
+            await db.SaveChangesAsync();
         }
     }
 }

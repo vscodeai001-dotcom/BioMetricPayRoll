@@ -5,8 +5,6 @@ using FirebaseAdmin;
 using FirebaseAdmin.Auth;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
-using Microsoft.EntityFrameworkCore.Metadata;
-using System.Collections;
 using Google.Apis.Auth.OAuth2;
 
 namespace Payroll.Web.Services;
@@ -85,7 +83,7 @@ public sealed class FirebaseRealtimeService
     // ---------------------------------------------------------------------
     // These methods are deliberately table-whitelisted. They provide the Web
     // layer with a Firebase-native CRUD path without exposing arbitrary
-    // database paths to callers. The existing local EF business services
+    // database paths to callers. The existing Neon-backed business services
     // can be migrated module-by-module without changing UI/layout/business
     // rules.
 
@@ -336,7 +334,7 @@ public sealed class FirebaseRealtimeService
 
     // Firebase paths intentionally match the existing Android owner-node
     // layout. This is a transport/read-model mapping only; it does not alter
-    // the logical application schema or any business logic.
+    // the Neon schema or any business logic.
     private static string? GetFirebaseTable(string entityName)
         => entityName switch
         {
@@ -422,7 +420,7 @@ public sealed class FirebaseRealtimeService
 
         // Canonical Firebase contract matches the existing Android entity names.
         // Extra server-only fields are intentionally omitted from these module
-        // contracts; logical schema and business rules remain unchanged.
+        // contracts; Neon schema and business rules remain unchanged.
         switch (entityName)
         {
             case "Employee":
@@ -680,31 +678,7 @@ public sealed class FirebaseRealtimeService
         return value;
     }
 
-    private static object? JsonElementToObject(JsonElement element)
-    {
-        return element.ValueKind switch
-        {
-            JsonValueKind.Object => element.EnumerateObject().ToDictionary(p => p.Name, p => JsonElementToObject(p.Value), StringComparer.Ordinal),
-            JsonValueKind.Array => element.EnumerateArray().Select(JsonElementToObject).ToList(),
-            JsonValueKind.String => element.GetString(),
-            JsonValueKind.Number => element.TryGetInt64(out var l) ? l : element.GetDecimal(),
-            JsonValueKind.True => true,
-            JsonValueKind.False => false,
-            _ => null
-        };
-    }
-
-    private static string QuoteIdentifier(string value) => "\"" + value.Replace("\"", "\"\"") + "\"";
-
-    private static string GetConnectionString(DbContext db)
-        => db.Database.GetDbConnection().ConnectionString;
-
     public bool IsConfigured => _context.IsValueCreated && _context.Value.IsCompletedSuccessfully && _context.Value.Result != null;
-
-    public async Task<bool> EnsureConfiguredAsync()
-    {
-        return await _context.Value is not null;
-    }
 
     private async Task<bool> SetAsync(string path, object value, CancellationToken cancellationToken)
         => await UpdateAsync(new Dictionary<string, object?> { [path] = value }, cancellationToken);
@@ -858,7 +832,7 @@ public sealed class FirebaseRealtimeService
         {
             _logger.LogWarning(
                 ex,
-                "Firebase Admin bridge is not configured. Firebase credentials are not configured yet. Configure FIREBASE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS to enable Firebase realtime transport.");
+                "Firebase Admin bridge is not configured. Existing Neon/SignalR paths remain active. Configure FIREBASE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS to enable Firebase realtime transport.");
             return null;
         }
     }

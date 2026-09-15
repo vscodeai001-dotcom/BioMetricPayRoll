@@ -12,22 +12,21 @@ IHost host = Host.CreateDefaultBuilder(args)
     .UseWindowsService() 
     .ConfigureServices((hostContext, services) =>
     {
-        // 3. Read Connection String from the Worker's appsettings.json
-        var connectionString = hostContext.Configuration.GetConnectionString("DefaultConnection")
-            ?? Environment.GetEnvironmentVariable("DATABASE_URL")
-            ?? Environment.GetEnvironmentVariable("NEON_CONNECTION_STRING");
+        // 3. Register the local EF compatibility projection.
+        // Firebase is the shared durable SSOT; this SQLite database is local-only
+        // and keeps the existing worker/entity contracts intact during migration.
+        var sqlitePath = Environment.GetEnvironmentVariable("BIOMETRIC_SQLITE_PATH");
+        if (string.IsNullOrWhiteSpace(sqlitePath))
+            sqlitePath = Path.Combine(AppContext.BaseDirectory, "data", "biometricpayroll-cache.db");
 
-        if (string.IsNullOrWhiteSpace(connectionString))
-            throw new InvalidOperationException("DefaultConnection is not configured. Set DATABASE_URL or NEON_CONNECTION_STRING.");
+        var sqliteDirectory = Path.GetDirectoryName(sqlitePath);
+        if (!string.IsNullOrWhiteSpace(sqliteDirectory))
+            Directory.CreateDirectory(sqliteDirectory);
 
-        // 4. Register Database Context (Must match Web App's DB provider)
-        // We use SetSwitch to handle Postgres timestamp behavior
-        AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
-        
         services.AddDbContext<AppDbContext>(options =>
-            options.UseNpgsql(connectionString), ServiceLifetime.Transient);
+            options.UseSqlite($"Data Source={sqlitePath}"), ServiceLifetime.Transient);
 
-        // 5. Register Background Services
+        // 4. Register Background Services
         services.AddHostedService<Worker>();
         services.AddHostedService<GpsSessionCleanupService>();
     })

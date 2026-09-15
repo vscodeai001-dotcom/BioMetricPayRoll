@@ -5,6 +5,7 @@ using System.Globalization;
 
 using Hangfire;
 using Hangfire.Dashboard;
+using Hangfire.PostgreSql;
 
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
@@ -103,7 +104,7 @@ var builder =
 //
 // IMPORTANT:
 //
-// Linux/container servers commonly run in UTC.
+// Render/Linux servers commonly run in UTC.
 //
 // Therefore payroll calculations must NOT depend on:
 //     DateTime.Now
@@ -151,7 +152,7 @@ builder.Host.UseWindowsService();
 
 builder.Services.AddSignalR(options =>
 {
-    // Keep the browser SignalR connection alive through
+    // Keep the Render/Browser SignalR connection alive through
     // idle periods and allow enough time for transient network gaps.
     options.KeepAliveInterval = TimeSpan.FromSeconds(15);
     options.ClientTimeoutInterval = TimeSpan.FromSeconds(60);
@@ -167,8 +168,6 @@ builder.Services.AddAuthentication()
 
 builder.Services.AddHttpClient("FirebaseRealtime");
 builder.Services.AddSingleton<FirebaseRealtimeService>();
-builder.Services.AddHostedService<FirebaseSqliteSyncService>();
-builder.Services.AddHostedService<FirebaseSuperAdminProvisioningService>();
 
 builder.Services.AddSingleton<
     AttendanceRefreshService>();
@@ -184,40 +183,36 @@ builder.Services.AddHostedService<LocationHealthService>();
 
 
 // ============================================================
- // DATABASE COMPATIBILITY CACHE
- // ============================================================
- //
- // Firebase Realtime Database is the shared durable SSOT.
- // SQLite is only a local EF/Identity compatibility projection. It keeps
- // the existing AppDbContext/UI/business-service contracts intact while
- // removing the external PostgreSQL runtime dependency.
- //
- var sqlitePath =
-     Environment.GetEnvironmentVariable("BIOMETRIC_SQLITE_PATH");
+// LOCAL EF COMPATIBILITY PROJECTION
+// ============================================================
+// Firebase is the shared durable SSOT. SQLite is local-only and exists solely
+// to preserve the current AppDbContext/Identity/business-service contracts
+// while individual modules are migrated to direct Firebase CRUD.
 
- if (string.IsNullOrWhiteSpace(sqlitePath))
- {
-     sqlitePath = Path.Combine(
-         builder.Environment.ContentRootPath,
-         "data",
-         "biometricpayroll-cache.db");
- }
+var sqlitePath = Environment.GetEnvironmentVariable("BIOMETRIC_SQLITE_PATH");
+if (string.IsNullOrWhiteSpace(sqlitePath))
+{
+    sqlitePath = Path.Combine(
+        builder.Environment.ContentRootPath,
+        "data",
+        "biometricpayroll-cache.db");
+}
 
- var sqliteDirectory = Path.GetDirectoryName(sqlitePath);
- if (!string.IsNullOrWhiteSpace(sqliteDirectory))
-     Directory.CreateDirectory(sqliteDirectory);
+var sqliteDirectory = Path.GetDirectoryName(sqlitePath);
+if (!string.IsNullOrWhiteSpace(sqliteDirectory))
+    Directory.CreateDirectory(sqliteDirectory);
 
- builder.Services.AddDbContextFactory<AppDbContext>(
-     (sp, options) =>
-     {
-         options.AddInterceptors(
-             sp.GetRequiredService<ApplicationDataChangeInterceptor>());
+builder.Services.AddDbContextFactory<AppDbContext>(
+    (sp, options) =>
+    {
+        options.AddInterceptors(
+            sp.GetRequiredService<ApplicationDataChangeInterceptor>());
 
-         options.UseSqlite($"Data Source={sqlitePath}");
-     });
+        options.UseSqlite($"Data Source={sqlitePath}");
+    });
 
 
- // ============================================================
+// ============================================================
 // ATTENDANCE ENGINE REGISTRATIONS
 // ============================================================
 
@@ -347,20 +342,20 @@ builder.Services.AddHttpContextAccessor();
 // REVERSE PROXY / HTTPS FORWARDED HEADERS
 // ============================================================
 //
-// The hosting proxy may terminate TLS before forwarding the request to
+// Render terminates TLS at its proxy and forwards the request to
 // the ASP.NET Core container. Without processing X-Forwarded-Proto,
 // ASP.NET Core can see the incoming request as HTTP even though the
 // browser is using HTTPS. Identity then generates redirects such as:
-//   http://host/Identity/Account/Login
+//   http://biometric-payroll.onrender.com/Identity/Account/Login
 //
 // That HTTP redirect is blocked when /my-attendance is running inside
-// the HTTPS Blazor document/frame. Trust the hosting proxy headers so
+// the HTTPS Blazor document/frame. Trust the Render proxy headers so
 // Request.Scheme remains HTTPS for authentication redirects, cookies,
 // antiforgery, and generated absolute URLs.
 //
-// the hosting proxy IPs are dynamic, so the forwarded-header middleware
+// Render's proxy IPs are dynamic, so the forwarded-header middleware
 // must not be restricted to a fixed proxy IP/network. The application
-// is intended to be reached through a reverse-proxy ingress.
+// is intended to be reached through Render's ingress.
 // ============================================================
 
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
@@ -548,7 +543,7 @@ builder.Services.AddScoped<
 // 1. Key storage: Persistent file system (e.g., /data volume)
 // 2. Key encryption: Environment variable (optional)
 //
-// For container deployments:
+// For Docker/Render:
 // - Mount a persistent volume at /data/dataprotection
 // - Container automatically uses this for keys
 // - Keys survive container restarts
@@ -563,7 +558,7 @@ var dataProtectionPath =
 
 if (string.IsNullOrWhiteSpace(dataProtectionPath))
 {
-    // Container deployments commonly mount their persistent disk at
+    // Render/container deployments commonly mount their persistent disk at
     // /data. Prefer it when available so authentication/DataProtection keys
     // survive an application process/container restart. Local development
     // continues to use the project-local directory.
@@ -669,10 +664,10 @@ builder.Services.AddBlazoredToast();
 // HEALTH CHECKS
 // ============================================================
 //
-// Health checks help the hosting platform detect if the application
+// Health checks help Render platform detect if the application
 // is still responding and healthy.
 //
-// If the health check fails, the hosting platform can restart the container.
+// If the health check fails, Render can restart the container.
 //
 // Endpoint: /health
 //
@@ -686,6 +681,7 @@ builder.Services.AddHealthChecks()
 // ============================================================
 // HANGFIRE
 // ============================================================
+// Use in-process memory storage. PostgreSQL/Neon is not required for jobs.
 
 builder.Services.AddHangfire(
     config =>
@@ -718,109 +714,6 @@ builder.Services.AddHangfireServer(
 
 var app =
     builder.Build();
-
-try
-{
-    await using var localScope = app.Services.CreateAsyncScope();
-    var localDbFactory =
-        localScope.ServiceProvider
-            .GetRequiredService<IDbContextFactory<AppDbContext>>();
-    await using var localDb =
-        await localDbFactory.CreateDbContextAsync();
-    await localDb.Database.EnsureCreatedAsync();
-}
-catch (Exception ex)
-{
-    app.Logger.LogError(
-        ex,
-        "Unable to initialize the local Firebase compatibility database.");
-    throw;
-}
-
-
-static async Task ValidateDatabaseSchemaAsync(
-    AppDbContext db,
-    ILogger logger)
-{
-    const string migrationName = "20260830000000_AddUserThemePreferences";
-    var requiredTables = new[]
-    {
-        "AspNetUsers",
-        "AspNetRoles",
-        "employees",
-        "user_theme_preferences"
-    };
-
-    await using var connection = db.Database.GetDbConnection();
-    if (connection.State != System.Data.ConnectionState.Open)
-        await connection.OpenAsync();
-
-    foreach (var tableName in requiredTables)
-    {
-        using var command = connection.CreateCommand();
-        command.CommandText = @"
-            SELECT CASE WHEN EXISTS (
-                SELECT 1
-                FROM information_schema.tables
-                WHERE table_schema = 'public'
-                  AND table_name = @tableName
-            ) THEN TRUE ELSE FALSE END;";
-
-        var tableParameter = command.CreateParameter();
-        tableParameter.ParameterName = "@tableName";
-        tableParameter.Value = tableName;
-        command.Parameters.Add(tableParameter);
-
-        var tableExists = Convert.ToBoolean(await command.ExecuteScalarAsync());
-        if (!tableExists)
-        {
-            throw new InvalidOperationException(
-                $"Required database table '{tableName}' is missing in the current PostgreSQL schema.");
-        }
-    }
-
-    using (var command = connection.CreateCommand())
-    {
-        command.CommandText = @"
-            SELECT EXISTS (
-                SELECT 1
-                FROM public.""__EFMigrationsHistory""
-                WHERE ""MigrationId"" = @migrationId
-            );";
-
-        var migrationParameter = command.CreateParameter();
-        migrationParameter.ParameterName = "@migrationId";
-        migrationParameter.Value = migrationName;
-        command.Parameters.Add(migrationParameter);
-
-        var migrationApplied = Convert.ToBoolean(await command.ExecuteScalarAsync());
-        if (!migrationApplied)
-        {
-            using var repairCommand = connection.CreateCommand();
-            repairCommand.CommandText = @"
-                INSERT INTO public.""__EFMigrationsHistory""
-                    (""MigrationId"", ""ProductVersion"")
-                VALUES (@migrationId, @productVersion)
-                ON CONFLICT (""MigrationId"") DO NOTHING;";
-
-            var repairMigrationParameter = repairCommand.CreateParameter();
-            repairMigrationParameter.ParameterName = "@migrationId";
-            repairMigrationParameter.Value = migrationName;
-            repairCommand.Parameters.Add(repairMigrationParameter);
-
-            var productVersionParameter = repairCommand.CreateParameter();
-            productVersionParameter.ParameterName = "@productVersion";
-            productVersionParameter.Value = "8.0.21";
-            repairCommand.Parameters.Add(productVersionParameter);
-
-            await repairCommand.ExecuteNonQueryAsync();
-
-            logger.LogInformation(
-                "Repaired missing EF migration history entry '{MigrationName}' because the required table is already present.",
-                migrationName);
-        }
-    }
-}
 
 
 // ============================================================
@@ -864,15 +757,79 @@ app.MapHub<AttendanceRefreshHub>(
 
 
 // ============================================================
- // DATABASE MIGRATION
- // ============================================================
- //
- // Legacy relational EF migrations are no longer executed by the Web app.
- // The unchanged logical EF model is created in the local compatibility
- // projection and synchronized from Firebase.
- //
- app.Logger.LogInformation(
-     "Firebase is the Web application SSOT. Legacy relational migrations are disabled.");
+// LOCAL SQLITE SCHEMA INITIALIZATION
+// ============================================================
+// No EF migration or PostgreSQL/Neon connection is opened at startup.
+// EnsureCreated builds the local compatibility projection from the existing
+// AppDbContext model. Firebase remains the shared durable SSOT.
+
+try
+{
+    using var scope = app.Services.CreateScope();
+    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    await db.Database.EnsureCreatedAsync();
+
+    app.Logger.LogInformation(
+        "Local SQLite compatibility database initialized. Firebase remains the shared SSOT.");
+}
+catch (Exception ex)
+{
+    app.Logger.LogError(ex, "Error initializing local SQLite compatibility database.");
+    throw;
+}
+
+
+// ============================================================
+// INITIAL SEEDING
+// ============================================================
+
+try
+{
+    using var scope =
+        app.Services.CreateScope();
+
+
+    await SeedRolesAsync(
+        scope.ServiceProvider);
+
+
+    await SeedCompanySettingsAsync(
+        scope.ServiceProvider);
+
+
+    await SeedAdminUserAsync(
+        scope.ServiceProvider);
+
+
+    await EnsureEmployeeRoleForAllUsers(
+        scope.ServiceProvider);
+}
+catch (Exception ex)
+{
+    var logger =
+        app.Services
+            .GetRequiredService<
+                ILogger<Program>>();
+
+
+    logger.LogError(
+        ex,
+        "Error during initial seeding.");
+}
+
+
+// ============================================================
+// ERROR HANDLING
+// ============================================================
+
+if (!app.Environment.IsDevelopment())
+{
+    app.UseExceptionHandler(
+        "/Error",
+        createScopeForErrors: true);
+
+    app.UseHsts();
+}
 
 
 // ============================================================
@@ -883,18 +840,18 @@ app.MapHub<AttendanceRefreshHub>(
 // REVERSE PROXY HEADERS MUST RUN FIRST
 // ============================================================
 //
-// A reverse proxy may terminate HTTPS before forwarding traffic to Kestrel.
+// Render terminates HTTPS before forwarding traffic to Kestrel.
 // Process X-Forwarded-Proto before authentication so Identity sees
-// the original browser scheme (HTTPS), not the proxy's internal HTTP hop.
+// the original browser scheme (HTTPS), not Render's internal HTTP hop.
 // This prevents HTTPS pages from receiving HTTP Identity login URLs.
 // ============================================================
 
 app.UseForwardedHeaders();
 
-// Do not enable UseHttpsRedirection here when the hosting proxy already performs the
+// Do not enable UseHttpsRedirection here. Render already performs the
 // public HTTPS termination/redirect, while the local Windows Service
 // deployment intentionally runs on HTTP. Forwarded headers are enough
-// to make generated authentication URLs use HTTPS at the public endpoint.
+// to make generated authentication URLs use HTTPS on Render.
 
 app.UseStaticFiles();
 
@@ -918,7 +875,7 @@ app.UseAntiforgery();
 // HEALTH CHECK ENDPOINT
 // ============================================================
 //
-// Hosting platforms (and other orchestration systems) use this
+// Render platform (and other orchestration systems) use this
 // endpoint to determine if the application is healthy.
 //
 // If health check fails repeatedly, the container is restarted.
@@ -956,6 +913,11 @@ app.MapHealthChecks(
 // HANGFIRE DASHBOARD
 // ============================================================
 
+var hangfireStorage =
+    app.Services.GetRequiredService<
+        JobStorage>();
+
+
 var recurringJobManager =
     app.Services
         .GetRequiredService<
@@ -970,7 +932,8 @@ app.UseHangfireDashboard(
         [
             new HangfireAuth()
         ]
-    });
+    },
+    hangfireStorage);
 
 
 // ============================================================
@@ -983,7 +946,7 @@ app.UseHangfireDashboard(
 //
 //     TimeZoneInfo.Local
 //
-// because container/server environments may be UTC.
+// because Render/Linux may be UTC.
 //
 // ============================================================
 
@@ -1127,7 +1090,7 @@ app.MapRazorComponents<App>()
 // GRACEFUL SHUTDOWN HANDLING
 // ============================================================
 //
-// When a hosting platform (or any container platform) stops the container,
+// When Render (or any container platform) stops the container,
 // we need to gracefully shutdown to avoid data loss.
 //
 // - SignalR connections are closed gracefully

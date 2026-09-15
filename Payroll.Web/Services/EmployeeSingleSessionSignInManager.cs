@@ -4,7 +4,6 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Payroll.Shared.Data;
-using System.Data;
 using System.Security.Claims;
 
 namespace Payroll.Web.Services
@@ -19,8 +18,7 @@ namespace Payroll.Web.Services
     ///
     /// Admin and SuperAdmin accounts are NOT restricted.
     ///
-    /// The PostgreSQL UNIQUE(UserId) constraint is the final
-    /// concurrency authority.
+    /// The unique UserId database index remains the final concurrency authority.
     /// </summary>
     public sealed class EmployeeSingleSessionSignInManager
         : SignInManager<IdentityUser>
@@ -575,20 +573,20 @@ namespace Payroll.Web.Services
             await using var db =
                 await _dbFactory.CreateDbContextAsync();
 
-            var existing =
-                await db.EmployeeDeviceLocks
-                    .FirstOrDefaultAsync(x => x.UserId == userId);
+            var existing = await db.EmployeeDeviceLocks
+                .FirstOrDefaultAsync(x => x.UserId == userId);
 
             if (existing != null)
                 return false;
 
+            var now = DateTime.UtcNow;
             db.EmployeeDeviceLocks.Add(new EmployeeDeviceLock
             {
                 Id = Guid.NewGuid(),
                 UserId = userId,
                 DeviceId = deviceId,
-                CreatedAtUtc = DateTime.UtcNow,
-                LastSeenAtUtc = DateTime.UtcNow
+                CreatedAtUtc = now,
+                LastSeenAtUtc = now
             });
 
             try
@@ -598,6 +596,7 @@ namespace Payroll.Web.Services
             }
             catch (DbUpdateException)
             {
+                // The unique UserId index remains the final concurrency guard.
                 return false;
             }
         }
