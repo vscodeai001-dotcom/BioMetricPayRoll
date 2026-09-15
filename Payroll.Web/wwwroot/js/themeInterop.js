@@ -2685,6 +2685,8 @@ window.destroyGeoMap =
         }
 
 
+        try { if (mapData?._layoutObserver) mapData._layoutObserver.disconnect(); } catch (_) {}
+
         delete window.payrollGeoMaps[mapId];
     };
 
@@ -4464,6 +4466,20 @@ window.enhanceEmployeeGeoMap = function (mapId) {
             state.premiumControls = panel;
         }
         if (!state.scaleControl) state.scaleControl = L.control.scale({ imperial:false, position:'bottomright', maxWidth:120 }).addTo(map);
+
+        // The Remote Punch card can change width at responsive breakpoints.
+        // Keep Leaflet sized to the actual map box so its controls remain
+        // positioned correctly after the layout changes.
+        if (!state._layoutObserver && typeof ResizeObserver !== 'undefined') {
+            state._layoutObserver = new ResizeObserver(function () {
+                try { map.invalidateSize({ pan:false, animate:false }); } catch (_) {}
+            });
+            state._layoutObserver.observe(container);
+        }
+        requestAnimationFrame(function () {
+            try { map.invalidateSize({ pan:false, animate:false }); } catch (_) {}
+        });
+
         const acc = state.premiumControls.querySelector('.payroll-employee-map-accuracy');
         if (acc) acc.textContent = state.lastAccuracyMeters > 0 ? '±' + Math.round(state.lastAccuracyMeters) + ' m' : '';
     } catch (error) { console.debug('Premium employee map controls deferred:', error); }
@@ -5052,6 +5068,8 @@ window.destroyAdminLiveStaffMap =
             state.map.remove();
         }
         catch { }
+
+        try { if (state?._layoutObserver) state._layoutObserver.disconnect(); } catch (_) {}
 
         delete window.adminLiveMaps[
             mapId

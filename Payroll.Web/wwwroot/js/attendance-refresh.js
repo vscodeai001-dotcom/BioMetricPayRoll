@@ -18,6 +18,9 @@ window.attendanceRefresh = (function () {
     let firebaseStarted = false;
     let firebaseStarting = false;
     let firebaseDatabase = null;
+    let firebaseGeoPunchAuditRef = null;
+    let firebaseGeoPunchAuditTimer = null;
+    let firebaseGeoPunchAuditPending = new Map();
     let firebaseStartTime = Date.now();
 
     async function startFirebaseRealtime() {
@@ -77,18 +80,10 @@ window.attendanceRefresh = (function () {
             liveRef.on('child_changed', onFirebaseLiveLocation);
 
             const ownerUid = authResult.ownerUid || authResult.ownerUID || null;
+            const realtimeOwnerUid = ownerUid || 'biometricpayroll';
             if (ownerUid) {
                 const ownerEventsRef = firebaseDatabase.ref('owner_events/' + ownerUid);
                 ownerEventsRef.on('child_added', onFirebaseApplicationEvent);
-
-                // Geo-punch audits are listened to directly from Firebase.
-                // This avoids waiting for the SQLite compatibility synchronizer
-                // before an already-open Admin audit card can see a new record.
-                const geoPunchAuditRef =
-                    firebaseDatabase.ref('owners/' + ownerUid + '/geo_punch_audits');
-
-                geoPunchAuditRef.on('child_added', onFirebaseGeoPunchAudit);
-                geoPunchAuditRef.on('child_changed', onFirebaseGeoPunchAudit);
 
                 // Mobile-originated changes use a per-employee channel so an
                 // employee cannot write to the shared admin event stream.
@@ -96,12 +91,22 @@ window.attendanceRefresh = (function () {
                 // receive these events without changing the existing UI.
                 const clientEventsRef = firebaseDatabase.ref('client_events');
                 clientEventsRef.on('child_added', onFirebaseClientEventEmployee);
+
             } else {
                 // Backward compatibility for installations that have not yet
                 // configured a shared Firebase owner UID.
                 const eventsRef = firebaseDatabase.ref('application_events');
                 eventsRef.on('child_added', onFirebaseApplicationEvent);
             }
+
+            // Geo punch audits are always scoped to the same owner as the
+            // Firebase auth contract. This remains active even when the auth
+            // response omits ownerUid and the single-owner fallback is used.
+            firebaseGeoPunchAuditRef = firebaseDatabase.ref(
+                'owners/' + realtimeOwnerUid + '/geo_punch_audits'
+            );
+            firebaseGeoPunchAuditRef.on('child_added', onFirebaseGeoPunchAudit);
+            firebaseGeoPunchAuditRef.on('child_changed', onFirebaseGeoPunchAudit);
 
             console.log('Firebase realtime transport connected.');
         } catch (error) {
@@ -135,32 +140,34 @@ window.attendanceRefresh = (function () {
     async function onFirebaseGeoPunchAudit(snapshot) {
         try {
             const data = snapshot.val();
-            if (!data || typeof data !== 'object')
-                return;
+            if (!data || typeof data !== 'object') return;
 
-            // Expose the Firebase record to the component-level realtime
-            // listener. The component decides whether the selected employee
-            // and selected date should be updated.
-            window.dispatchEvent(
-                new CustomEvent(
-                    'firebase-geo-punch-audit-changed',
-                    { detail: data }
-                )
-            );
+            // Collapse a burst of Firebase child callbacks into one UI
+            // invalidation per employee. The existing database query remains
+            // authoritative, so no employee update is lost.
+            const employeeId = Number(data.employeeId ?? data.EmployeeId ?? 0);
+            const pendingKey = Number.isFinite(employeeId) && employeeId > 0
+                ? String(employeeId)
+                : snapshot.key || String(Date.now());
+            firebaseGeoPunchAuditPending.set(pendingKey, data);
 
-            await notifyListeners(
-                'GeoPunchAuditChanged',
-                data
-            );
-        }
-        catch (error) {
-            console.warn(
-                'Firebase geo punch audit callback failed.',
-                error
-            );
+            if (firebaseGeoPunchAuditTimer !== null)
+                clearTimeout(firebaseGeoPunchAuditTimer);
+
+            firebaseGeoPunchAuditTimer = setTimeout(async function () {
+                firebaseGeoPunchAuditTimer = null;
+                const pendingEvents = Array.from(firebaseGeoPunchAuditPending.values());
+                firebaseGeoPunchAuditPending.clear();
+
+                for (const pending of pendingEvents) {
+                    await notifyListeners('GeoPunchAuditChanged', pending);
+                    window.dispatchEvent(new CustomEvent('geo-punch-audit-changed', { detail: pending }));
+                }
+            }, 80);
+        } catch (error) {
+            console.warn('Firebase geo punch audit callback failed.', error);
         }
     }
-
 
     async function onFirebaseClientEventEmployee(employeeSnapshot) {
         try {

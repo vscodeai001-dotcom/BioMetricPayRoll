@@ -2555,7 +2555,88 @@
         }
     }
 
-\n    /* ============================================================\n       PREMIUM REALTIME MAP COMMAND UI\n       Presentation-only controls.\n       ============================================================ */\n    .payroll-premium-map-ui, .payroll-premium-employee-map-ui {\n        position:absolute; inset:0; z-index:1200; pointer-events:none;\n        font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;\n    }\n    .payroll-map-commandbar {\n        position:absolute; top:14px; left:14px; right:14px; display:flex; gap:7px; align-items:center;\n        padding:8px; border:1px solid rgba(255,255,255,.16); border-radius:15px;\n        background:rgba(12,18,30,.82); backdrop-filter:blur(18px) saturate(1.25);\n        box-shadow:0 14px 38px rgba(2,8,23,.25); pointer-events:auto;\n    }\n    .payroll-map-search-wrap { position:relative; min-width:190px; flex:1 1 230px; }\n    .payroll-map-search { width:100%; height:34px; border-radius:10px; border:1px solid rgba(255,255,255,.14);\n        background:rgba(255,255,255,.09); color:#fff; outline:0; padding:0 10px 0 30px; font-size:.72rem; }\n    .payroll-map-search::placeholder { color:rgba(255,255,255,.58); }\n    .payroll-map-search-icon { position:absolute; left:10px; top:7px; color:#b9c8df; font-size:16px; }\n    .payroll-map-filter { height:34px; min-width:112px; border-radius:10px; border:1px solid rgba(255,255,255,.14);\n        background:rgba(255,255,255,.09); color:#fff; padding:0 8px; font-size:.68rem; outline:0; }\n    .payroll-map-filter option { color:#111827; background:#fff; }\n    .payroll-map-tool { height:34px; border:1px solid rgba(255,255,255,.13); border-radius:10px;\n        background:rgba(255,255,255,.075); color:#edf5ff; padding:0 9px; font-size:.68rem; font-weight:700;\n        transition:all .18s ease; }\n    .payroll-map-tool:hover, .payroll-map-tool.active { background:rgba(37,99,235,.28); border-color:rgba(96,165,250,.55); transform:translateY(-1px); }\n    .payroll-map-tool span { margin-left:3px; }\n    .payroll-map-statusbar { position:absolute; left:14px; right:14px; bottom:14px; display:flex; align-items:center; gap:9px;\n        width:max-content; max-width:calc(100% - 28px); padding:7px 10px; border-radius:12px;\n        background:rgba(12,18,30,.82); border:1px solid rgba(255,255,255,.13); color:#dbe7f6;\n        backdrop-filter:blur(14px); box-shadow:0 10px 30px rgba(2,8,23,.25); pointer-events:auto; font-size:.62rem; }\n    .payroll-map-statusbar span { display:flex; align-items:center; gap:4px; white-space:nowrap; }\n    .payroll-map-statusbar i { width:7px; height:7px; border-radius:50%; display:inline-block; }\n    .payroll-map-status-live i { background:#22c55e; box-shadow:0 0 0 3px rgba(34,197,94,.13); }\n    .payroll-map-status-stale i { background:#f59e0b; }\n    .payroll-map-status-out i { background:#ef4444; }\n    .payroll-map-status-updated { color:#7dd3fc; }\n    .payroll-map-fullscreen { border-radius:0 !important; }\n    .payroll-map-fullscreen .payroll-map-commandbar { top:18px; left:18px; right:18px; }\n    .payroll-map-fullscreen .payroll-map-statusbar { bottom:18px; left:18px; }\n    .payroll-premium-employee-map-ui .payroll-employee-map-tools { position:absolute; top:14px; right:14px; display:flex; gap:7px; pointer-events:auto;\n        padding:7px; border-radius:14px; background:rgba(12,18,30,.80); border:1px solid rgba(255,255,255,.14); backdrop-filter:blur(16px); }\n    .payroll-employee-map-tools button { height:33px; border:1px solid rgba(255,255,255,.12); border-radius:10px; background:rgba(255,255,255,.07); color:#f5f9ff; padding:0 9px; font-size:.67rem; font-weight:750; }\n    .payroll-employee-map-tools button:hover { background:rgba(37,99,235,.25); }\n    .payroll-employee-map-live { position:absolute; left:14px; bottom:14px; display:flex; align-items:center; gap:7px; padding:8px 10px; border-radius:12px;\n        color:#e7f7ee; background:rgba(12,18,30,.80); border:1px solid rgba(255,255,255,.13); backdrop-filter:blur(14px); font-size:.62rem; pointer-events:none; }\n    .payroll-map-live-dot { width:7px; height:7px; border-radius:50%; background:#22c55e; box-shadow:0 0 0 4px rgba(34,197,94,.12),0 0 12px rgba(34,197,94,.7); animation:payrollMapLivePulse 1.8s infinite; }\n    .payroll-employee-map-accuracy { color:#9fb0c7; }\n    @@keyframes payrollMapLivePulse { 50%{ transform:scale(1.25); opacity:.65; } }\n    @@media (max-width: 900px) {\n        .payroll-map-commandbar { overflow-x:auto; scrollbar-width:none; }\n        .payroll-map-commandbar::-webkit-scrollbar { display:none; }\n        .payroll-map-search-wrap { min-width:160px; }\n        .payroll-map-tool span { display:none; }\n        .payroll-map-filter { min-width:95px; }\n    }\n</style>
+    /* ============================================================
+       PREMIUM REALTIME MAP COMMAND UI
+       Responsive presentation-only controls.
+       ============================================================ */
+    .payroll-premium-map-ui {
+        position:absolute;
+        inset:0;
+        z-index:1200;
+        pointer-events:none;
+        font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+        overflow:visible;
+    }
+    .payroll-map-commandbar {
+        position:absolute;
+        top:14px;
+        left:14px;
+        right:14px;
+        display:flex;
+        flex-wrap:wrap;
+        gap:7px;
+        align-items:center;
+        width:auto;
+        max-width:none;
+        box-sizing:border-box;
+        padding:8px;
+        border:1px solid rgba(255,255,255,.16);
+        border-radius:15px;
+        background:rgba(12,18,30,.82);
+        backdrop-filter:blur(18px) saturate(1.25);
+        box-shadow:0 14px 38px rgba(2,8,23,.25);
+        pointer-events:auto;
+        overflow:visible;
+    }
+    .payroll-map-search-wrap { position:relative; min-width:150px; flex:1 1 180px; height:34px; }
+    .payroll-map-search { width:100%; height:34px; box-sizing:border-box; border-radius:10px; border:1px solid rgba(255,255,255,.14); background:rgba(255,255,255,.09); color:#fff; outline:0; padding:0 10px 0 30px; font-size:.72rem; }
+    .payroll-map-search::placeholder { color:rgba(255,255,255,.58); }
+    .payroll-map-search-icon { position:absolute; left:10px; top:7px; color:#b9c8df; font-size:16px; }
+    .payroll-map-filter { height:34px; min-width:100px; flex:0 1 112px; border-radius:10px; border:1px solid rgba(255,255,255,.14); background:rgba(255,255,255,.09); color:#fff; padding:0 8px; font-size:.68rem; outline:0; }
+    .payroll-map-filter option { color:#111827; background:#fff; }
+    .payroll-map-tool { height:34px; min-width:64px; flex:0 0 auto; border:1px solid rgba(255,255,255,.13); border-radius:10px; background:rgba(255,255,255,.075); color:#edf5ff; padding:0 9px; font-size:.68rem; font-weight:700; white-space:nowrap; transition:all .18s ease; }
+    .payroll-map-tool:hover, .payroll-map-tool.active { background:rgba(37,99,235,.28); border-color:rgba(96,165,250,.55); transform:translateY(-1px); }
+    .payroll-map-tool span { margin-left:3px; }
+    .payroll-map-statusbar { position:absolute; left:14px; bottom:14px; display:flex; align-items:center; flex-wrap:wrap; gap:9px; width:max-content; max-width:calc(100% - 28px); padding:7px 10px; border-radius:12px; background:rgba(12,18,30,.82); border:1px solid rgba(255,255,255,.13); color:#dbe7f6; backdrop-filter:blur(14px); box-shadow:0 10px 30px rgba(2,8,23,.25); pointer-events:auto; font-size:.62rem; }
+    .payroll-map-statusbar span { display:flex; align-items:center; gap:4px; white-space:nowrap; }
+    .payroll-map-statusbar i { width:7px; height:7px; border-radius:50%; display:inline-block; }
+    .payroll-map-status-live i { background:#22c55e; box-shadow:0 0 0 3px rgba(34,197,94,.13); }
+    .payroll-map-status-stale i { background:#f59e0b; }
+    .payroll-map-status-out i { background:#ef4444; }
+    .payroll-map-status-updated { color:#7dd3fc; }
+    .payroll-premium-employee-map-ui { position:absolute; inset:0; z-index:1200; pointer-events:none; font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; overflow:visible; }
+    .payroll-premium-employee-map-ui .payroll-employee-map-tools { position:absolute; top:10px; right:10px; left:auto; display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; width:auto; max-width:calc(100% - 20px); box-sizing:border-box; padding:6px; border-radius:14px; background:rgba(12,18,30,.80); border:1px solid rgba(255,255,255,.14); backdrop-filter:blur(16px); pointer-events:auto; overflow:visible; }
+    .payroll-employee-map-tools button { height:33px; min-width:64px; flex:0 0 auto; border:1px solid rgba(255,255,255,.12); border-radius:10px; background:rgba(255,255,255,.07); color:#f5f9ff; padding:0 9px; font-size:.67rem; font-weight:750; white-space:nowrap; }
+    .payroll-employee-map-tools button:hover { background:rgba(37,99,235,.25); }
+    .payroll-employee-map-live { position:absolute; left:10px; bottom:10px; display:flex; align-items:center; gap:7px; max-width:calc(100% - 20px); box-sizing:border-box; padding:7px 9px; border-radius:12px; color:#e7f7ee; background:rgba(12,18,30,.80); border:1px solid rgba(255,255,255,.13); backdrop-filter:blur(14px); font-size:.62rem; pointer-events:none; white-space:nowrap; }
+    .payroll-map-live-dot { width:7px; height:7px; flex:0 0 7px; border-radius:50%; background:#22c55e; box-shadow:0 0 0 4px rgba(34,197,94,.12),0 0 12px rgba(34,197,94,.7); animation:payrollMapLivePulse 1.8s infinite; }
+    .payroll-employee-map-accuracy { color:#9fb0c7; }
+    .payroll-map-fullscreen { border-radius:0 !important; }
+    .payroll-map-fullscreen .payroll-map-commandbar { top:18px; left:18px; right:18px; }
+    .payroll-map-fullscreen .payroll-map-statusbar { bottom:18px; left:18px; }
+    @@keyframes payrollMapLivePulse { 50% { transform:scale(1.25); opacity:.65; } }
+    @@media (max-width: 900px) {
+        .payroll-map-commandbar { flex-wrap:wrap; overflow:visible; }
+        .payroll-map-search-wrap { flex:1 1 170px; min-width:145px; }
+        .payroll-map-filter { flex:0 1 105px; min-width:92px; }
+        .payroll-map-tool { min-width:60px; }
+        .payroll-map-tool span { display:none; }
+        .payroll-premium-employee-map-ui .payroll-employee-map-tools { right:8px; top:8px; max-width:calc(100% - 16px); }
+        .payroll-employee-map-tools button { min-width:56px; padding:0 8px; }
+    }
+    @@media (max-width: 600px) {
+        .payroll-map-commandbar { top:8px; left:8px; right:8px; gap:5px; padding:5px; }
+        .payroll-map-search-wrap { flex:1 1 100%; min-width:0; }
+        .payroll-map-filter { flex:1 1 110px; min-width:0; }
+        .payroll-map-tool { min-width:42px; padding:0 7px; }
+        .payroll-map-statusbar { left:8px; bottom:8px; max-width:calc(100% - 16px); gap:6px; font-size:.58rem; }
+        .payroll-map-fullscreen .payroll-map-commandbar { top:10px; left:10px; right:10px; }
+        .payroll-map-fullscreen .payroll-map-statusbar { left:10px; bottom:10px; }
+        .payroll-premium-employee-map-ui .payroll-employee-map-tools { left:8px; right:8px; top:8px; justify-content:center; }
+        .payroll-employee-map-tools button { flex:1 1 calc(50% - 6px); min-width:0; }
+        .payroll-employee-map-live { left:8px; bottom:8px; max-width:calc(100% - 16px); }
+    }
+</style>
 
 
 @code {
@@ -2724,35 +2805,6 @@
     }
 
     [JSInvokable]
-    public async Task GeoPunchAuditChanged(object? data = null)
-    {
-        if (disposed)
-            return;
-
-        try
-        {
-            // The audit row has already been committed before its Firebase
-            // event is published. Reload only the currently selected audit
-            // card, not the entire page. This preserves the existing audit
-            // calculation and presentation while removing the Refresh-button
-            // dependency.
-            if (selectedEmployeeId <= 0)
-                return;
-
-            if (!TryGetPayloadEmployeeId(data, out var changedEmployeeId) ||
-                changedEmployeeId != selectedEmployeeId)
-                return;
-
-            await RefreshSelectedEmployeePunchAuditsSilently();
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine(
-                $"Realtime geo punch audit update failed: {ex}");
-        }
-    }
-
-    [JSInvokable]
     public async Task ApplicationDataChanged(object? data = null)
     {
         if (disposed)
@@ -2772,6 +2824,32 @@
         {
             Console.Error.WriteLine(
                 $"Admin live map application realtime refresh failed: {ex}");
+        }
+    }
+
+    [JSInvokable]
+    public async Task GeoPunchAuditChanged(object? data = null)
+    {
+        if (disposed)
+            return;
+
+        try
+        {
+            if (selectedEmployeeId <= 0 || !TryGetPayloadEmployeeId(data, out var changedEmployeeId))
+                return;
+
+            if (changedEmployeeId != selectedEmployeeId)
+                return;
+
+            // Firebase is the realtime trigger. Re-query only the selected
+            // audit card so the existing table/date filter/business rules stay
+            // unchanged. This does not reload the page.
+            await RefreshSelectedEmployeePunchAuditsSilently();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine(
+                $"Admin geo punch audit realtime update failed: {ex}");
         }
     }
 

@@ -200,14 +200,11 @@ public sealed class ApplicationDataChangeInterceptor : SaveChangesInterceptor
                 ?.FindFirstValue(ClaimTypes.NameIdentifier);
             var role = _httpContextAccessor.HttpContext?.User
                 ?.FindFirstValue(ClaimTypes.Role);
-            // Always use the configured Firebase owner for realtime
-            // propagation. Background/mobile operations can legitimately have
-            // no HttpContext actor, but their committed CRUD must still reach
-            // every connected Web/Android client without a manual refresh.
+            // Background/automatic GPS operations may execute without an
+            // active HTTP user context. They still belong to the configured
+            // Firebase owner and must publish realtime SSOT changes.
             var ownerUid = _firebase.ResolveOwnerUid(
-                string.IsNullOrWhiteSpace(actorUid)
-                    ? "biometricpayroll"
-                    : actorUid,
+                string.IsNullOrWhiteSpace(actorUid) ? "biometricpayroll" : actorUid,
                 role);
 
             _ = _firebase.PublishApplicationDataChangedAsync(
