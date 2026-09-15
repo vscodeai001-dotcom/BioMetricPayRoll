@@ -2527,6 +2527,10 @@ window.updateGeoMap = async function (
     mapData.radius = allowedRadius;
     mapData.isWithin = !!isWithin;
 
+    if (typeof window.enhanceEmployeeGeoMap === 'function') {
+        window.enhanceEmployeeGeoMap(mapId);
+    }
+
     return true;
 
     }
@@ -2954,6 +2958,12 @@ window.registerAdminLiveLocationRealtime = function (mapId) {
                             : 2500
                     )
                 );
+
+            if (state.followSelected && Number(state.lastSelectedId) === employeeId) {
+                try {
+                    state.map.panTo(displayTarget, { animate: true, duration: 0.7 });
+                } catch { }
+            }
 
             if (typeof window.payrollSmoothMoveMarker === 'function') {
                 window.payrollSmoothMoveMarker(
@@ -3899,10 +3909,309 @@ window.updateAdminLiveStaffMap =
 
             state.lastStaffSignature = staffSignature;
             state.lastSelectedId = Number(selectedId);
+            state.liveStaff = liveStaff;
+            state.office = office;
+            state.selectedId = Number(selectedId);
+
+            // Presentation-only premium controls. They operate on the already
+            // rendered Leaflet state and never alter GPS, attendance, sessions,
+            // persistence, or the existing Blazor flow.
+            if (typeof window.enhanceAdminLiveMap === 'function') {
+                window.enhanceAdminLiveMap(mapId, office, liveStaff, selectedId);
+            }
         } catch (error) {
             console.error("Admin live map update failed:", error);
         }
     };
+
+// ============================================================
+// PREMIUM ADMIN LIVE MAP CONTROLS
+// ============================================================
+// Presentation-only layer. Existing GPS/Blazor state remains authoritative.
+// Provides industry-style map controls without changing application flow.
+
+window.enhanceAdminLiveMap = function (mapId, office, staff, selectedId) {
+    try {
+        const state = window.adminLiveMaps?.[mapId];
+        if (!state?.map) return;
+
+        const map = state.map;
+        const container = map.getContainer();
+        state.liveStaff = Array.isArray(staff) ? staff : [];
+        state.office = office;
+        state.selectedId = Number(selectedId) || 0;
+        state.uiFilter = state.uiFilter || 'all';
+        state.uiSearch = state.uiSearch || '';
+        state.geofenceVisible = state.geofenceVisible !== false;
+        state.trailsVisible = state.trailsVisible !== false;
+        state.followSelected = !!state.followSelected;
+        state.baseLayer = state.baseLayer || 'standard';
+
+        if (!state.premiumControls) {
+            const esc = window.payrollEscapeHtml || (v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c])));
+            const panel = document.createElement('div');
+            panel.className = 'payroll-premium-map-ui';
+            panel.innerHTML =
+                '<div class="payroll-map-commandbar">' +
+                  '<div class="payroll-map-search-wrap">' +
+                    '<span class="payroll-map-search-icon">⌕</span>' +
+                    '<input class="payroll-map-search" type="search" placeholder="Search staff" autocomplete="off" aria-label="Search staff" />' +
+                  '</div>' +
+                  '<select class="payroll-map-filter" aria-label="Map filter">' +
+                    '<option value="all">All staff</option>' +
+                    '<option value="live">Live</option>' +
+                    '<option value="stale">Stale</option>' +
+                    '<option value="offline">Offline</option>' +
+                    '<option value="within">Within range</option>' +
+                    '<option value="outside">Outside range</option>' +
+                  '</select>' +
+                  '<button type="button" class="payroll-map-tool" data-map-action="fit" title="Fit all staff">⌖ <span>Fit</span></button>' +
+                  '<button type="button" class="payroll-map-tool" data-map-action="office" title="Focus office">⌂ <span>Office</span></button>' +
+                  '<button type="button" class="payroll-map-tool" data-map-action="follow" title="Follow selected staff">◉ <span>Follow</span></button>' +
+                  '<button type="button" class="payroll-map-tool" data-map-action="geofence" title="Toggle geofence">◎ <span>Zone</span></button>' +
+                  '<button type="button" class="payroll-map-tool" data-map-action="trails" title="Toggle journey trails">〰 <span>Trails</span></button>' +
+                  '<button type="button" class="payroll-map-tool" data-map-action="layer" title="Change map layer">▦ <span>Layers</span></button>' +
+                  '<button type="button" class="payroll-map-tool" data-map-action="fullscreen" title="Full screen map">⛶ <span>Full</span></button>' +
+                '</div>' +
+                '<div class="payroll-map-statusbar">' +
+                  '<span class="payroll-map-status-live"><i></i><strong data-map-live>0</strong> live</span>' +
+                  '<span class="payroll-map-status-stale"><i></i><strong data-map-stale>0</strong> stale</span>' +
+                  '<span class="payroll-map-status-out"><i></i><strong data-map-out>0</strong> outside</span>' +
+                  '<span class="payroll-map-status-updated">● realtime</span>' +
+                '</div>';
+            container.appendChild(panel);
+
+            const search = panel.querySelector('.payroll-map-search');
+            const filter = panel.querySelector('.payroll-map-filter');
+            search.value = state.uiSearch;
+            filter.value = state.uiFilter;
+
+            search.addEventListener('input', function () {
+                state.uiSearch = this.value.trim().toLowerCase();
+                window.applyPremiumAdminMapFilter(mapId);
+            });
+            filter.addEventListener('change', function () {
+                state.uiFilter = this.value;
+                window.applyPremiumAdminMapFilter(mapId);
+            });
+
+            panel.querySelectorAll('[data-map-action]').forEach(function (button) {
+                button.addEventListener('click', function () {
+                    window.handlePremiumAdminMapAction(mapId, this.dataset.mapAction);
+                });
+            });
+
+            state.premiumControls = panel;
+        }
+
+        // Base layers are created once and selected without replacing the map.
+        if (!state.baseLayers) {
+            const dark = L.tileLayer(
+                'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+                { maxZoom: 20, attribution: '© OpenStreetMap © CARTO' }
+            );
+            const satellite = L.tileLayer(
+                'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+                { maxZoom: 19, attribution: 'Tiles © Esri' }
+            );
+            state.baseLayers = {
+                standard: null,
+                dark: dark,
+                satellite: satellite
+            };
+        }
+
+        // Respect the application's current theme on first creation.
+        if (!state.baseLayerInitialized) {
+            state.baseLayer = document.body.classList.contains('dark') ? 'dark' : 'standard';
+            state.baseLayerInitialized = true;
+        }
+        window.setPremiumAdminMapLayer(mapId, state.baseLayer);
+
+        // Premium map scale control is native Leaflet and presentation-only.
+        if (!state.scaleControl) {
+            state.scaleControl = L.control.scale({ imperial: false, position: 'bottomright', maxWidth: 120 }).addTo(map);
+        }
+
+        if (!state.themeObserver) {
+            state.themeObserver = new MutationObserver(function () {
+                if (!state.userSelectedLayer) {
+                    window.setPremiumAdminMapLayer(mapId, document.body.classList.contains('dark') ? 'dark' : 'standard');
+                }
+            });
+            state.themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+        }
+
+        window.applyPremiumAdminMapFilter(mapId);
+    } catch (error) {
+        console.debug('Premium admin map controls deferred:', error);
+    }
+};
+
+window.setPremiumAdminMapLayer = function (mapId, layerName) {
+    const state = window.adminLiveMaps?.[mapId];
+    if (!state?.map) return;
+    const name = layerName === 'dark' || layerName === 'satellite' ? layerName : 'standard';
+    try {
+        Object.keys(state.baseLayers || {}).forEach(function (key) {
+            const layer = state.baseLayers[key];
+            if (!layer) return;
+            if (key === name) layer.addTo(state.map);
+            else if (state.map.hasLayer(layer)) state.map.removeLayer(layer);
+        });
+        state.baseLayer = name;
+        if (name !== 'standard') state.userSelectedLayer = true;
+        const btn = state.premiumControls?.querySelector('[data-map-action="layer"]');
+        if (btn) btn.innerHTML = (name === 'dark' ? '☾' : name === 'satellite' ? '▧' : '▦') + ' <span>' + (name === 'dark' ? 'Dark' : name === 'satellite' ? 'Satellite' : 'Map') + '</span>';
+    } catch { }
+};
+
+window.applyPremiumAdminMapFilter = function (mapId) {
+    const state = window.adminLiveMaps?.[mapId];
+    if (!state?.map) return;
+    const search = String(state.uiSearch || '').toLowerCase();
+    const filter = state.uiFilter || 'all';
+    const staff = Array.isArray(state.liveStaff) ? state.liveStaff : [];
+    let live = 0, stale = 0, outside = 0;
+
+    staff.forEach(function (x) {
+        const id = Number(x.employeeId);
+        const status = String(x.status || 'live').toLowerCase();
+        const within = Boolean(x.isWithinAllowedRadius);
+        if (status === 'live') live++;
+        if (status === 'stale') stale++;
+        if (!within) outside++;
+        const name = String(x.name || ('Employee ' + id)).toLowerCase();
+        const matchesSearch = !search || name.includes(search) || String(id).includes(search);
+        const matchesFilter =
+            filter === 'all' ||
+            filter === status ||
+            (filter === 'within' && within) ||
+            (filter === 'outside' && !within);
+        const visible = matchesSearch && matchesFilter;
+        const marker = state.markers?.[id];
+        if (marker) {
+            marker.setOpacity(visible ? 1 : 0);
+            if (visible) marker.setZIndexOffset(Number(state.selectedId) === id ? 2500 : 0);
+            try {
+                if (!visible && marker.isTooltipOpen()) marker.closeTooltip();
+            } catch { }
+        }
+        ['roadRouteLines','roadRouteCasings','trails','collisionConnectors','labels','journeyLabels'].forEach(function (group) {
+            const layer = state[group]?.[id];
+            if (!layer) return;
+            try {
+                if (group === 'trails' && !state.trailsVisible) layer.setStyle({ opacity: 0 });
+                else layer.setStyle({ opacity: visible ? (group === 'roadRouteLines' ? .82 : .55) : 0 });
+            } catch { }
+        });
+    });
+
+    const panel = state.premiumControls;
+    if (panel) {
+        panel.querySelector('[data-map-live]').textContent = String(live);
+        panel.querySelector('[data-map-stale]').textContent = String(stale);
+        panel.querySelector('[data-map-out]').textContent = String(outside);
+        panel.querySelector('[data-map-action="follow"]').classList.toggle('active', !!state.followSelected);
+        panel.querySelector('[data-map-action="geofence"]').classList.toggle('active', state.geofenceVisible);
+        panel.querySelector('[data-map-action="trails"]').classList.toggle('active', state.trailsVisible);
+    }
+};
+
+window.handlePremiumAdminMapAction = function (mapId, action) {
+    const state = window.adminLiveMaps?.[mapId];
+    if (!state?.map) return;
+    const points = [state.office].filter(Boolean);
+    (state.liveStaff || []).forEach(function (x) {
+        const lat = Number(x.latitude), lng = Number(x.longitude);
+        if (Number.isFinite(lat) && Number.isFinite(lng)) points.push([lat, lng]);
+    });
+
+    if (action === 'fit') {
+        const bounds = L.latLngBounds(points);
+        if (bounds.isValid()) state.map.fitBounds(bounds, { padding: [70, 70], maxZoom: 17, animate: true, duration: .8 });
+    } else if (action === 'office') {
+        state.map.setView(state.office, Math.max(15, state.map.getZoom()), { animate: true });
+    } else if (action === 'follow') {
+        state.followSelected = !state.followSelected;
+        if (state.followSelected && state.selectedId > 0 && state.markers?.[state.selectedId]) {
+            state.map.panTo(state.markers[state.selectedId].getLatLng(), { animate: true, duration: .6 });
+        }
+    } else if (action === 'geofence') {
+        state.geofenceVisible = !state.geofenceVisible;
+        if (state.circle) state.circle.setStyle({ opacity: state.geofenceVisible ? .72 : 0, fillOpacity: state.geofenceVisible ? .08 : 0 });
+    } else if (action === 'trails') {
+        state.trailsVisible = !state.trailsVisible;
+        Object.values(state.trails || {}).forEach(function (layer) { try { layer.setStyle({ opacity: state.trailsVisible ? .9 : 0 }); } catch {} });
+    } else if (action === 'layer') {
+        const next = state.baseLayer === 'standard' ? 'dark' : state.baseLayer === 'dark' ? 'satellite' : 'standard';
+        state.userSelectedLayer = next !== 'standard';
+        window.setPremiumAdminMapLayer(mapId, next);
+    } else if (action === 'fullscreen') {
+        const el = state.map.getContainer();
+        if (!document.fullscreenElement) {
+            if (el.requestFullscreen) el.requestFullscreen();
+            el.classList.add('payroll-map-fullscreen');
+        } else {
+            document.exitFullscreen?.();
+            el.classList.remove('payroll-map-fullscreen');
+        }
+        setTimeout(function () { try { state.map.invalidateSize({ animate: true }); } catch {} }, 250);
+    }
+    window.applyPremiumAdminMapFilter(mapId);
+};
+
+// ============================================================
+// PREMIUM EMPLOYEE GEO MAP CONTROLS
+// ============================================================
+window.enhanceEmployeeGeoMap = function (mapId) {
+    try {
+        const state = window.payrollGeoMaps?.[mapId];
+        if (!state?.map) return;
+        const map = state.map;
+        const container = map.getContainer();
+        if (!state.premiumControls) {
+            const panel = document.createElement('div');
+            panel.className = 'payroll-premium-employee-map-ui';
+            panel.innerHTML =
+                '<div class="payroll-employee-map-tools">' +
+                  '<button type="button" data-geo-action="route" title="Fit office and your location">⌖ <span>Route</span></button>' +
+                  '<button type="button" data-geo-action="office" title="Focus office">⌂ <span>Office</span></button>' +
+                  '<button type="button" data-geo-action="layer" title="Change map layer">▦ <span>Layers</span></button>' +
+                  '<button type="button" data-geo-action="fullscreen" title="Full screen map">⛶ <span>Full</span></button>' +
+                '</div>' +
+                '<div class="payroll-employee-map-live">' +
+                  '<span class="payroll-map-live-dot"></span><strong>GPS LIVE</strong>' +
+                  '<span class="payroll-employee-map-accuracy"></span>' +
+                '</div>';
+            container.appendChild(panel);
+            panel.querySelectorAll('[data-geo-action]').forEach(function (button) {
+                button.addEventListener('click', function () {
+                    const action = this.dataset.geoAction;
+                    if (action === 'route') {
+                        const b = L.latLngBounds([state.office, state.userMarker.getLatLng()]);
+                        if (b.isValid()) map.fitBounds(b, { padding: [70, 70], maxZoom: 17, animate: true, duration: .7 });
+                    } else if (action === 'office') {
+                        map.setView(state.office, Math.max(15, map.getZoom()), { animate: true });
+                    } else if (action === 'layer') {
+                        state.baseLayer = state.baseLayer === 'standard' ? 'dark' : state.baseLayer === 'dark' ? 'satellite' : 'standard';
+                        if (!state.baseLayers) state.baseLayers = {};
+                        if (!state.baseLayers.dark) state.baseLayers.dark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {maxZoom:20, attribution:'© OpenStreetMap © CARTO'});
+                        if (!state.baseLayers.satellite) state.baseLayers.satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {maxZoom:19, attribution:'Tiles © Esri'});
+                        Object.keys(state.baseLayers).forEach(function(k){ const l=state.baseLayers[k]; if(!l)return; if(k===state.baseLayer)l.addTo(map); else if(map.hasLayer(l))map.removeLayer(l); });
+                    } else if (action === 'fullscreen') {
+                        if (!document.fullscreenElement) container.requestFullscreen?.(); else document.exitFullscreen?.();
+                        setTimeout(function(){ try{map.invalidateSize({animate:true});}catch{} },250);
+                    }
+                });
+            });
+            state.premiumControls = panel;
+        }
+        if (!state.scaleControl) state.scaleControl = L.control.scale({ imperial:false, position:'bottomright', maxWidth:120 }).addTo(map);
+        const acc = state.premiumControls.querySelector('.payroll-employee-map-accuracy');
+        if (acc) acc.textContent = state.lastAccuracyMeters > 0 ? '±' + Math.round(state.lastAccuracyMeters) + ' m' : '';
+    } catch (error) { console.debug('Premium employee map controls deferred:', error); }
+};
 
 // ============================================================
 // ADMIN HISTORICAL GPS ROUTE
