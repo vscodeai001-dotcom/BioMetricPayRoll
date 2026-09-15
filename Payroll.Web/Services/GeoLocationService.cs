@@ -14,6 +14,8 @@ public class GeoLocationService
     private readonly ILogger<GeoLocationService> _logger;
     private readonly AttendanceRefreshService _refreshService;
     private readonly IHubContext<AttendanceRefreshHub> _hubContext;
+    private readonly FirebaseRealtimeService _firebase;
+    private readonly IConfiguration _configuration;
 
     // Dual Attendance treats the configured geofence as a reconciliation
     // signal. GPS state is checked against the authoritative attendance
@@ -31,12 +33,16 @@ public class GeoLocationService
         IDbContextFactory<AppDbContext> dbFactory,
         ILogger<GeoLocationService> logger,
         AttendanceRefreshService refreshService,
-        IHubContext<AttendanceRefreshHub> hubContext)
+        IHubContext<AttendanceRefreshHub> hubContext,
+        FirebaseRealtimeService firebase,
+        IConfiguration configuration)
     {
         _dbFactory = dbFactory;
         _logger = logger;
         _refreshService = refreshService;
         _hubContext = hubContext;
+        _firebase = firebase;
+        _configuration = configuration;
     }
 
     // ================================================================
@@ -1730,6 +1736,39 @@ public class GeoLocationService
             db.GeoPunchAudits.Add(audit);
 
             await db.SaveChangesAsync();
+
+            // Firebase is the realtime SSOT for connected Web/Android clients.
+            // Publish only after the local audit row has committed so the
+            // browser never receives an audit event for a failed transaction.
+            // This is transport synchronization only and does not alter the
+            // punch calculation, audit values, schema, or existing UI flow.
+            try
+            {
+                var ownerUid =
+                    _configuration["Firebase:OwnerUid"]
+                    ?? Environment.GetEnvironmentVariable("FIREBASE_OWNER_UID")
+                    ?? "biometricpayroll";
+
+                if (audit.Id > 0)
+                {
+                    await _firebase.SetOwnerRecordAsync(
+                        ownerUid,
+                        "geo_punch_audits",
+                        audit.Id.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        audit);
+                }
+            }
+            catch (Exception firebaseEx)
+            {
+                // Firebase realtime publication is best-effort. The committed
+                // audit row remains authoritative if Firebase is temporarily
+                // unavailable; the existing sync path can reconcile it later.
+                _logger.LogWarning(
+                    firebaseEx,
+                    "Geo punch audit committed locally but Firebase realtime publication failed. EmployeeId={EmployeeId}, AuditId={AuditId}",
+                    employeeId,
+                    audit.Id);
+            }
         }
         catch (Exception ex)
         {

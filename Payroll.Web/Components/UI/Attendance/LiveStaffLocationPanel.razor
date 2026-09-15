@@ -2724,6 +2724,35 @@
     }
 
     [JSInvokable]
+    public async Task GeoPunchAuditChanged(object? data = null)
+    {
+        if (disposed)
+            return;
+
+        try
+        {
+            // The audit row has already been committed before its Firebase
+            // event is published. Reload only the currently selected audit
+            // card, not the entire page. This preserves the existing audit
+            // calculation and presentation while removing the Refresh-button
+            // dependency.
+            if (selectedEmployeeId <= 0)
+                return;
+
+            if (!TryGetPayloadEmployeeId(data, out var changedEmployeeId) ||
+                changedEmployeeId != selectedEmployeeId)
+                return;
+
+            await RefreshSelectedEmployeePunchAuditsSilently();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine(
+                $"Realtime geo punch audit update failed: {ex}");
+        }
+    }
+
+    [JSInvokable]
     public async Task ApplicationDataChanged(object? data = null)
     {
         if (disposed)

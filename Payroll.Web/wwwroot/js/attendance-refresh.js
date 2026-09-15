@@ -81,6 +81,15 @@ window.attendanceRefresh = (function () {
                 const ownerEventsRef = firebaseDatabase.ref('owner_events/' + ownerUid);
                 ownerEventsRef.on('child_added', onFirebaseApplicationEvent);
 
+                // Geo-punch audits are listened to directly from Firebase.
+                // This avoids waiting for the SQLite compatibility synchronizer
+                // before an already-open Admin audit card can see a new record.
+                const geoPunchAuditRef =
+                    firebaseDatabase.ref('owners/' + ownerUid + '/geo_punch_audits');
+
+                geoPunchAuditRef.on('child_added', onFirebaseGeoPunchAudit);
+                geoPunchAuditRef.on('child_changed', onFirebaseGeoPunchAudit);
+
                 // Mobile-originated changes use a per-employee channel so an
                 // employee cannot write to the shared admin event stream.
                 // Admin/SuperAdmin Firebase rules allow the web dashboard to
@@ -122,6 +131,36 @@ window.attendanceRefresh = (function () {
             console.warn('Firebase live location callback failed.', error);
         }
     }
+
+    async function onFirebaseGeoPunchAudit(snapshot) {
+        try {
+            const data = snapshot.val();
+            if (!data || typeof data !== 'object')
+                return;
+
+            // Expose the Firebase record to the component-level realtime
+            // listener. The component decides whether the selected employee
+            // and selected date should be updated.
+            window.dispatchEvent(
+                new CustomEvent(
+                    'firebase-geo-punch-audit-changed',
+                    { detail: data }
+                )
+            );
+
+            await notifyListeners(
+                'GeoPunchAuditChanged',
+                data
+            );
+        }
+        catch (error) {
+            console.warn(
+                'Firebase geo punch audit callback failed.',
+                error
+            );
+        }
+    }
+
 
     async function onFirebaseClientEventEmployee(employeeSnapshot) {
         try {
