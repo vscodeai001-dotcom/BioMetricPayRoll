@@ -92,29 +92,57 @@ else
         {
             allEmployees = await dbContext.Employees.AsNoTracking().ToListAsync();
 
-            var users = await UserManager.Users.ToListAsync();
+            // Read Identity data through the same AppDbContext that is used
+            // by the SQLite compatibility store. This avoids one UserManager
+            // role query per user and keeps the list deterministic after a
+            // create/role update.
+            var users = await dbContext.Users
+                .AsNoTracking()
+                .ToListAsync();
+
+            var rolesById = await dbContext.Roles
+                .AsNoTracking()
+                .ToDictionaryAsync(r => r.Id, r => r.Name ?? "Employee");
+
+            var roleIdsByUserId = await dbContext.UserRoles
+                .AsNoTracking()
+                .GroupBy(ur => ur.UserId)
+                .ToDictionaryAsync(
+                    g => g.Key,
+                    g => g.Select(x => x.RoleId).ToList());
+
             userList = new();
 
             foreach (var u in users)
             {
-                var roles = await UserManager.GetRolesAsync(u);
-                var role = roles.SingleOrDefault() ?? "Employee";
+                var role = "Employee";
+
+                if (roleIdsByUserId.TryGetValue(u.Id, out var roleIds))
+                {
+                    var roleName = roleIds
+                        .Select(id => rolesById.TryGetValue(id, out var name) ? name : null)
+                        .FirstOrDefault(name => !string.IsNullOrWhiteSpace(name));
+
+                    if (!string.IsNullOrWhiteSpace(roleName))
+                        role = roleName!;
+                }
 
                 var linked = allEmployees.FirstOrDefault(e => e.AspNetUserId == u.Id);
 
                 userList.Add(new UserRoleViewModel
                 {
                     UserId = u.Id,
-                    Email = u.Email!,
-                    UserName = u.UserName!,
+                    Email = u.Email ?? u.UserName ?? string.Empty,
+                    UserName = u.UserName ?? u.Email ?? string.Empty,
                     CurrentRole = role,
                     EmployeeId = linked?.EmployeeID,
                     EmployeeName = linked?.Name ?? "Unlinked",
                 });
             }
         }
-        catch
+        catch (Exception ex)
         {
+            _logger.LogError(ex, "Error loading user data from local Identity/SQLite store.");
             toastService.ShowError("Error loading user data.");
         }
         finally
