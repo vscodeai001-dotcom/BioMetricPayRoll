@@ -5,6 +5,7 @@ using System.Globalization;
 
 using Hangfire;
 using Hangfire.Dashboard;
+using Hangfire.MemoryStorage;
 
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
@@ -103,7 +104,7 @@ var builder =
 //
 // IMPORTANT:
 //
-// Render/Linux servers commonly run in UTC.
+// Linux/container servers commonly run in UTC.
 //
 // Therefore payroll calculations must NOT depend on:
 //     DateTime.Now
@@ -151,7 +152,7 @@ builder.Host.UseWindowsService();
 
 builder.Services.AddSignalR(options =>
 {
-    // Keep the Render/Browser SignalR connection alive through
+    // Keep the hosting platform/Browser SignalR connection alive through
     // idle periods and allow enough time for transient network gaps.
     options.KeepAliveInterval = TimeSpan.FromSeconds(15);
     options.ClientTimeoutInterval = TimeSpan.FromSeconds(60);
@@ -167,6 +168,8 @@ builder.Services.AddAuthentication()
 
 builder.Services.AddHttpClient("FirebaseRealtime");
 builder.Services.AddSingleton<FirebaseRealtimeService>();
+builder.Services.AddHostedService<FirebaseSqliteSyncService>();
+builder.Services.AddHostedService<FirebaseSuperAdminProvisioningService>();
 
 builder.Services.AddSingleton<
     AttendanceRefreshService>();
@@ -182,33 +185,24 @@ builder.Services.AddHostedService<LocationHealthService>();
 
 
 // ============================================================
-// LOCAL EF COMPATIBILITY PROJECTION
+// LOCAL EF COMPATIBILITY DATABASE
 // ============================================================
-// Firebase is the shared durable SSOT. SQLite is local-only and exists solely
-// to preserve the current AppDbContext/Identity/business-service contracts
-// while individual modules are migrated to direct Firebase CRUD.
-
+// Firebase Realtime Database is the shared durable SSOT for Web + Android.
+// SQLite is a local compatibility projection for the existing EF/Identity
+// contracts while modules are migrated to Firebase-native CRUD.
 var sqlitePath = Environment.GetEnvironmentVariable("BIOMETRIC_SQLITE_PATH");
 if (string.IsNullOrWhiteSpace(sqlitePath))
-{
-    sqlitePath = Path.Combine(
-        builder.Environment.ContentRootPath,
-        "data",
-        "biometricpayroll-cache.db");
-}
+    sqlitePath = Path.Combine(builder.Environment.ContentRootPath, "data", "biometricpayroll-cache.db");
 
 var sqliteDirectory = Path.GetDirectoryName(sqlitePath);
 if (!string.IsNullOrWhiteSpace(sqliteDirectory))
     Directory.CreateDirectory(sqliteDirectory);
 
-builder.Services.AddDbContextFactory<AppDbContext>(
-    (sp, options) =>
-    {
-        options.AddInterceptors(
-            sp.GetRequiredService<ApplicationDataChangeInterceptor>());
-
-        options.UseSqlite($"Data Source={sqlitePath}");
-    });
+builder.Services.AddDbContextFactory<AppDbContext>((sp, options) =>
+{
+    options.AddInterceptors(sp.GetRequiredService<ApplicationDataChangeInterceptor>());
+    options.UseSqlite($"Data Source={sqlitePath}");
+});
 
 
 // ============================================================
@@ -341,19 +335,20 @@ builder.Services.AddHttpContextAccessor();
 // REVERSE PROXY / HTTPS FORWARDED HEADERS
 // ============================================================
 //
-// Render terminates TLS at its proxy and forwards the request to
+// The hosting proxy terminates TLS at its proxy and forwards the request to
 // the ASP.NET Core container. Without processing X-Forwarded-Proto,
 // ASP.NET Core can see the incoming request as HTTP even though the
 // browser is using HTTPS. Identity then generates redirects such as:
+//   hosted HTTPS /Identity/Account/Login
 //
 // That HTTP redirect is blocked when /my-attendance is running inside
-// the HTTPS Blazor document/frame. Trust the Render proxy headers so
+// the HTTPS Blazor document/frame. Trust the hosting platform proxy headers so
 // Request.Scheme remains HTTPS for authentication redirects, cookies,
 // antiforgery, and generated absolute URLs.
 //
-// Render's proxy IPs are dynamic, so the forwarded-header middleware
+// the hosting platform's proxy IPs are dynamic, so the forwarded-header middleware
 // must not be restricted to a fixed proxy IP/network. The application
-// is intended to be reached through Render's ingress.
+// is intended to be reached through the hosting platform's ingress.
 // ============================================================
 
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
@@ -541,7 +536,7 @@ builder.Services.AddScoped<
 // 1. Key storage: Persistent file system (e.g., /data volume)
 // 2. Key encryption: Environment variable (optional)
 //
-// For Docker/Render:
+// For Docker/hosting platform:
 // - Mount a persistent volume at /data/dataprotection
 // - Container automatically uses this for keys
 // - Keys survive container restarts
@@ -556,7 +551,7 @@ var dataProtectionPath =
 
 if (string.IsNullOrWhiteSpace(dataProtectionPath))
 {
-    // Render/container deployments commonly mount their persistent disk at
+    // container deployments commonly mount their persistent disk at
     // /data. Prefer it when available so authentication/DataProtection keys
     // survive an application process/container restart. Local development
     // continues to use the project-local directory.
@@ -662,10 +657,10 @@ builder.Services.AddBlazoredToast();
 // HEALTH CHECKS
 // ============================================================
 //
-// Health checks help Render platform detect if the application
+// Health checks help hosting platform detect if the application
 // is still responding and healthy.
 //
-// If the health check fails, Render can restart the container.
+// If the health check fails, hosting platform can restart the container.
 //
 // Endpoint: /health
 //
@@ -679,17 +674,14 @@ builder.Services.AddHealthChecks()
 // ============================================================
 // HANGFIRE
 // ============================================================
-// Use in-process memory storage. PostgreSQL/Neon is not required for jobs.
-
-builder.Services.AddHangfire(
-    config =>
-    {
-        config
-            .SetDataCompatibilityLevel(CompatibilityLevel.Version_170)
-            .UseSimpleAssemblyNameTypeSerializer()
-            .UseRecommendedSerializerSettings()
-            .UseMemoryStorage();
-    });
+// Memory storage removes the scheduler's external PostgreSQL/Neon dependency.
+builder.Services.AddHangfire((serviceProvider, config) =>
+{
+    config.SetDataCompatibilityLevel(CompatibilityLevel.Version_170)
+        .UseSimpleAssemblyNameTypeSerializer()
+        .UseRecommendedSerializerSettings()
+        .UseMemoryStorage();
+});
 
 
 // ============================================================
@@ -755,24 +747,19 @@ app.MapHub<AttendanceRefreshHub>(
 
 
 // ============================================================
-// LOCAL SQLITE SCHEMA INITIALIZATION
+// LOCAL DATABASE INITIALIZATION
 // ============================================================
-// No EF migration or PostgreSQL/Neon connection is opened at startup.
-// EnsureCreated builds the local compatibility projection from the existing
-// AppDbContext model. Firebase remains the shared durable SSOT.
-
+// Never connect to Neon/PostgreSQL during startup. Create the local SQLite
+// compatibility schema once, then hydrate it from Firebase.
 try
 {
     using var scope = app.Services.CreateScope();
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     await db.Database.EnsureCreatedAsync();
-
-    app.Logger.LogInformation(
-        "Local SQLite compatibility database initialized. Firebase remains the shared SSOT.");
 }
 catch (Exception ex)
 {
-    app.Logger.LogError(ex, "Error initializing local SQLite compatibility database.");
+    app.Logger.LogError(ex, "Local SQLite compatibility database initialization failed.");
     throw;
 }
 
@@ -838,18 +825,18 @@ if (!app.Environment.IsDevelopment())
 // REVERSE PROXY HEADERS MUST RUN FIRST
 // ============================================================
 //
-// Render terminates HTTPS before forwarding traffic to Kestrel.
+// The hosting proxy terminates HTTPS before forwarding traffic to Kestrel.
 // Process X-Forwarded-Proto before authentication so Identity sees
-// the original browser scheme (HTTPS), not Render's internal HTTP hop.
+// the original browser scheme (HTTPS), not the hosting platform's internal HTTP hop.
 // This prevents HTTPS pages from receiving HTTP Identity login URLs.
 // ============================================================
 
 app.UseForwardedHeaders();
 
-// Do not enable UseHttpsRedirection here. Render already performs the
+// Do not enable UseHttpsRedirection here. the hosting proxy already performs the
 // public HTTPS termination/redirect, while the local Windows Service
 // deployment intentionally runs on HTTP. Forwarded headers are enough
-// to make generated authentication URLs use HTTPS on Render.
+// to make generated authentication URLs use HTTPS on hosting platform.
 
 app.UseStaticFiles();
 
@@ -873,7 +860,7 @@ app.UseAntiforgery();
 // HEALTH CHECK ENDPOINT
 // ============================================================
 //
-// Render platform (and other orchestration systems) use this
+// hosting platform (and other orchestration systems) use this
 // endpoint to determine if the application is healthy.
 //
 // If health check fails repeatedly, the container is restarted.
@@ -944,7 +931,7 @@ app.UseHangfireDashboard(
 //
 //     TimeZoneInfo.Local
 //
-// because Render/Linux may be UTC.
+// because Linux/container may be UTC.
 //
 // ============================================================
 
@@ -1081,14 +1068,14 @@ recurringJobManager.AddOrUpdate<
 app.MapRazorPages();
 
 app.MapRazorComponents<App>()
-    .AddInteractiveServerRenderMode();
+    .AddInteractiveServerhosting platformMode();
 
 
 // ============================================================
 // GRACEFUL SHUTDOWN HANDLING
 // ============================================================
 //
-// When Render (or any container platform) stops the container,
+// When the hosting platform stops the container,
 // we need to gracefully shutdown to avoid data loss.
 //
 // - SignalR connections are closed gracefully

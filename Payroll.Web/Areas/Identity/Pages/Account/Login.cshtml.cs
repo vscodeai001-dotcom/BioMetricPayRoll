@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.RazorPages;
 using Microsoft.EntityFrameworkCore;
 
+
 using Payroll.Shared.Data;
 using Payroll.Web.Services;
 
@@ -715,45 +716,27 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
                 string userId,
                 string deviceId)
         {
-            await using var db =
-                await _dbFactory.CreateDbContextAsync();
-
-            await using var transaction =
-                await db.Database.BeginTransactionAsync();
-
+            await using var db = await _dbFactory.CreateDbContextAsync();
+            await using var transaction = await db.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable);
             try
             {
-                var existing = await db.EmployeeDeviceLocks
-                    .FirstOrDefaultAsync(x => x.UserId == userId);
-
-                if (existing != null)
-                {
-                    await transaction.RollbackAsync();
+                if (await db.EmployeeDeviceLocks.AsNoTracking().AnyAsync(x => x.UserId == userId))
                     return EmployeeLockResult.AlreadyActive;
-                }
 
                 var now = DateTime.UtcNow;
                 db.EmployeeDeviceLocks.Add(new EmployeeDeviceLock
                 {
-                    Id = Guid.NewGuid(),
-                    UserId = userId,
-                    DeviceId = deviceId,
-                    CreatedAtUtc = now,
-                    LastSeenAtUtc = now
+                    Id = Guid.NewGuid(), UserId = userId, DeviceId = deviceId,
+                    CreatedAtUtc = now, LastSeenAtUtc = now
                 });
-
-                try
-                {
-                    await db.SaveChangesAsync();
-                }
-                catch (DbUpdateException)
-                {
-                    await transaction.RollbackAsync();
-                    return EmployeeLockResult.AlreadyActive;
-                }
-
+                await db.SaveChangesAsync();
                 await transaction.CommitAsync();
                 return EmployeeLockResult.Acquired;
+            }
+            catch (DbUpdateException)
+            {
+                try { await transaction.RollbackAsync(); } catch { }
+                return EmployeeLockResult.AlreadyActive;
             }
             catch
             {
@@ -780,50 +763,33 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
                 string userId,
                 string newDeviceId)
         {
-            await using var db =
-                await _dbFactory.CreateDbContextAsync();
-
-            await using var transaction =
-                await db.Database.BeginTransactionAsync();
-
+            await using var db = await _dbFactory.CreateDbContextAsync();
+            await using var transaction = await db.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable);
             try
             {
-                var existingLocks = await db.EmployeeDeviceLocks
-                    .Where(x => x.UserId == userId)
-                    .ToListAsync();
-
-                if (existingLocks.Count > 0)
-                    db.EmployeeDeviceLocks.RemoveRange(existingLocks);
+                var existing = await db.EmployeeDeviceLocks.FirstOrDefaultAsync(x => x.UserId == userId);
+                if (existing != null)
+                {
+                    db.EmployeeDeviceLocks.Remove(existing);
+                    await db.SaveChangesAsync();
+                }
 
                 var now = DateTime.UtcNow;
                 db.EmployeeDeviceLocks.Add(new EmployeeDeviceLock
                 {
-                    Id = Guid.NewGuid(),
-                    UserId = userId,
-                    DeviceId = newDeviceId,
-                    CreatedAtUtc = now,
-                    LastSeenAtUtc = now
+                    Id = Guid.NewGuid(), UserId = userId, DeviceId = newDeviceId,
+                    CreatedAtUtc = now, LastSeenAtUtc = now
                 });
-
                 await db.SaveChangesAsync();
                 await transaction.CommitAsync();
 
-                _logger.LogWarning(
-                    "EMPLOYEE ACTIVE SESSION REPLACED. UserId={UserId}, NewDeviceId={DeviceId}",
-                    userId,
-                    newDeviceId);
-
+                _logger.LogWarning("EMPLOYEE ACTIVE SESSION REPLACED. UserId={UserId}, NewDeviceId={DeviceId}", userId, newDeviceId);
                 return true;
             }
             catch (Exception ex)
             {
                 try { await transaction.RollbackAsync(); } catch { }
-
-                _logger.LogError(
-                    ex,
-                    "EMPLOYEE FORCE SESSION REPLACEMENT FAILED. UserId={UserId}",
-                    userId);
-
+                _logger.LogError(ex, "EMPLOYEE FORCE SESSION REPLACEMENT FAILED. UserId={UserId}", userId);
                 return false;
             }
         }

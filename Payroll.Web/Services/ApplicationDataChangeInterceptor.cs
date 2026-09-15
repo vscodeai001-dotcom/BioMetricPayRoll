@@ -25,6 +25,7 @@ public sealed class ApplicationDataChangeInterceptor : SaveChangesInterceptor
     {
         public bool Notify;
         public AttendanceRefreshService.ApplicationDataChange[] Changes { get; set; } = Array.Empty<AttendanceRefreshService.ApplicationDataChange>();
+        public EntityEntry[] Entries { get; set; } = Array.Empty<EntityEntry>();
         public double? OfficeLatitude;
         public double? OfficeLongitude;
         public int? GeoRadiusMeters;
@@ -206,9 +207,8 @@ public sealed class ApplicationDataChangeInterceptor : SaveChangesInterceptor
                 pending.Changes.Cast<object>().ToArray(),
                 ownerUid);
 
-            // Publish the actual committed local row snapshots as a Firebase
-            // compatibility projection. This is best-effort and never participates
-            // in the local transaction. Existing UI behaviour is untouched.
+            // Publish the actual committed local row snapshots to Firebase.
+            // This is best-effort and never participates in the local transaction.
             if (!string.IsNullOrWhiteSpace(ownerUid))
             {
                 _ = _firebase.PublishCommittedChangesAsync(

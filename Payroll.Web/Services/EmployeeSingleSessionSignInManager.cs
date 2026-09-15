@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Payroll.Shared.Data;
+using System.Data;
 using System.Security.Claims;
 
 namespace Payroll.Web.Services
@@ -18,7 +19,8 @@ namespace Payroll.Web.Services
     ///
     /// Admin and SuperAdmin accounts are NOT restricted.
     ///
-    /// The unique UserId database index remains the final concurrency authority.
+    /// The PostgreSQL UNIQUE(UserId) constraint is the final
+    /// concurrency authority.
     /// </summary>
     public sealed class EmployeeSingleSessionSignInManager
         : SignInManager<IdentityUser>
@@ -570,34 +572,32 @@ namespace Payroll.Web.Services
                 string userId,
                 string deviceId)
         {
-            await using var db =
-                await _dbFactory.CreateDbContextAsync();
-
-            var existing = await db.EmployeeDeviceLocks
-                .FirstOrDefaultAsync(x => x.UserId == userId);
-
-            if (existing != null)
-                return false;
-
-            var now = DateTime.UtcNow;
-            db.EmployeeDeviceLocks.Add(new EmployeeDeviceLock
-            {
-                Id = Guid.NewGuid(),
-                UserId = userId,
-                DeviceId = deviceId,
-                CreatedAtUtc = now,
-                LastSeenAtUtc = now
-            });
-
+            await using var db = await _dbFactory.CreateDbContextAsync();
+            await using var transaction = await db.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable);
             try
             {
+                if (await db.EmployeeDeviceLocks.AsNoTracking().AnyAsync(x => x.UserId == userId))
+                    return false;
+
+                var now = DateTime.UtcNow;
+                db.EmployeeDeviceLocks.Add(new EmployeeDeviceLock
+                {
+                    Id = Guid.NewGuid(), UserId = userId, DeviceId = deviceId,
+                    CreatedAtUtc = now, LastSeenAtUtc = now
+                });
                 await db.SaveChangesAsync();
+                await transaction.CommitAsync();
                 return true;
             }
             catch (DbUpdateException)
             {
-                // The unique UserId index remains the final concurrency guard.
+                try { await transaction.RollbackAsync(); } catch { }
                 return false;
+            }
+            catch
+            {
+                try { await transaction.RollbackAsync(); } catch { }
+                throw;
             }
         }
 

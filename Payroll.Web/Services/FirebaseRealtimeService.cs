@@ -5,6 +5,8 @@ using FirebaseAdmin;
 using FirebaseAdmin.Auth;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
+using Microsoft.EntityFrameworkCore.Metadata;
+using System.Collections;
 using Google.Apis.Auth.OAuth2;
 
 namespace Payroll.Web.Services;
@@ -283,8 +285,8 @@ public sealed class FirebaseRealtimeService
 
 
     /// <summary>
-    /// Legacy bridge: publishes committed server row snapshots that changed in one EF save.
-    /// Used only during the staged migration; Firebase is the target SSOT.
+    /// Publishes committed local row snapshots that changed in one EF save.
+    /// Firebase is the shared realtime SSOT.
     /// Only scalar properties are exported, so EF navigation graphs/cycles and
     /// calculated client state are never copied into Firebase.
     /// </summary>
@@ -332,9 +334,10 @@ public sealed class FirebaseRealtimeService
         return await UpdateAsync(updates, cancellationToken);
     }
 
+
     // Firebase paths intentionally match the existing Android owner-node
     // layout. This is a transport/read-model mapping only; it does not alter
-    // the Neon schema or any business logic.
+    // the logical application schema or any business logic.
     private static string? GetFirebaseTable(string entityName)
         => entityName switch
         {
@@ -678,6 +681,26 @@ public sealed class FirebaseRealtimeService
         return value;
     }
 
+    private static object? JsonElementToObject(JsonElement element)
+    {
+        return element.ValueKind switch
+        {
+            JsonValueKind.Object => element.EnumerateObject().ToDictionary(p => p.Name, p => JsonElementToObject(p.Value), StringComparer.Ordinal),
+            JsonValueKind.Array => element.EnumerateArray().Select(JsonElementToObject).ToList(),
+            JsonValueKind.String => element.GetString(),
+            JsonValueKind.Number => element.TryGetInt64(out var l) ? l : element.GetDecimal(),
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            _ => null
+        };
+    }
+
+
+    public async Task<bool> EnsureConfiguredAsync()
+    {
+        return await _context.Value != null;
+    }
+
     public bool IsConfigured => _context.IsValueCreated && _context.Value.IsCompletedSuccessfully && _context.Value.Result != null;
 
     private async Task<bool> SetAsync(string path, object value, CancellationToken cancellationToken)
@@ -783,16 +806,23 @@ public sealed class FirebaseRealtimeService
 
             if (!string.IsNullOrWhiteSpace(json))
             {
-                credential = GoogleCredential
-                    .FromJson(json)
+                credential = CredentialFactory
+                    .FromJson(
+                        json,
+                        JsonCredentialParameters.ServiceAccountCredentialType)
                     .CreateScoped(DatabaseScope);
             }
             else
             {
                 var credentialsPath = Environment.GetEnvironmentVariable("GOOGLE_APPLICATION_CREDENTIALS");
                 credential = !string.IsNullOrWhiteSpace(credentialsPath)
-                    ? GoogleCredential.FromFile(credentialsPath).CreateScoped(DatabaseScope)
-                    : GoogleCredential.GetApplicationDefault().CreateScoped(DatabaseScope);
+                    ? CredentialFactory
+                        .FromFile(
+                            credentialsPath,
+                            JsonCredentialParameters.ServiceAccountCredentialType)
+                        .CreateScoped(DatabaseScope)
+                    : (await GoogleCredential.GetApplicationDefaultAsync())
+                        .CreateScoped(DatabaseScope);
             }
 
             var projectId = _configuration["Firebase:ProjectId"]

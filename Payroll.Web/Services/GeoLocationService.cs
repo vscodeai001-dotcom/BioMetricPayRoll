@@ -1,5 +1,5 @@
-using System.Collections.Concurrent;
 using Microsoft.EntityFrameworkCore;
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using Microsoft.AspNetCore.SignalR;
 using Payroll.Shared;
@@ -150,7 +150,6 @@ public class GeoLocationService
                 await _dbFactory.CreateDbContextAsync();
 
             var lockKey = GpsSessionAdvisoryLockNamespace + (uint)employeeId;
-            SemaphoreSlim? localLock = null;
             var lockHeld = false;
 
             try
@@ -158,7 +157,7 @@ public class GeoLocationService
                 // Serialize session start/end/update lifecycle operations for
                 // this employee. This prevents an old GPS request from racing
                 // a new login and leaving two active sessions behind.
-                localLock = await AcquireLocalAdvisoryLockAsync(lockKey);
+                await AcquireLocalLockAsync(lockKey);
                 lockHeld = true;
 
                 var existing = await db.EmployeeGpsSessions
@@ -262,7 +261,19 @@ public class GeoLocationService
             finally
             {
                 if (lockHeld)
-                    localLock?.Release();
+                {
+                    try
+                    {
+                        ReleaseLocalLock(lockKey);
+                    }
+                    catch (Exception unlockEx)
+                    {
+                        _logger.LogWarning(
+                            unlockEx,
+                            "Failed to release GPS session advisory lock after start. EmployeeId={EmployeeId}",
+                            employeeId);
+                    }
+                }
 
             }
         }
@@ -337,12 +348,11 @@ public class GeoLocationService
             // This closes the race where an old GPS request could repopulate
             // LiveLocationStore immediately after logout.
             var lockKey = GpsSessionAdvisoryLockNamespace + (uint)employeeId;
-            SemaphoreSlim? localLock = null;
             var lockHeld = false;
 
             try
             {
-                localLock = await AcquireLocalAdvisoryLockAsync(lockKey);
+                await AcquireLocalLockAsync(lockKey);
                 lockHeld = true;
 
                 session = await db.EmployeeGpsSessions
@@ -531,7 +541,19 @@ public class GeoLocationService
             finally
             {
                 if (lockHeld)
-                    localLock?.Release();
+                {
+                    try
+                    {
+                        ReleaseLocalLock(lockKey);
+                    }
+                    catch (Exception unlockEx)
+                    {
+                        _logger.LogWarning(
+                            unlockEx,
+                            "Failed to release GPS session advisory lock. EmployeeId={EmployeeId}",
+                            employeeId);
+                    }
+                }
 
             }
         }
@@ -613,7 +635,7 @@ public class GeoLocationService
             await using var transaction =
                 await db.Database.BeginTransactionAsync();
 
-            using var attendanceLock = await AcquireAttendanceAdvisoryLockAsync(
+            await AcquireAttendanceAdvisoryLockAsync(
                 db,
                 employeeId);
 
@@ -843,42 +865,25 @@ public class GeoLocationService
             device.Equals("Android", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static async Task<IDisposable> AcquireAttendanceAdvisoryLockAsync(
+    private static Task AcquireAttendanceAdvisoryLockAsync(
         AppDbContext db,
         int employeeId)
     {
-        var lockKey =
-            AttendanceAdvisoryLockNamespace +
-            (uint)employeeId;
-
-        var semaphore = await AcquireLocalAdvisoryLockAsync(lockKey);
-        return new LocalAdvisoryLockReleaser(semaphore);
+        // The local SQLite compatibility database serializes writes at the
+        // transaction boundary, so no PostgreSQL-specific advisory SQL is used.
+        return Task.CompletedTask;
     }
 
-    private sealed class LocalAdvisoryLockReleaser : IDisposable
+    private static async Task AcquireLocalLockAsync(long key)
     {
-        private SemaphoreSlim? _semaphore;
-
-        public LocalAdvisoryLockReleaser(SemaphoreSlim semaphore)
-        {
-            _semaphore = semaphore;
-        }
-
-        public void Dispose()
-        {
-            var semaphore = Interlocked.Exchange(ref _semaphore, null);
-            semaphore?.Release();
-        }
+        var gate = LocalAdvisoryLocks.GetOrAdd(key, static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync();
     }
 
-    private static async Task<SemaphoreSlim> AcquireLocalAdvisoryLockAsync(long key)
+    private static void ReleaseLocalLock(long key)
     {
-        var semaphore = LocalAdvisoryLocks.GetOrAdd(
-            key,
-            static _ => new SemaphoreSlim(1, 1));
-
-        await semaphore.WaitAsync();
-        return semaphore;
+        if (!LocalAdvisoryLocks.TryGetValue(key, out var gate)) return;
+        try { gate.Release(); } catch (SemaphoreFullException) { }
     }
 
     private static bool? ResolveStableGeofenceState(
@@ -958,12 +963,11 @@ public class GeoLocationService
                 await _dbFactory.CreateDbContextAsync();
 
             var lockKey = GpsSessionAdvisoryLockNamespace + (uint)employeeId;
-            SemaphoreSlim? localLock = null;
             var lockHeld = false;
 
             try
             {
-                localLock = await AcquireLocalAdvisoryLockAsync(lockKey);
+                await AcquireLocalLockAsync(lockKey);
                 lockHeld = true;
 
                 var session = await db.EmployeeGpsSessions
@@ -1026,7 +1030,19 @@ public class GeoLocationService
             finally
             {
                 if (lockHeld)
-                    localLock?.Release();
+                {
+                    try
+                    {
+                        ReleaseLocalLock(lockKey);
+                    }
+                    catch (Exception unlockEx)
+                    {
+                        _logger.LogWarning(
+                            unlockEx,
+                            "Failed to release GPS session advisory lock after logout. EmployeeId={EmployeeId}",
+                            employeeId);
+                    }
+                }
 
             }
         }
@@ -1064,12 +1080,11 @@ public class GeoLocationService
                 await _dbFactory.CreateDbContextAsync();
 
             var lockKey = GpsSessionAdvisoryLockNamespace + (uint)employeeId;
-            SemaphoreSlim? localLock = null;
             var lockHeld = false;
 
             try
             {
-                localLock = await AcquireLocalAdvisoryLockAsync(lockKey);
+                await AcquireLocalLockAsync(lockKey);
                 lockHeld = true;
 
                 var sessions = await db.EmployeeGpsSessions
@@ -1139,7 +1154,19 @@ public class GeoLocationService
             finally
             {
                 if (lockHeld)
-                    localLock?.Release();
+                {
+                    try
+                    {
+                        ReleaseLocalLock(lockKey);
+                    }
+                    catch (Exception unlockEx)
+                    {
+                        _logger.LogWarning(
+                            unlockEx,
+                            "Failed to release GPS session advisory lock after ending all sessions. EmployeeId={EmployeeId}",
+                            employeeId);
+                    }
+                }
 
             }
         }
@@ -1506,7 +1533,7 @@ public class GeoLocationService
         await using var attendanceTransaction =
             await db.Database.BeginTransactionAsync();
 
-        using var attendanceLock = await AcquireAttendanceAdvisoryLockAsync(
+        await AcquireAttendanceAdvisoryLockAsync(
             db,
             employeeId);
 
@@ -1621,7 +1648,7 @@ public class GeoLocationService
             features.EnableAutomaticGeofencePunching != true)
             return;
 
-        using var attendanceLock = await AcquireAttendanceAdvisoryLockAsync(
+        await AcquireAttendanceAdvisoryLockAsync(
             db,
             employeeId);
 

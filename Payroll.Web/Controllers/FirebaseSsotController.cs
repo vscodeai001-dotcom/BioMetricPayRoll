@@ -49,7 +49,11 @@ public sealed class FirebaseSsotController : ControllerBase
 
         var ownerUid = ResolveOwnerUid();
         var data = await _firebase.GetOwnerTableAsync(ownerUid, table, cancellationToken);
-        return Ok(data.HasValue ? data.Value : JsonDocument.Parse("{}").RootElement.Clone());
+        if (data.HasValue)
+            return Ok(data.Value);
+
+        using var emptyDocument = JsonDocument.Parse("{}");
+        return Ok(emptyDocument.RootElement.Clone());
     }
 
     [HttpGet("{table}/{recordId}")]
