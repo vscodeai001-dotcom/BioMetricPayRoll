@@ -34,6 +34,7 @@ public sealed class MobileEmployeeController : ControllerBase
     private readonly ILogger<MobileEmployeeController> _logger;
     private readonly RegularizationService _regularizationService;
     private readonly AttendanceEventMonitorService _attendanceMonitor;
+    private readonly FirebaseRealtimeService _firebase;
 
     public MobileEmployeeController(
         UserManager<IdentityUser> userManager,
@@ -44,7 +45,8 @@ public sealed class MobileEmployeeController : ControllerBase
         IHubContext<AttendanceRefreshHub> hub,
         ILogger<MobileEmployeeController> logger,
         RegularizationService regularizationService,
-        AttendanceEventMonitorService attendanceMonitor)
+        AttendanceEventMonitorService attendanceMonitor,
+        FirebaseRealtimeService firebase)
     {
         _userManager = userManager;
         _signInManager = signInManager;
@@ -55,6 +57,7 @@ public sealed class MobileEmployeeController : ControllerBase
         _logger = logger;
         _regularizationService = regularizationService;
         _attendanceMonitor = attendanceMonitor;
+        _firebase = firebase;
     }
 
     [HttpPost("login")]
@@ -209,11 +212,19 @@ public sealed class MobileEmployeeController : ControllerBase
             new { EmployeeId = employee?.EmployeeID ?? 0, Role = primaryRole });
 
         var token = _tokens.Create(user.Id, employee?.EmployeeID ?? 0, mobileDeviceId, primaryRole);
+        var firebaseOwnerUid = _firebase.ResolveOwnerUid(user.Id, primaryRole);
+        var firebaseToken = await _firebase.CreateCustomTokenAsync(
+            user.Id,
+            employee?.EmployeeID ?? 0,
+            primaryRole,
+            HttpContext.RequestAborted);
 
         return Ok(new MobileLoginResponse
         {
             Success = true,
             Token = token,
+            FirebaseToken = firebaseToken,
+            FirebaseOwnerUid = firebaseOwnerUid,
             EmployeeId = employee?.EmployeeID ?? 0,
             Name = employee?.Name ?? user.UserName ?? "Admin",
             Email = employee?.Email ?? user.Email ?? string.Empty,
@@ -757,6 +768,8 @@ public sealed class MobileEmployeeController : ControllerBase
     {
         public bool Success { get; set; }
         public string? Token { get; set; }
+        public string? FirebaseToken { get; set; }
+        public string? FirebaseOwnerUid { get; set; }
         public string? Message { get; set; }
         public int EmployeeId { get; set; }
         public string Name { get; set; } = string.Empty;

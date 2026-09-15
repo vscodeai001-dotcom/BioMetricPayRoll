@@ -13,7 +13,12 @@ IHost host = Host.CreateDefaultBuilder(args)
     .ConfigureServices((hostContext, services) =>
     {
         // 3. Read Connection String from the Worker's appsettings.json
-        var connectionString = hostContext.Configuration.GetConnectionString("DefaultConnection");
+        var connectionString = hostContext.Configuration.GetConnectionString("DefaultConnection")
+            ?? Environment.GetEnvironmentVariable("DATABASE_URL")
+            ?? Environment.GetEnvironmentVariable("NEON_CONNECTION_STRING");
+
+        if (string.IsNullOrWhiteSpace(connectionString))
+            throw new InvalidOperationException("DefaultConnection is not configured. Set DATABASE_URL or NEON_CONNECTION_STRING.");
 
         // 4. Register Database Context (Must match Web App's DB provider)
         // We use SetSwitch to handle Postgres timestamp behavior

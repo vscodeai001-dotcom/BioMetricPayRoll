@@ -2,7 +2,6 @@
 @implements IAsyncDisposable
 
 @inject IJSRuntime JSRuntime
-@inject NavigationManager Navigation
 
 @code {
     private DotNetObjectReference<ApplicationRealtimeRefreshListener>? _dotNetRef;
@@ -35,53 +34,13 @@
     }
 
     [JSInvokable("ApplicationDataChanged")]
-    public async Task ApplicationDataChanged(object? data = null)
+    public Task ApplicationDataChanged(object? data = null)
     {
-        if (_disposed)
-            return;
-
-        await InvokeAsync(() =>
-        {
-            if (_disposed)
-                return Task.CompletedTask;
-
-            // Coalesce bursts of CRUD writes so a bulk operation does not
-            // create a refresh storm. The database remains the source of truth.
-            if (_refreshScheduled)
-                return Task.CompletedTask;
-
-            var now = DateTime.UtcNow;
-            if ((now - _lastRefreshUtc) < TimeSpan.FromMilliseconds(300))
-                return Task.CompletedTask;
-
-            _refreshScheduled = true;
-
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await Task.Delay(200);
-                    await InvokeAsync(() =>
-                    {
-                        if (!_disposed)
-                        {
-                            _lastRefreshUtc = DateTime.UtcNow;
-                            Navigation.Refresh(false);
-                        }
-                    });
-                }
-                catch
-                {
-                    // A disconnected circuit must never break successful CRUD.
-                }
-                finally
-                {
-                    _refreshScheduled = false;
-                }
-            });
-
-            return Task.CompletedTask;
-        });
+        // Page-level AttendanceRefreshListener instances own their existing
+        // loaders. Do not call Navigation.Refresh here: that would reload the
+        // browser instead of delivering realtime data through the current
+        // component flow.
+        return Task.CompletedTask;
     }
 
     public async ValueTask DisposeAsync()

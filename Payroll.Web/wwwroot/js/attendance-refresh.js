@@ -12,7 +12,131 @@ window.attendanceRefresh = (function () {
     let listeners = [];
     let applicationListeners = [];
 
+    // Firebase is an independent realtime transport. SignalR remains the
+    // existing compatibility path, but Firebase keeps live GPS and CRUD
+    // invalidation flowing when the Payroll.Web process is temporarily absent.
+    let firebaseStarted = false;
+    let firebaseStarting = false;
+    let firebaseDatabase = null;
+    let firebaseStartTime = Date.now();
+
+    async function startFirebaseRealtime() {
+        if (firebaseStarted || firebaseStarting || !window.firebase)
+            return;
+
+        firebaseStarting = true;
+        firebaseStartTime = Date.now();
+
+        try {
+            const response = await fetch('/api/firebase/auth-token', {
+                method: 'GET',
+                credentials: 'same-origin',
+                cache: 'no-store'
+            });
+
+            if (!response.ok)
+                return;
+
+            const authResult = await response.json();
+            if (!authResult || !authResult.token)
+                return;
+
+            if (!firebase.apps.length) {
+                firebase.initializeApp({
+                    apiKey: 'AIzaSyDxIsBW8bq31gG7LqOm8-lwhmRFMsRu5CE',
+                    authDomain: 'biometricpayroll.firebaseapp.com',
+                    databaseURL: 'https://biometricpayroll-default-rtdb.asia-southeast1.firebasedatabase.app',
+                    projectId: 'biometricpayroll',
+                    storageBucket: 'biometricpayroll.firebasestorage.app',
+                    messagingSenderId: '63802944560'
+                });
+            }
+
+            await firebase.auth().signInWithCustomToken(authResult.token);
+            firebaseDatabase = firebase.database();
+            firebaseStarted = true;
+
+            const liveRef = firebaseDatabase.ref('tracking/live');
+            liveRef.on('child_added', onFirebaseLiveLocation);
+            liveRef.on('child_changed', onFirebaseLiveLocation);
+
+            const ownerUid = authResult.ownerUid || authResult.ownerUID || null;
+            if (ownerUid) {
+                const ownerEventsRef = firebaseDatabase.ref('owner_events/' + ownerUid);
+                ownerEventsRef.on('child_added', onFirebaseApplicationEvent);
+
+                // Mobile-originated changes use a per-employee channel so an
+                // employee cannot write to the shared admin event stream.
+                // Admin/SuperAdmin Firebase rules allow the web dashboard to
+                // receive these events without changing the existing UI.
+                const clientEventsRef = firebaseDatabase.ref('client_events');
+                clientEventsRef.on('child_added', onFirebaseClientEventEmployee);
+            } else {
+                // Backward compatibility for installations that have not yet
+                // configured a shared Firebase owner UID.
+                const eventsRef = firebaseDatabase.ref('application_events');
+                eventsRef.on('child_added', onFirebaseApplicationEvent);
+            }
+
+            console.log('Firebase realtime transport connected.');
+        } catch (error) {
+            console.warn('Firebase realtime transport unavailable; SignalR fallback remains active.', error);
+        } finally {
+            firebaseStarting = false;
+        }
+    }
+
+    async function onFirebaseLiveLocation(snapshot) {
+        try {
+            const data = snapshot.val();
+            if (!data || !data.EmployeeId) return;
+
+            await notifyListeners('LocationChanged', data);
+            // Use the same browser event consumed by the existing admin map
+            // realtime bridge. This keeps Firebase and SignalR presentation
+            // paths identical without changing the Blazor component/layout.
+            window.dispatchEvent(new CustomEvent('location-data-changed', { detail: data }));
+            window.dispatchEvent(new CustomEvent('firebase-location-changed', { detail: data }));
+        } catch (error) {
+            console.warn('Firebase live location callback failed.', error);
+        }
+    }
+
+    async function onFirebaseClientEventEmployee(employeeSnapshot) {
+        try {
+            employeeSnapshot.ref.on('child_added', onFirebaseApplicationEvent);
+        } catch (error) {
+            console.warn('Firebase client-event callback failed.', error);
+        }
+    }
+
+    async function onFirebaseApplicationEvent(snapshot) {
+        try {
+            const data = snapshot.val();
+            if (!data || !data.timestamp) return;
+
+            const eventTime = Date.parse(data.timestamp);
+            // Ignore the initial backlog when the page first attaches. Only
+            // changes that happened after this browser session started are
+            // realtime invalidations.
+            if (Number.isFinite(eventTime) && eventTime + 5000 < firebaseStartTime)
+                return;
+
+            await notifyApplicationListeners('ApplicationDataChanged', data);
+            // Page-level listeners already expose ApplicationDataChanged and
+            // own their existing data loaders. This updates the visible screen
+            // without Navigation.Refresh/browser reload.
+            await notifyListeners('ApplicationDataChanged', data);
+            window.dispatchEvent(new CustomEvent('application-data-changed', { detail: data }));
+        } catch (error) {
+            console.warn('Firebase application event callback failed.', error);
+        }
+    }
+
     async function start() {
+
+        // Firebase startup is intentionally independent from SignalR.
+        startFirebaseRealtime();
 
         if (started || starting)
             return;
@@ -130,6 +254,7 @@ window.attendanceRefresh = (function () {
                     // Database writes are already the source of truth; there is
                     // intentionally no artificial debounce here.
                     await notifyApplicationListeners("ApplicationDataChanged", data);
+                    await notifyListeners("ApplicationDataChanged", data);
 
                 }
             );
@@ -1040,7 +1165,13 @@ window.attendanceRefresh = (function () {
             registerApplication,
 
         unregisterApplication:
-            unregisterApplication
+            unregisterApplication,
+
+        registerLocationHealth:
+            registerLocationHealth,
+
+        unregisterLocationHealth:
+            unregisterLocationHealth
 
     };
 

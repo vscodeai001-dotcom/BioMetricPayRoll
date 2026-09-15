@@ -1,5 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.AspNetCore.Http;
+using System.Security.Claims;
 using Payroll.Shared.Data;
 using System.Runtime.CompilerServices;
 
@@ -29,6 +31,8 @@ public sealed class ApplicationDataChangeInterceptor : SaveChangesInterceptor
     }
 
     private readonly AttendanceRefreshService _refreshService;
+    private readonly FirebaseRealtimeService _firebase;
+    private readonly IHttpContextAccessor _httpContextAccessor;
 
     private readonly ConditionalWeakTable<DbContext, PendingChange> _pending = new();
 
@@ -46,9 +50,13 @@ public sealed class ApplicationDataChangeInterceptor : SaveChangesInterceptor
         };
 
     public ApplicationDataChangeInterceptor(
-        AttendanceRefreshService refreshService)
+        AttendanceRefreshService refreshService,
+        FirebaseRealtimeService firebase,
+        IHttpContextAccessor httpContextAccessor)
     {
         _refreshService = refreshService;
+        _firebase = firebase;
+        _httpContextAccessor = httpContextAccessor;
     }
 
     public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
@@ -138,6 +146,9 @@ public sealed class ApplicationDataChangeInterceptor : SaveChangesInterceptor
         var pending = _pending.GetOrCreateValue(db);
         pending.Notify = true;
         pending.Changes = changedEntities;
+        pending.Entries = db.ChangeTracker.Entries()
+            .Where(e => e.State is EntityState.Added or EntityState.Modified or EntityState.Deleted)
+            .ToArray();
 
         // Company settings are normal CRUD, but the geofence radius/office
         // location also has a dedicated lightweight realtime channel. Capture
@@ -180,6 +191,34 @@ public sealed class ApplicationDataChangeInterceptor : SaveChangesInterceptor
         {
             await _refreshService.NotifyApplicationDataChangedAsync(
                 pending.Changes);
+
+            // Firebase is a second realtime transport. Neon remains the
+            // authoritative database and SignalR remains as a compatibility
+            // path. A Firebase write failure must never roll back a successful
+            // Neon transaction.
+            var actorUid = _httpContextAccessor.HttpContext?.User
+                ?.FindFirstValue(ClaimTypes.NameIdentifier);
+            var role = _httpContextAccessor.HttpContext?.User
+                ?.FindFirstValue(ClaimTypes.Role);
+            var ownerUid = !string.IsNullOrWhiteSpace(actorUid)
+                ? _firebase.ResolveOwnerUid(actorUid, role)
+                : null;
+
+            _ = _firebase.PublishApplicationDataChangedAsync(
+                pending.Changes.Cast<object>().ToArray(),
+                ownerUid);
+
+            // Publish the actual committed Neon row snapshots as a Firebase
+            // read model. This is best-effort and never participates in the
+            // Neon transaction. Existing SignalR/UI behaviour is untouched.
+            if (!string.IsNullOrWhiteSpace(ownerUid))
+            {
+                _ = _firebase.PublishNeonChangesAsync(
+                    db,
+                    pending.Entries,
+                    ownerUid,
+                    CancellationToken.None);
+            }
 
             if (pending.OfficeLatitude.HasValue &&
                 pending.OfficeLongitude.HasValue &&

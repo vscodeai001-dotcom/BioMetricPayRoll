@@ -166,6 +166,10 @@ builder.Services.AddAuthentication()
     .AddScheme<AuthenticationSchemeOptions, MobileTokenAuthenticationHandler>(
         "MobileBearer", _ => { });
 
+builder.Services.AddHttpClient("FirebaseRealtime");
+builder.Services.AddSingleton<FirebaseRealtimeService>();
+builder.Services.AddHostedService<FirebaseNeonBootstrapService>();
+
 builder.Services.AddSingleton<
     AttendanceRefreshService>();
 
@@ -202,11 +206,20 @@ var connectionString =
     builder.Configuration.GetConnectionString(
         "DefaultConnection");
 
+// Production credentials must come from the platform environment, never
+// from source-controlled appsettings.json. Keep the existing connection
+// design unchanged while allowing Render/local deployment to provide the
+// complete Neon connection string securely.
+if (string.IsNullOrWhiteSpace(connectionString))
+{
+    connectionString = Environment.GetEnvironmentVariable("DATABASE_URL")
+        ?? Environment.GetEnvironmentVariable("NEON_CONNECTION_STRING");
+}
 
 if (string.IsNullOrWhiteSpace(connectionString))
 {
     throw new InvalidOperationException(
-        "DefaultConnection is not configured.");
+        "DefaultConnection is not configured. Set DATABASE_URL or NEON_CONNECTION_STRING.");
 }
 
 
