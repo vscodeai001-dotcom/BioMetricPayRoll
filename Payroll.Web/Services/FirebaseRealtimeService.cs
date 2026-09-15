@@ -19,6 +19,8 @@ namespace Payroll.Web.Services;
 public sealed class FirebaseRealtimeService
 {
     private const string DatabaseScope = "https://www.googleapis.com/auth/firebase.database";
+    private const string CloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform";
+    private const string UserInfoEmailScope = "https://www.googleapis.com/auth/userinfo.email";
     private readonly IConfiguration _configuration;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<FirebaseRealtimeService> _logger;
@@ -810,7 +812,7 @@ public sealed class FirebaseRealtimeService
                     .FromJson(
                         json,
                         JsonCredentialParameters.ServiceAccountCredentialType)
-                    .CreateScoped(DatabaseScope);
+                    .CreateScoped(CloudPlatformScope, DatabaseScope, UserInfoEmailScope);
             }
             else
             {
@@ -820,9 +822,9 @@ public sealed class FirebaseRealtimeService
                         .FromFile(
                             credentialsPath,
                             JsonCredentialParameters.ServiceAccountCredentialType)
-                        .CreateScoped(DatabaseScope)
+                        .CreateScoped(CloudPlatformScope, DatabaseScope, UserInfoEmailScope)
                     : (await GoogleCredential.GetApplicationDefaultAsync())
-                        .CreateScoped(DatabaseScope);
+                        .CreateScoped(CloudPlatformScope, DatabaseScope, UserInfoEmailScope);
             }
 
             var projectId = _configuration["Firebase:ProjectId"]
@@ -862,7 +864,7 @@ public sealed class FirebaseRealtimeService
         {
             _logger.LogWarning(
                 ex,
-                "Firebase Admin bridge is not configured. Existing Neon/SignalR paths remain active. Configure FIREBASE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS to enable Firebase realtime transport.");
+                "Firebase Admin bridge is not configured. Configure FIREBASE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS with a Firebase service-account credential that has Firebase Authentication and Realtime Database access.");
             return null;
         }
     }

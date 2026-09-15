@@ -172,13 +172,24 @@ public sealed class FirebaseSqliteSyncService : BackgroundService
                     json,
                     keys[i].Name);
 
-            if (value is null && keyParts.Length > i)
-                value = keyParts[i];
-
-            keyValues[i] =
-                ConvertValue(
-                    value,
-                    keys[i].ClrType);
+            if (value is not null)
+            {
+                keyValues[i] =
+                    ConvertValue(
+                        value,
+                        keys[i].ClrType);
+            }
+            else if (keyParts.Length > i)
+            {
+                keyValues[i] =
+                    ConvertStringValue(
+                        keyParts[i],
+                        keys[i].ClrType);
+            }
+            else
+            {
+                keyValues[i] = null;
+            }
         }
 
         if (keyValues.Any(x => x is null))
@@ -276,6 +287,37 @@ public sealed class FirebaseSqliteSyncService : BackgroundService
         new(value.Where(char.IsLetterOrDigit)
             .Select(char.ToLowerInvariant)
             .ToArray());
+
+    private static object? ConvertStringValue(
+        string value,
+        Type targetType)
+    {
+        var type = Nullable.GetUnderlyingType(targetType) ?? targetType;
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+
+        try
+        {
+            if (type == typeof(string)) return value;
+            if (type == typeof(int)) return int.Parse(value, CultureInfo.InvariantCulture);
+            if (type == typeof(long)) return long.Parse(value, CultureInfo.InvariantCulture);
+            if (type == typeof(decimal)) return decimal.Parse(value, CultureInfo.InvariantCulture);
+            if (type == typeof(double)) return double.Parse(value, CultureInfo.InvariantCulture);
+            if (type == typeof(float)) return float.Parse(value, CultureInfo.InvariantCulture);
+            if (type == typeof(bool)) return bool.Parse(value);
+            if (type == typeof(Guid)) return Guid.Parse(value);
+            if (type == typeof(DateTime)) return DateTime.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+            if (type == typeof(DateTimeOffset)) return DateTimeOffset.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+            if (type == typeof(DateOnly)) return DateOnly.Parse(value, CultureInfo.InvariantCulture);
+            if (type == typeof(TimeOnly)) return TimeOnly.Parse(value, CultureInfo.InvariantCulture);
+            if (type.IsEnum) return Enum.Parse(type, value, true);
+            return value;
+        }
+        catch
+        {
+            return null;
+        }
+    }
 
     private static object? ConvertValue(
         JsonElement? value,

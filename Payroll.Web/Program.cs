@@ -1068,7 +1068,7 @@ recurringJobManager.AddOrUpdate<
 app.MapRazorPages();
 
 app.MapRazorComponents<App>()
-    .AddInteractiveServerhosting platformMode();
+    .AddInteractiveServerRenderMode();
 
 
 // ============================================================
