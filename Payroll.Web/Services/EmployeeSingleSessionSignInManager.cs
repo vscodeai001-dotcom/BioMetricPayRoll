@@ -3,7 +3,6 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
-using Npgsql;
 using Payroll.Shared.Data;
 using System.Data;
 using System.Security.Claims;
@@ -576,86 +575,31 @@ namespace Payroll.Web.Services
             await using var db =
                 await _dbFactory.CreateDbContextAsync();
 
+            var existing =
+                await db.EmployeeDeviceLocks
+                    .FirstOrDefaultAsync(x => x.UserId == userId);
 
-            var connection =
-                db.Database.GetDbConnection();
+            if (existing != null)
+                return false;
 
-
-            if (connection is not NpgsqlConnection postgres)
+            db.EmployeeDeviceLocks.Add(new EmployeeDeviceLock
             {
-                throw new InvalidOperationException(
-                    "Employee device locking requires PostgreSQL.");
-            }
+                Id = Guid.NewGuid(),
+                UserId = userId,
+                DeviceId = deviceId,
+                CreatedAtUtc = DateTime.UtcNow,
+                LastSeenAtUtc = DateTime.UtcNow
+            });
 
-
-            if (postgres.State != ConnectionState.Open)
+            try
             {
-                await postgres.OpenAsync();
+                await db.SaveChangesAsync();
+                return true;
             }
-
-
-            const string sql =
-                """
-                INSERT INTO public."employee_device_locks"
-                (
-                    "Id",
-                    "UserId",
-                    "DeviceId",
-                    "CreatedAtUtc",
-                    "LastSeenAtUtc"
-                )
-                VALUES
-                (
-                    @id,
-                    @userId,
-                    @deviceId,
-                    @createdAtUtc,
-                    @lastSeenAtUtc
-                )
-                ON CONFLICT ("UserId")
-                DO NOTHING
-                RETURNING "Id";
-                """;
-
-
-            await using var command =
-                new NpgsqlCommand(
-                    sql,
-                    postgres);
-
-
-            var now =
-                DateTime.UtcNow;
-
-
-            command.Parameters.AddWithValue(
-                "id",
-                Guid.NewGuid());
-
-            command.Parameters.AddWithValue(
-                "userId",
-                userId);
-
-            command.Parameters.AddWithValue(
-                "deviceId",
-                deviceId);
-
-            command.Parameters.AddWithValue(
-                "createdAtUtc",
-                now);
-
-            command.Parameters.AddWithValue(
-                "lastSeenAtUtc",
-                now);
-
-
-            var result =
-                await command.ExecuteScalarAsync();
-
-
-            return
-                result != null &&
-                result != DBNull.Value;
+            catch (DbUpdateException)
+            {
+                return false;
+            }
         }
 
 

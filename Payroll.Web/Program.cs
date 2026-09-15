@@ -5,7 +5,6 @@ using System.Globalization;
 
 using Hangfire;
 using Hangfire.Dashboard;
-using Hangfire.PostgreSql;
 
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
@@ -104,7 +103,7 @@ var builder =
 //
 // IMPORTANT:
 //
-// Render/Linux servers commonly run in UTC.
+// Linux/container servers commonly run in UTC.
 //
 // Therefore payroll calculations must NOT depend on:
 //     DateTime.Now
@@ -152,7 +151,7 @@ builder.Host.UseWindowsService();
 
 builder.Services.AddSignalR(options =>
 {
-    // Keep the Render/Browser SignalR connection alive through
+    // Keep the browser SignalR connection alive through
     // idle periods and allow enough time for transient network gaps.
     options.KeepAliveInterval = TimeSpan.FromSeconds(15);
     options.ClientTimeoutInterval = TimeSpan.FromSeconds(60);
@@ -168,7 +167,8 @@ builder.Services.AddAuthentication()
 
 builder.Services.AddHttpClient("FirebaseRealtime");
 builder.Services.AddSingleton<FirebaseRealtimeService>();
-builder.Services.AddHostedService<FirebaseNeonBootstrapService>();
+builder.Services.AddHostedService<FirebaseSqliteSyncService>();
+builder.Services.AddHostedService<FirebaseSuperAdminProvisioningService>();
 
 builder.Services.AddSingleton<
     AttendanceRefreshService>();
@@ -184,60 +184,40 @@ builder.Services.AddHostedService<LocationHealthService>();
 
 
 // ============================================================
-// POSTGRESQL DATETIME COMPATIBILITY
-// ============================================================
-//
-// Existing payroll database DateTime behaviour is preserved.
-//
-// IMPORTANT:
-// We are NOT changing existing PunchTime database values.
-//
+ // DATABASE COMPATIBILITY CACHE
+ // ============================================================
+ //
+ // Firebase Realtime Database is the shared durable SSOT.
+ // SQLite is only a local EF/Identity compatibility projection. It keeps
+ // the existing AppDbContext/UI/business-service contracts intact while
+ // removing the external PostgreSQL runtime dependency.
+ //
+ var sqlitePath =
+     Environment.GetEnvironmentVariable("BIOMETRIC_SQLITE_PATH");
 
-AppContext.SetSwitch(
-    "Npgsql.EnableLegacyTimestampBehavior",
-    true);
+ if (string.IsNullOrWhiteSpace(sqlitePath))
+ {
+     sqlitePath = Path.Combine(
+         builder.Environment.ContentRootPath,
+         "data",
+         "biometricpayroll-cache.db");
+ }
 
+ var sqliteDirectory = Path.GetDirectoryName(sqlitePath);
+ if (!string.IsNullOrWhiteSpace(sqliteDirectory))
+     Directory.CreateDirectory(sqliteDirectory);
 
-// ============================================================
-// DATABASE
-// ============================================================
+ builder.Services.AddDbContextFactory<AppDbContext>(
+     (sp, options) =>
+     {
+         options.AddInterceptors(
+             sp.GetRequiredService<ApplicationDataChangeInterceptor>());
 
-var connectionString =
-    builder.Configuration.GetConnectionString(
-        "DefaultConnection");
-
-// Production credentials must come from the platform environment, never
-// from source-controlled appsettings.json. Keep the existing connection
-// design unchanged while allowing Render/local deployment to provide the
-// complete Neon connection string securely.
-if (string.IsNullOrWhiteSpace(connectionString))
-{
-    connectionString = Environment.GetEnvironmentVariable("DATABASE_URL")
-        ?? Environment.GetEnvironmentVariable("NEON_CONNECTION_STRING");
-}
-
-if (string.IsNullOrWhiteSpace(connectionString))
-{
-    throw new InvalidOperationException(
-        "DefaultConnection is not configured. Set DATABASE_URL or NEON_CONNECTION_STRING.");
-}
+         options.UseSqlite($"Data Source={sqlitePath}");
+     });
 
 
-builder.Services.AddDbContextFactory<AppDbContext>(
-    (sp, options) =>
-    {
-        options.AddInterceptors(
-            sp.GetRequiredService<ApplicationDataChangeInterceptor>());
-
-        options.UseNpgsql(
-            connectionString,
-            npgsqlOptions =>
-                npgsqlOptions.MigrationsAssembly(
-                    typeof(AppDbContext).Assembly.GetName().Name));
-    });
-
-
-// ============================================================
+ // ============================================================
 // ATTENDANCE ENGINE REGISTRATIONS
 // ============================================================
 
@@ -367,20 +347,20 @@ builder.Services.AddHttpContextAccessor();
 // REVERSE PROXY / HTTPS FORWARDED HEADERS
 // ============================================================
 //
-// Render terminates TLS at its proxy and forwards the request to
+// The hosting proxy may terminate TLS before forwarding the request to
 // the ASP.NET Core container. Without processing X-Forwarded-Proto,
 // ASP.NET Core can see the incoming request as HTTP even though the
 // browser is using HTTPS. Identity then generates redirects such as:
-//   http://biometric-payroll.onrender.com/Identity/Account/Login
+//   http://host/Identity/Account/Login
 //
 // That HTTP redirect is blocked when /my-attendance is running inside
-// the HTTPS Blazor document/frame. Trust the Render proxy headers so
+// the HTTPS Blazor document/frame. Trust the hosting proxy headers so
 // Request.Scheme remains HTTPS for authentication redirects, cookies,
 // antiforgery, and generated absolute URLs.
 //
-// Render's proxy IPs are dynamic, so the forwarded-header middleware
+// the hosting proxy IPs are dynamic, so the forwarded-header middleware
 // must not be restricted to a fixed proxy IP/network. The application
-// is intended to be reached through Render's ingress.
+// is intended to be reached through a reverse-proxy ingress.
 // ============================================================
 
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
@@ -568,7 +548,7 @@ builder.Services.AddScoped<
 // 1. Key storage: Persistent file system (e.g., /data volume)
 // 2. Key encryption: Environment variable (optional)
 //
-// For Docker/Render:
+// For container deployments:
 // - Mount a persistent volume at /data/dataprotection
 // - Container automatically uses this for keys
 // - Keys survive container restarts
@@ -583,7 +563,7 @@ var dataProtectionPath =
 
 if (string.IsNullOrWhiteSpace(dataProtectionPath))
 {
-    // Render/container deployments commonly mount their persistent disk at
+    // Container deployments commonly mount their persistent disk at
     // /data. Prefer it when available so authentication/DataProtection keys
     // survive an application process/container restart. Local development
     // continues to use the project-local directory.
@@ -689,10 +669,10 @@ builder.Services.AddBlazoredToast();
 // HEALTH CHECKS
 // ============================================================
 //
-// Health checks help Render platform detect if the application
+// Health checks help the hosting platform detect if the application
 // is still responding and healthy.
 //
-// If the health check fails, Render can restart the container.
+// If the health check fails, the hosting platform can restart the container.
 //
 // Endpoint: /health
 //
@@ -708,30 +688,13 @@ builder.Services.AddHealthChecks()
 // ============================================================
 
 builder.Services.AddHangfire(
-    (serviceProvider, config) =>
+    config =>
     {
         config
-            .SetDataCompatibilityLevel(
-                CompatibilityLevel.Version_170)
-
+            .SetDataCompatibilityLevel(CompatibilityLevel.Version_170)
             .UseSimpleAssemblyNameTypeSerializer()
-
             .UseRecommendedSerializerSettings()
-
-            .UsePostgreSqlStorage(
-                options =>
-                {
-                    options.UseNpgsqlConnection(
-                        connectionString);
-                },
-                new PostgreSqlStorageOptions
-                {
-                    QueuePollInterval =
-                        TimeSpan.FromSeconds(15),
-
-                    SchemaName =
-                        "hangfire"
-                });
+            .UseMemoryStorage();
     });
 
 
@@ -755,6 +718,24 @@ builder.Services.AddHangfireServer(
 
 var app =
     builder.Build();
+
+try
+{
+    await using var localScope = app.Services.CreateAsyncScope();
+    var localDbFactory =
+        localScope.ServiceProvider
+            .GetRequiredService<IDbContextFactory<AppDbContext>>();
+    await using var localDb =
+        await localDbFactory.CreateDbContextAsync();
+    await localDb.Database.EnsureCreatedAsync();
+}
+catch (Exception ex)
+{
+    app.Logger.LogError(
+        ex,
+        "Unable to initialize the local Firebase compatibility database.");
+    throw;
+}
 
 
 static async Task ValidateDatabaseSchemaAsync(
@@ -883,132 +864,15 @@ app.MapHub<AttendanceRefreshHub>(
 
 
 // ============================================================
-// DATABASE MIGRATION
-// ============================================================
-//
-// Firebase is the realtime SSOT migration path. Automatic EF/Neon
-// migrations are disabled by default so application startup never
-// consumes Neon transfer just to check/apply the schema.
-//
-// IMPORTANT:
-// Existing EF/Identity business services are intentionally retained
-// until their individual modules are migrated to Firebase. This keeps
-// the current Web application flow, layout, business rules and
-// calculations intact.
-//
-// To temporarily run the legacy EF migration on a controlled/local
-// database, set:
-//     Database:AutoMigrate=true
-//
-// Production/Firebase-first deployments should leave this false.
-//
-
-var autoMigrate =
-    builder.Configuration.GetValue<bool>(
-        "Database:AutoMigrate");
-
-if (autoMigrate)
-{
-    try
-    {
-        using var scope =
-            app.Services.CreateScope();
-
-        var db =
-            scope.ServiceProvider
-                .GetRequiredService<
-                    AppDbContext>();
-
-        await db.Database.MigrateAsync();
-
-        // Defensive schema repair for deployments where a feature-toggle
-        // migration was recorded but the physical column is missing.
-        await db.Database.ExecuteSqlRawAsync(@"
-            ALTER TABLE public.feature_settings
-            ADD COLUMN IF NOT EXISTS enable_dual_attendance boolean NOT NULL DEFAULT false;
-
-            ALTER TABLE public.feature_settings
-            ADD COLUMN IF NOT EXISTS enable_automatic_geofence_punching boolean NOT NULL DEFAULT false;
-        ");
-
-        await ValidateDatabaseSchemaAsync(
-            db,
-            app.Services
-                .GetRequiredService<
-                    ILogger<Program>>());
-    }
-    catch (Exception ex)
-    {
-        var logger =
-            app.Services
-                .GetRequiredService<
-                    ILogger<Program>>();
-
-        logger.LogError(
-            ex,
-            "Error during optional legacy EF database migration or startup schema validation.");
-
-        throw;
-    }
-}
-else
-{
-    app.Logger.LogInformation(
-        "Automatic EF/Neon database migration is disabled. Firebase-first realtime services remain enabled.");
-}
-
-
-// ============================================================
-// INITIAL SEEDING
-// ============================================================
-
-try
-{
-    using var scope =
-        app.Services.CreateScope();
-
-
-    await SeedRolesAsync(
-        scope.ServiceProvider);
-
-
-    await SeedCompanySettingsAsync(
-        scope.ServiceProvider);
-
-
-    await SeedAdminUserAsync(
-        scope.ServiceProvider);
-
-
-    await EnsureEmployeeRoleForAllUsers(
-        scope.ServiceProvider);
-}
-catch (Exception ex)
-{
-    var logger =
-        app.Services
-            .GetRequiredService<
-                ILogger<Program>>();
-
-
-    logger.LogError(
-        ex,
-        "Error during initial seeding.");
-}
-
-
-// ============================================================
-// ERROR HANDLING
-// ============================================================
-
-if (!app.Environment.IsDevelopment())
-{
-    app.UseExceptionHandler(
-        "/Error",
-        createScopeForErrors: true);
-
-    app.UseHsts();
-}
+ // DATABASE MIGRATION
+ // ============================================================
+ //
+ // Legacy relational EF migrations are no longer executed by the Web app.
+ // The unchanged logical EF model is created in the local compatibility
+ // projection and synchronized from Firebase.
+ //
+ app.Logger.LogInformation(
+     "Firebase is the Web application SSOT. Legacy relational migrations are disabled.");
 
 
 // ============================================================
@@ -1019,18 +883,18 @@ if (!app.Environment.IsDevelopment())
 // REVERSE PROXY HEADERS MUST RUN FIRST
 // ============================================================
 //
-// Render terminates HTTPS before forwarding traffic to Kestrel.
+// A reverse proxy may terminate HTTPS before forwarding traffic to Kestrel.
 // Process X-Forwarded-Proto before authentication so Identity sees
-// the original browser scheme (HTTPS), not Render's internal HTTP hop.
+// the original browser scheme (HTTPS), not the proxy's internal HTTP hop.
 // This prevents HTTPS pages from receiving HTTP Identity login URLs.
 // ============================================================
 
 app.UseForwardedHeaders();
 
-// Do not enable UseHttpsRedirection here. Render already performs the
+// Do not enable UseHttpsRedirection here when the hosting proxy already performs the
 // public HTTPS termination/redirect, while the local Windows Service
 // deployment intentionally runs on HTTP. Forwarded headers are enough
-// to make generated authentication URLs use HTTPS on Render.
+// to make generated authentication URLs use HTTPS at the public endpoint.
 
 app.UseStaticFiles();
 
@@ -1054,7 +918,7 @@ app.UseAntiforgery();
 // HEALTH CHECK ENDPOINT
 // ============================================================
 //
-// Render platform (and other orchestration systems) use this
+// Hosting platforms (and other orchestration systems) use this
 // endpoint to determine if the application is healthy.
 //
 // If health check fails repeatedly, the container is restarted.
@@ -1092,11 +956,6 @@ app.MapHealthChecks(
 // HANGFIRE DASHBOARD
 // ============================================================
 
-var hangfireStorage =
-    app.Services.GetRequiredService<
-        JobStorage>();
-
-
 var recurringJobManager =
     app.Services
         .GetRequiredService<
@@ -1111,8 +970,7 @@ app.UseHangfireDashboard(
         [
             new HangfireAuth()
         ]
-    },
-    hangfireStorage);
+    });
 
 
 // ============================================================
@@ -1125,7 +983,7 @@ app.UseHangfireDashboard(
 //
 //     TimeZoneInfo.Local
 //
-// because Render/Linux may be UTC.
+// because container/server environments may be UTC.
 //
 // ============================================================
 
@@ -1269,7 +1127,7 @@ app.MapRazorComponents<App>()
 // GRACEFUL SHUTDOWN HANDLING
 // ============================================================
 //
-// When Render (or any container platform) stops the container,
+// When a hosting platform (or any container platform) stops the container,
 // we need to gracefully shutdown to avoid data loss.
 //
 // - SignalR connections are closed gracefully

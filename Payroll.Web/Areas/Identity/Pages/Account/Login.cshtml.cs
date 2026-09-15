@@ -8,7 +8,6 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.RazorPages;
 using Microsoft.EntityFrameworkCore;
 
-using Npgsql;
 
 using Payroll.Shared.Data;
 using Payroll.Web.Services;
@@ -721,93 +720,31 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
             await using var db =
                 await _dbFactory.CreateDbContextAsync();
 
+            var existing =
+                await db.EmployeeDeviceLocks
+                    .FirstOrDefaultAsync(x => x.UserId == userId);
 
-            var connection =
-                db.Database.GetDbConnection();
+            if (existing != null)
+                return EmployeeLockResult.AlreadyActive;
 
-
-            if (connection is not NpgsqlConnection postgres)
+            db.EmployeeDeviceLocks.Add(new EmployeeDeviceLock
             {
-                throw new InvalidOperationException(
-                    "Employee device locking requires PostgreSQL.");
-            }
+                Id = Guid.NewGuid(),
+                UserId = userId,
+                DeviceId = deviceId,
+                CreatedAtUtc = DateTime.UtcNow,
+                LastSeenAtUtc = DateTime.UtcNow
+            });
 
-
-            if (postgres.State !=
-                ConnectionState.Open)
+            try
             {
-                await postgres.OpenAsync();
+                await db.SaveChangesAsync();
+                return EmployeeLockResult.Acquired;
             }
-
-
-            const string sql =
-                """
-                INSERT INTO public."employee_device_locks"
-                (
-                    "Id",
-                    "UserId",
-                    "DeviceId",
-                    "CreatedAtUtc",
-                    "LastSeenAtUtc"
-                )
-                VALUES
-                (
-                    @id,
-                    @userId,
-                    @deviceId,
-                    @createdAtUtc,
-                    @lastSeenAtUtc
-                )
-                ON CONFLICT ("UserId")
-                DO NOTHING
-                RETURNING "Id";
-                """;
-
-
-            await using var command =
-                new NpgsqlCommand(
-                    sql,
-                    postgres);
-
-
-            var now =
-                DateTime.UtcNow;
-
-
-            command.Parameters.AddWithValue(
-                "id",
-                Guid.NewGuid());
-
-            command.Parameters.AddWithValue(
-                "userId",
-                userId);
-
-            command.Parameters.AddWithValue(
-                "deviceId",
-                deviceId);
-
-            command.Parameters.AddWithValue(
-                "createdAtUtc",
-                now);
-
-            command.Parameters.AddWithValue(
-                "lastSeenAtUtc",
-                now);
-
-
-            var result =
-                await command.ExecuteScalarAsync();
-
-
-            if (
-                result == null ||
-                result == DBNull.Value)
+            catch (DbUpdateException)
             {
                 return EmployeeLockResult.AlreadyActive;
             }
-
-
-            return EmployeeLockResult.Acquired;
         }
 
 
@@ -831,161 +768,44 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
             await using var db =
                 await _dbFactory.CreateDbContextAsync();
 
-
-            var connection =
-                db.Database.GetDbConnection();
-
-
-            if (connection is not NpgsqlConnection postgres)
-            {
-                throw new InvalidOperationException(
-                    "Employee device locking requires PostgreSQL.");
-            }
-
-
-            if (postgres.State !=
-                ConnectionState.Open)
-            {
-                await postgres.OpenAsync();
-            }
-
-
             await using var transaction =
-                await postgres.BeginTransactionAsync(
-                    IsolationLevel.Serializable);
-
+                await db.Database.BeginTransactionAsync();
 
             try
             {
-                // ----------------------------------------------------
-                // Remove current active session.
-                // ----------------------------------------------------
+                var existing =
+                    await db.EmployeeDeviceLocks
+                        .FirstOrDefaultAsync(x => x.UserId == userId);
 
-                const string deleteSql =
-                    """
-                    DELETE FROM public."employee_device_locks"
-                    WHERE "UserId" = @userId;
-                    """;
-
-
-                await using (
-                    var deleteCommand =
-                        new NpgsqlCommand(
-                            deleteSql,
-                            postgres,
-                            transaction))
+                if (existing != null)
                 {
-                    deleteCommand.Parameters.AddWithValue(
-                        "userId",
-                        userId);
-
-                    await deleteCommand.ExecuteNonQueryAsync();
+                    existing.DeviceId = newDeviceId;
+                    existing.LastSeenAtUtc = DateTime.UtcNow;
                 }
-
-
-                // ----------------------------------------------------
-                // Create new active session.
-                // ----------------------------------------------------
-
-                const string insertSql =
-                    """
-                    INSERT INTO public."employee_device_locks"
-                    (
-                        "Id",
-                        "UserId",
-                        "DeviceId",
-                        "CreatedAtUtc",
-                        "LastSeenAtUtc"
-                    )
-                    VALUES
-                    (
-                        @id,
-                        @userId,
-                        @deviceId,
-                        @createdAtUtc,
-                        @lastSeenAtUtc
-                    )
-                    ON CONFLICT ("UserId")
-                    DO NOTHING
-                    RETURNING "Id";
-                    """;
-
-
-                await using (
-                    var insertCommand =
-                        new NpgsqlCommand(
-                            insertSql,
-                            postgres,
-                            transaction))
+                else
                 {
-                    var now =
-                        DateTime.UtcNow;
-
-
-                    insertCommand.Parameters.AddWithValue(
-                        "id",
-                        Guid.NewGuid());
-
-                    insertCommand.Parameters.AddWithValue(
-                        "userId",
-                        userId);
-
-                    insertCommand.Parameters.AddWithValue(
-                        "deviceId",
-                        newDeviceId);
-
-                    insertCommand.Parameters.AddWithValue(
-                        "createdAtUtc",
-                        now);
-
-                    insertCommand.Parameters.AddWithValue(
-                        "lastSeenAtUtc",
-                        now);
-
-
-                    var result =
-                        await insertCommand.ExecuteScalarAsync();
-
-
-                    if (
-                        result == null ||
-                        result == DBNull.Value)
+                    db.EmployeeDeviceLocks.Add(new EmployeeDeviceLock
                     {
-                        await transaction.RollbackAsync();
-
-                        return false;
-                    }
+                        Id = Guid.NewGuid(),
+                        UserId = userId,
+                        DeviceId = newDeviceId,
+                        CreatedAtUtc = DateTime.UtcNow,
+                        LastSeenAtUtc = DateTime.UtcNow
+                    });
                 }
 
-
+                await db.SaveChangesAsync();
                 await transaction.CommitAsync();
-
-
-                _logger.LogWarning(
-                    "EMPLOYEE ACTIVE SESSION REPLACED. UserId={UserId}, NewDeviceId={DeviceId}",
-                    userId,
-                    newDeviceId);
-
-
                 return true;
             }
             catch (Exception ex)
             {
-                try
-                {
-                    await transaction.RollbackAsync();
-                }
-                catch
-                {
-                    // Ignore rollback failure.
-                }
-
+                try { await transaction.RollbackAsync(); } catch { }
 
                 _logger.LogError(
                     ex,
                     "EMPLOYEE FORCE SESSION REPLACEMENT FAILED. UserId={UserId}",
                     userId);
-
 
                 return false;
             }

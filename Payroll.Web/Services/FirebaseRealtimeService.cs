@@ -6,7 +6,6 @@ using FirebaseAdmin.Auth;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.EntityFrameworkCore.Metadata;
-using Npgsql;
 using System.Collections;
 using Google.Apis.Auth.OAuth2;
 
@@ -86,7 +85,7 @@ public sealed class FirebaseRealtimeService
     // ---------------------------------------------------------------------
     // These methods are deliberately table-whitelisted. They provide the Web
     // layer with a Firebase-native CRUD path without exposing arbitrary
-    // database paths to callers. The existing Neon-backed business services
+    // database paths to callers. The existing local EF business services
     // can be migrated module-by-module without changing UI/layout/business
     // rules.
 
@@ -291,7 +290,7 @@ public sealed class FirebaseRealtimeService
     /// Only scalar properties are exported, so EF navigation graphs/cycles and
     /// calculated client state are never copied into Firebase.
     /// </summary>
-    public async Task<bool> PublishNeonChangesAsync(
+    public async Task<bool> PublishCommittedChangesAsync(
         DbContext db,
         IReadOnlyCollection<EntityEntry> entries,
         string ownerUid,
@@ -335,99 +334,9 @@ public sealed class FirebaseRealtimeService
         return await UpdateAsync(updates, cancellationToken);
     }
 
-    /// <summary>
-    /// One-time/bootstrap synchronization from Neon to Firebase. Disabled by
-    /// default. Enable with FIREBASE_NEON_BOOTSTRAP=true after configuring the
-    /// Firebase service account. This is intentionally allowlisted and paged so
-    /// a large payroll database cannot accidentally become an unbounded export.
-    /// </summary>
-    public async Task<int> BootstrapNeonReadModelAsync(
-        DbContext db,
-        string ownerUid,
-        int pageSize = 500,
-        CancellationToken cancellationToken = default)
-    {
-        if (db == null || string.IsNullOrWhiteSpace(ownerUid))
-            return 0;
-
-        var total = 0;
-        foreach (var entityType in db.Model.GetEntityTypes())
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var entityName = entityType.ClrType.Name;
-            if (!IsRealtimeEntity(entityName))
-                continue;
-
-            var table = entityType.GetTableName();
-            if (string.IsNullOrWhiteSpace(table))
-                continue;
-            var schema = entityType.GetSchema() ?? "public";
-            var keyProperties = entityType.FindPrimaryKey()?.Properties;
-            if (keyProperties == null || keyProperties.Count == 0)
-                continue;
-
-            var keyColumns = keyProperties
-                .Select(p => p.GetColumnName(StoreObjectIdentifier.Table(table, schema)))
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .ToArray();
-            if (keyColumns.Length != keyProperties.Count)
-                continue;
-
-            await using var conn = new NpgsqlConnection(GetConnectionString(db));
-            await conn.OpenAsync(cancellationToken);
-            var offset = 0;
-            while (true)
-            {
-                var qualified = $"{QuoteIdentifier(schema)}.{QuoteIdentifier(table)}";
-                await using var cmd = conn.CreateCommand();
-                cmd.CommandText = $"SELECT to_jsonb(t) FROM {qualified} t OFFSET @offset LIMIT @limit";
-                cmd.Parameters.AddWithValue("offset", offset);
-                cmd.Parameters.AddWithValue("limit", pageSize);
-                await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-                var page = new Dictionary<string, object?>(StringComparer.Ordinal);
-                var count = 0;
-                while (await reader.ReadAsync(cancellationToken))
-                {
-                    var json = reader.GetFieldValue<string>(0);
-                    using var doc = JsonDocument.Parse(json);
-                    var keyParts = new List<string>();
-                    foreach (var keyColumn in keyColumns)
-                    {
-                        if (doc.RootElement.TryGetProperty(keyColumn, out var keyValue))
-                            keyParts.Add(keyValue.ToString());
-                    }
-                    if (keyParts.Count != keyColumns.Length)
-                        continue;
-                    var key = string.Join("|", keyParts);
-                    var rawRow = JsonElementToObject(doc.RootElement) as Dictionary<string, object?>
-                                 ?? new Dictionary<string, object?>();
-                    var row = MapDatabaseRowToFirebase(entityName, rawRow);
-                    row["_entity"] = entityName;
-                    row["_key"] = key;
-                    row["_syncedUtc"] = DateTime.UtcNow.ToString("O");
-                    var firebaseTable = GetFirebaseTable(entityName);
-                    if (string.IsNullOrWhiteSpace(firebaseTable))
-                        continue;
-
-                    page[$"owners/{ownerUid}/{firebaseTable}/{EscapeFirebaseKey(key)}"] = row;
-                    count++;
-                }
-                if (page.Count > 0)
-                {
-                    await UpdateAsync(page, cancellationToken);
-                    total += count;
-                }
-                if (count < pageSize)
-                    break;
-                offset += pageSize;
-            }
-        }
-        return total;
-    }
-
     // Firebase paths intentionally match the existing Android owner-node
     // layout. This is a transport/read-model mapping only; it does not alter
-    // the Neon schema or any business logic.
+    // the logical application schema or any business logic.
     private static string? GetFirebaseTable(string entityName)
         => entityName switch
         {
@@ -513,7 +422,7 @@ public sealed class FirebaseRealtimeService
 
         // Canonical Firebase contract matches the existing Android entity names.
         // Extra server-only fields are intentionally omitted from these module
-        // contracts; Neon schema and business rules remain unchanged.
+        // contracts; logical schema and business rules remain unchanged.
         switch (entityName)
         {
             case "Employee":
@@ -792,6 +701,11 @@ public sealed class FirebaseRealtimeService
 
     public bool IsConfigured => _context.IsValueCreated && _context.Value.IsCompletedSuccessfully && _context.Value.Result != null;
 
+    public async Task<bool> EnsureConfiguredAsync()
+    {
+        return await _context.Value is not null;
+    }
+
     private async Task<bool> SetAsync(string path, object value, CancellationToken cancellationToken)
         => await UpdateAsync(new Dictionary<string, object?> { [path] = value }, cancellationToken);
 
@@ -944,7 +858,7 @@ public sealed class FirebaseRealtimeService
         {
             _logger.LogWarning(
                 ex,
-                "Firebase Admin bridge is not configured. Existing Neon/SignalR paths remain active. Configure FIREBASE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS to enable Firebase realtime transport.");
+                "Firebase Admin bridge is not configured. Firebase credentials are not configured yet. Configure FIREBASE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS to enable Firebase realtime transport.");
             return null;
         }
     }

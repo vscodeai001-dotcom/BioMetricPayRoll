@@ -1,5 +1,4 @@
-﻿using Microsoft.EntityFrameworkCore;
-using Npgsql;
+using Microsoft.EntityFrameworkCore;
 
 namespace Payroll.Web.Services
 {
@@ -117,14 +116,8 @@ namespace Payroll.Web.Services
 
         private async Task EnsureThemePreferencesTableAsync(AppDbContext db)
         {
-            await db.Database.ExecuteSqlRawAsync($"""
-                CREATE TABLE IF NOT EXISTS {ThemePreferenceTableName} (
-                    user_id character varying(450) NOT NULL,
-                    theme character varying(20) NOT NULL DEFAULT 'light',
-                    updated_at_utc timestamp without time zone NOT NULL DEFAULT NOW(),
-                    CONSTRAINT PK_user_theme_preferences PRIMARY KEY (user_id)
-                );
-                """);
+            // Created by startup EnsureCreated.
+            await Task.CompletedTask;
         }
     }
 }

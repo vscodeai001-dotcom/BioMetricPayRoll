@@ -22,9 +22,7 @@ public class GeoLocationService
     // authoritative and are protected by a short conflict window.
     private const int AuthoritativePunchProtectionSeconds = 120;
     private const int FallbackReconciliationWindowSeconds = 300;
-    private const long AttendanceAdvisoryLockNamespace = 0x504159524F4C4CL;
-    private const long GpsSessionAdvisoryLockNamespace = 0x4750534C4F434BL;
-
+        
     public GeoLocationService(
         IDbContextFactory<AppDbContext> dbFactory,
         ILogger<GeoLocationService> logger,
@@ -147,19 +145,12 @@ public class GeoLocationService
             await using var db =
                 await _dbFactory.CreateDbContextAsync();
 
-            await db.Database.OpenConnectionAsync();
-            var lockKey = GpsSessionAdvisoryLockNamespace + (uint)employeeId;
-            var lockHeld = false;
+                        var lockHeld = false;
 
             try
             {
-                // Serialize session start/end/update lifecycle operations for
-                // this employee. This prevents an old GPS request from racing
-                // a new login and leaving two active sessions behind.
-                await db.Database.ExecuteSqlRawAsync(
-                    "SELECT pg_advisory_lock({0})",
-                    lockKey);
-                lockHeld = true;
+                // Provider-neutral compatibility path.
+                lockHeld = false;
 
                 var existing = await db.EmployeeGpsSessions
                     .FirstOrDefaultAsync(x =>
@@ -265,9 +256,6 @@ public class GeoLocationService
                 {
                     try
                     {
-                        await db.Database.ExecuteSqlRawAsync(
-                            "SELECT pg_advisory_unlock({0})",
-                            lockKey);
                     }
                     catch (Exception unlockEx)
                     {
@@ -351,16 +339,11 @@ public class GeoLocationService
             // and logout/session-end operations across Web/Worker instances.
             // This closes the race where an old GPS request could repopulate
             // LiveLocationStore immediately after logout.
-            await db.Database.OpenConnectionAsync();
-            var lockKey = GpsSessionAdvisoryLockNamespace + (uint)employeeId;
-            var lockHeld = false;
+                        var lockHeld = false;
 
             try
             {
-                await db.Database.ExecuteSqlRawAsync(
-                    "SELECT pg_advisory_lock({0})",
-                    lockKey);
-                lockHeld = true;
+                lockHeld = false;
 
                 session = await db.EmployeeGpsSessions
                     .FirstOrDefaultAsync(x =>
@@ -551,9 +534,6 @@ public class GeoLocationService
                 {
                     try
                     {
-                        await db.Database.ExecuteSqlRawAsync(
-                            "SELECT pg_advisory_unlock({0})",
-                            lockKey);
                     }
                     catch (Exception unlockEx)
                     {
@@ -879,13 +859,7 @@ public class GeoLocationService
         AppDbContext db,
         int employeeId)
     {
-        var lockKey =
-            AttendanceAdvisoryLockNamespace +
-            (uint)employeeId;
-
-        await db.Database.ExecuteSqlRawAsync(
-            "SELECT pg_advisory_xact_lock({0})",
-            lockKey);
+        await Task.CompletedTask;
     }
 
     private static bool? ResolveStableGeofenceState(
@@ -964,16 +938,11 @@ public class GeoLocationService
             await using var db =
                 await _dbFactory.CreateDbContextAsync();
 
-            await db.Database.OpenConnectionAsync();
-            var lockKey = GpsSessionAdvisoryLockNamespace + (uint)employeeId;
-            var lockHeld = false;
+                        var lockHeld = false;
 
             try
             {
-                await db.Database.ExecuteSqlRawAsync(
-                    "SELECT pg_advisory_lock({0})",
-                    lockKey);
-                lockHeld = true;
+                lockHeld = false;
 
                 var session = await db.EmployeeGpsSessions
                     .FirstOrDefaultAsync(x =>
@@ -1038,9 +1007,6 @@ public class GeoLocationService
                 {
                     try
                     {
-                        await db.Database.ExecuteSqlRawAsync(
-                            "SELECT pg_advisory_unlock({0})",
-                            lockKey);
                     }
                     catch (Exception unlockEx)
                     {
@@ -1087,16 +1053,11 @@ public class GeoLocationService
             await using var db =
                 await _dbFactory.CreateDbContextAsync();
 
-            await db.Database.OpenConnectionAsync();
-            var lockKey = GpsSessionAdvisoryLockNamespace + (uint)employeeId;
-            var lockHeld = false;
+                        var lockHeld = false;
 
             try
             {
-                await db.Database.ExecuteSqlRawAsync(
-                    "SELECT pg_advisory_lock({0})",
-                    lockKey);
-                lockHeld = true;
+                lockHeld = false;
 
                 var sessions = await db.EmployeeGpsSessions
                     .Where(x =>
@@ -1168,9 +1129,6 @@ public class GeoLocationService
                 {
                     try
                     {
-                        await db.Database.ExecuteSqlRawAsync(
-                            "SELECT pg_advisory_unlock({0})",
-                            lockKey);
                     }
                     catch (Exception unlockEx)
                     {
