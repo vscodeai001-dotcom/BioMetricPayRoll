@@ -37,7 +37,7 @@ public sealed class FirebaseSuperAdminProvisioningService : BackgroundService
         if (auth == null)
         {
             _logger.LogWarning(
-                "Firebase Admin SDK is not initialized. Configure GOOGLE_APPLICATION_CREDENTIALS, FIREBASE_SERVICE_ACCOUNT_JSON, or Application Default Credentials.");
+                "Firebase Admin SDK is not initialized. Configure Firebase:ServiceAccountPath, GOOGLE_APPLICATION_CREDENTIALS, FIREBASE_SERVICE_ACCOUNT_JSON, or Application Default Credentials.");
             return;
         }
 

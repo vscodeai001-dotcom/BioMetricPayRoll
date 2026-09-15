@@ -817,28 +817,63 @@ public sealed class FirebaseRealtimeService
     {
         try
         {
-            var json = Environment.GetEnvironmentVariable("FIREBASE_SERVICE_ACCOUNT_JSON");
             GoogleCredential credential;
+            string credentialSource;
 
-            if (!string.IsNullOrWhiteSpace(json))
+            // Prefer the explicit service-account file. This is important for
+            // local development because Visual Studio may not inherit a
+            // GOOGLE_APPLICATION_CREDENTIALS variable that was set in another
+            // PowerShell process.
+            var credentialsPath =
+                _configuration["Firebase:ServiceAccountPath"]
+                ?? Environment.GetEnvironmentVariable("GOOGLE_APPLICATION_CREDENTIALS");
+
+            // Known local development location used for this installation.
+            // It is only used when the explicit path is not configured.
+            if (string.IsNullOrWhiteSpace(credentialsPath) &&
+                File.Exists(@"C:\FirebaseSecrets\firebase-service-account.json"))
             {
+                credentialsPath = @"C:\FirebaseSecrets\firebase-service-account.json";
+            }
+
+            if (!string.IsNullOrWhiteSpace(credentialsPath))
+            {
+                if (!File.Exists(credentialsPath))
+                    throw new FileNotFoundException(
+                        $"Firebase service-account file was not found: {credentialsPath}");
+
                 credential = CredentialFactory
-                    .FromJson(
-                        json,
+                    .FromFile(
+                        credentialsPath,
                         JsonCredentialParameters.ServiceAccountCredentialType)
                     .CreateScoped(CloudPlatformScope, DatabaseScope, UserInfoEmailScope);
+
+                credentialSource = $"SERVICE_ACCOUNT_FILE:{credentialsPath}";
             }
             else
             {
-                var credentialsPath = Environment.GetEnvironmentVariable("GOOGLE_APPLICATION_CREDENTIALS");
-                credential = !string.IsNullOrWhiteSpace(credentialsPath)
-                    ? CredentialFactory
-                        .FromFile(
-                            credentialsPath,
+                // Inline JSON is retained only as a fallback for deployments
+                // that intentionally provide it. It can no longer override an
+                // explicitly available service-account file.
+                var json = Environment.GetEnvironmentVariable("FIREBASE_SERVICE_ACCOUNT_JSON");
+
+                if (!string.IsNullOrWhiteSpace(json))
+                {
+                    credential = CredentialFactory
+                        .FromJson(
+                            json,
                             JsonCredentialParameters.ServiceAccountCredentialType)
-                        .CreateScoped(CloudPlatformScope, DatabaseScope, UserInfoEmailScope)
-                    : (await GoogleCredential.GetApplicationDefaultAsync())
                         .CreateScoped(CloudPlatformScope, DatabaseScope, UserInfoEmailScope);
+
+                    credentialSource = "FIREBASE_SERVICE_ACCOUNT_JSON";
+                }
+                else
+                {
+                    credential = (await GoogleCredential.GetApplicationDefaultAsync())
+                        .CreateScoped(CloudPlatformScope, DatabaseScope, UserInfoEmailScope);
+
+                    credentialSource = "APPLICATION_DEFAULT_CREDENTIALS";
+                }
             }
 
             var projectId = _configuration["Firebase:ProjectId"]
@@ -849,11 +884,13 @@ public sealed class FirebaseRealtimeService
                 ?? Environment.GetEnvironmentVariable("FIREBASE_DATABASE_URL")
                 ?? "https://biometricpayroll-default-rtdb.asia-southeast1.firebasedatabase.app";
 
+            _logger.LogInformation(
+                "Initializing Firebase Admin with credential source {CredentialSource} for project {ProjectId}.",
+                credentialSource,
+                projectId);
+
             FirebaseApp? app = null;
 
-            // GetInstance(name) can return null in some Firebase Admin SDK
-            // versions/configurations rather than throwing. Never pass a null
-            // FirebaseApp to FirebaseAuth.GetAuth.
             try
             {
                 app = FirebaseApp.GetInstance(FirebaseAppName);
@@ -884,7 +921,7 @@ public sealed class FirebaseRealtimeService
         {
             _logger.LogWarning(
                 ex,
-                "Firebase Admin bridge is not configured. Configure FIREBASE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS with a Firebase service-account credential that has Firebase Authentication and Realtime Database access.");
+                "Firebase Admin bridge is not configured. Configure Firebase:ServiceAccountPath, GOOGLE_APPLICATION_CREDENTIALS, FIREBASE_SERVICE_ACCOUNT_JSON, or Application Default Credentials.");
             return null;
         }
     }
