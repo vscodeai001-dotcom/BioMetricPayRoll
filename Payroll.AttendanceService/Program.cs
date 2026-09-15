@@ -26,7 +26,8 @@ IHost host = Host.CreateDefaultBuilder(args)
         services.AddDbContext<AppDbContext>(options =>
             options.UseSqlite($"Data Source={sqlitePath}"), ServiceLifetime.Transient);
 
-        // 4. Register Background Services
+        // 4. Register Firebase worker bridge and background services
+        services.AddSingleton<FirebaseWorkerSyncService>();
         services.AddHostedService<Worker>();
         services.AddHostedService<GpsSessionCleanupService>();
     })

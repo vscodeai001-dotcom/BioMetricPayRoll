@@ -10,6 +10,7 @@ namespace Payroll.AttendanceService
         private readonly IServiceProvider _serviceProvider;
         private readonly IZkDevice _zkem;
         private readonly IConfiguration _configuration;
+        private readonly FirebaseWorkerSyncService _firebase;
 
         // Configurable fields are now initialized dynamically inside ExecuteAsync
         private string _deviceIP = string.Empty;
@@ -26,11 +27,13 @@ namespace Payroll.AttendanceService
         public Worker(
             ILogger<Worker> logger,
             IConfiguration config,
-            IServiceProvider serviceProvider)
+            IServiceProvider serviceProvider,
+            FirebaseWorkerSyncService firebase)
         {
             _logger = logger;
             _serviceProvider = serviceProvider;
             _configuration = config;
+            _firebase = firebase;
             // Use fallback implementation when COM interop is not available at build time.
             _zkem = new ZkDeviceFallback();
 
@@ -65,8 +68,11 @@ namespace Payroll.AttendanceService
         {
             _logger.LogInformation("Attendance Service starting up...");
 
+            await EnsureLocalCacheSchemaAsync(stoppingToken);
+
             while (!stoppingToken.IsCancellationRequested)
             {
+                await HydrateFirebaseCacheAsync(stoppingToken);
                 // Attendance mode is controlled from the shared FeatureSettings row.
                 // Dual ON  = biometric + geofence.
                 // Dual OFF + Geo ON  = geofence/mobile only, so biometric is disabled.
@@ -139,6 +145,40 @@ namespace Payroll.AttendanceService
             }
         }
 
+        private async Task EnsureLocalCacheSchemaAsync(CancellationToken stoppingToken)
+        {
+            try
+            {
+                using var scope = _serviceProvider.CreateScope();
+                var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+                await dbContext.Database.EnsureCreatedAsync(stoppingToken);
+                _logger.LogInformation("Local SQLite worker cache schema is ready.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Unable to initialize the local SQLite worker cache schema.");
+                throw;
+            }
+        }
+
+        private async Task HydrateFirebaseCacheAsync(CancellationToken stoppingToken)
+        {
+            try
+            {
+                using var scope = _serviceProvider.CreateScope();
+                var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+                await _firebase.HydrateOperationalCacheAsync(dbContext, stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Firebase hydration failed; continuing with the existing local cache.");
+            }
+        }
+
         private async Task<bool> IsBiometricAttendanceEnabledAsync(
             CancellationToken stoppingToken)
         {
@@ -178,6 +218,14 @@ namespace Payroll.AttendanceService
             var lockKey =
                 AttendanceAdvisoryLockNamespace +
                 (uint)employeeId;
+
+            // The current worker uses SQLite as its local compatibility cache.
+            // PostgreSQL advisory locks are not available in SQLite. The worker
+            // is a single process, so the surrounding transaction already
+            // serializes its biometric writes. Keep the PostgreSQL lock only
+            // when the active provider actually supports it.
+            if (dbContext.Database.ProviderName?.Contains("Sqlite", StringComparison.OrdinalIgnoreCase) == true)
+                return;
 
             await dbContext.Database.ExecuteSqlRawAsync(
                 "SELECT pg_advisory_xact_lock({0})",
@@ -288,8 +336,19 @@ namespace Payroll.AttendanceService
 
                     _logger.LogInformation("Successfully saved {count} new attendance logs.", newLogCount);
 
-                    // Notify the running Web application only after the
-                    // existing biometric database save has succeeded.
+                    // Firebase is the shared durable SSOT. Publish only after
+                    // the existing biometric transaction has committed.
+                    var firebasePublished = await _firebase.PublishAttendanceLogsAsync(
+                        newBiometricLogs,
+                        stoppingToken);
+
+                    if (!firebasePublished)
+                    {
+                        _logger.LogWarning(
+                            "Biometric attendance was saved locally, but Firebase publication was deferred.");
+                    }
+
+                    // Retain the existing Web notification for compatibility.
                     await NotifyWebApplicationAsync();
                 }
                 else
