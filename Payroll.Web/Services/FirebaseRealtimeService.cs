@@ -21,6 +21,7 @@ public sealed class FirebaseRealtimeService
     private const string DatabaseScope = "https://www.googleapis.com/auth/firebase.database";
     private const string CloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform";
     private const string UserInfoEmailScope = "https://www.googleapis.com/auth/userinfo.email";
+    private const string FirebaseAppName = "PayrollWebFirebase";
     private readonly IConfiguration _configuration;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<FirebaseRealtimeService> _logger;
@@ -703,6 +704,19 @@ public sealed class FirebaseRealtimeService
         return await _context.Value != null;
     }
 
+    /// <summary>
+    /// Returns Firebase Authentication bound to the exact FirebaseApp initialized
+    /// by this service.
+    /// </summary>
+    public async Task<FirebaseAuth?> GetFirebaseAuthAsync(CancellationToken cancellationToken = default)
+    {
+        var context = await _context.Value;
+        if (context == null)
+            return null;
+
+        return FirebaseAuth.GetAuth(context.App);
+    }
+
     public bool IsConfigured => _context.IsValueCreated && _context.Value.IsCompletedSuccessfully && _context.Value.Result != null;
 
     private async Task<bool> SetAsync(string path, object value, CancellationToken cancellationToken)
@@ -835,28 +849,34 @@ public sealed class FirebaseRealtimeService
                 ?? Environment.GetEnvironmentVariable("FIREBASE_DATABASE_URL")
                 ?? "https://biometricpayroll-default-rtdb.asia-southeast1.firebasedatabase.app";
 
-            FirebaseApp app;
+            FirebaseApp? app = null;
+
+            // GetInstance(name) can return null in some Firebase Admin SDK
+            // versions/configurations rather than throwing. Never pass a null
+            // FirebaseApp to FirebaseAuth.GetAuth.
             try
             {
-                app = FirebaseApp.DefaultInstance;
+                app = FirebaseApp.GetInstance(FirebaseAppName);
             }
             catch
             {
-                app = FirebaseApp.Create(new AppOptions
-                {
-                    Credential = credential,
-                    ProjectId = projectId
-                });
+                // The named app has not been created yet.
             }
 
             if (app == null)
             {
-                app = FirebaseApp.Create(new AppOptions
-                {
-                    Credential = credential,
-                    ProjectId = projectId
-                });
+                app = FirebaseApp.Create(
+                    new AppOptions
+                    {
+                        Credential = credential,
+                        ProjectId = projectId
+                    },
+                    FirebaseAppName);
             }
+
+            if (app == null)
+                throw new InvalidOperationException(
+                    $"Firebase Admin app '{FirebaseAppName}' could not be initialized.");
 
             return new FirebaseContext(app, databaseUrl, credential);
         }

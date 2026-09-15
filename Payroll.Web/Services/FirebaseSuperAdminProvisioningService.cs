@@ -33,12 +33,14 @@ public sealed class FirebaseSuperAdminProvisioningService : BackgroundService
 
     private async Task EnsureFirebaseAuthAsync(string email, string? password, CancellationToken ct)
     {
-        if (!await _firebase.EnsureConfiguredAsync()) return;
-        FirebaseApp app;
-        try { app = FirebaseApp.DefaultInstance; }
-        catch { _logger.LogWarning("Firebase Admin SDK is not initialized. Configure FIREBASE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS."); return; }
+        var auth = await _firebase.GetFirebaseAuthAsync(ct);
+        if (auth == null)
+        {
+            _logger.LogWarning(
+                "Firebase Admin SDK is not initialized. Configure GOOGLE_APPLICATION_CREDENTIALS, FIREBASE_SERVICE_ACCOUNT_JSON, or Application Default Credentials.");
+            return;
+        }
 
-        var auth = FirebaseAuth.GetAuth(app);
         UserRecord? user = null;
         try { user = await auth.GetUserByEmailAsync(email, ct); }
         catch (FirebaseAuthException ex) when (ex.AuthErrorCode == AuthErrorCode.UserNotFound)
