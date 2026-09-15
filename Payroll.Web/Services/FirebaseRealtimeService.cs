@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Net.Http.Headers;
 using FirebaseAdmin;
 using FirebaseAdmin.Auth;
 using Microsoft.EntityFrameworkCore;
@@ -13,9 +14,9 @@ using Google.Apis.Auth.OAuth2;
 namespace Payroll.Web.Services;
 
 /// <summary>
-/// Firebase is a realtime transport/cache layer only. Neon/PostgreSQL remains
-/// the business-data source of truth. This service never changes payroll rules
-/// or database schema.
+/// Firebase is the shared realtime data store for the Android/Web sync layer.
+/// Existing payroll calculations and database schema are intentionally left
+/// unchanged while individual modules are migrated to Firebase.
 /// </summary>
 public sealed class FirebaseRealtimeService
 {
@@ -81,6 +82,114 @@ public sealed class FirebaseRealtimeService
         }
     }
 
+    // ---------------------------------------------------------------------
+    // Firebase SSOT owner-store primitives
+    // ---------------------------------------------------------------------
+    // These methods are deliberately table-whitelisted. They provide the Web
+    // layer with a Firebase-native CRUD path without exposing arbitrary
+    // database paths to callers. The existing Neon-backed business services
+    // can be migrated module-by-module without changing UI/layout/business
+    // rules.
+
+    private static readonly HashSet<string> FirebaseSsotTables =
+        new(StringComparer.Ordinal)
+        {
+            "employees",
+            "shops",
+            "attendance",
+            "attendance_punches",
+            "advance_payments",
+            "employee_history",
+            "shop_closed_days",
+            "regularizations",
+            "leave_requests",
+            "resignation_requests",
+            "salary_snapshots",
+            "audit_logs",
+            "daily_summaries",
+            "shift_schedules",
+            "payroll_history",
+            "bonus_records",
+            "tax_declarations",
+            "fbp_components",
+            "fbp_declarations",
+            "company_settings",
+            "feature_settings",
+            "professional_tax_slabs",
+            "year_end_summaries",
+            "fnf_settlements",
+            "report_definitions",
+            "geo_punch_audits"
+        };
+
+    public bool IsFirebaseSsotTable(string table)
+        => !string.IsNullOrWhiteSpace(table) &&
+           FirebaseSsotTables.Contains(table.Trim());
+
+    public async Task<JsonElement?> GetOwnerTableAsync(
+        string ownerUid,
+        string table,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(ownerUid) || !IsFirebaseSsotTable(table))
+            return null;
+
+        return await GetJsonAsync(
+            $"owners/{ownerUid.Trim()}/{table.Trim()}",
+            cancellationToken);
+    }
+
+    public async Task<JsonElement?> GetOwnerRecordAsync(
+        string ownerUid,
+        string table,
+        string recordId,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(recordId))
+            return null;
+
+        return await GetJsonAsync(
+            $"owners/{ownerUid.Trim()}/{table.Trim()}/{EscapeFirebaseKey(recordId.Trim())}",
+            cancellationToken);
+    }
+
+    public async Task<bool> SetOwnerRecordAsync(
+        string ownerUid,
+        string table,
+        string recordId,
+        object value,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(ownerUid) ||
+            string.IsNullOrWhiteSpace(recordId) ||
+            !IsFirebaseSsotTable(table))
+            return false;
+
+        return await SetAsync(
+            $"owners/{ownerUid.Trim()}/{table.Trim()}/{EscapeFirebaseKey(recordId.Trim())}",
+            value,
+            cancellationToken);
+    }
+
+    public async Task<bool> DeleteOwnerRecordAsync(
+        string ownerUid,
+        string table,
+        string recordId,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(ownerUid) ||
+            string.IsNullOrWhiteSpace(recordId) ||
+            !IsFirebaseSsotTable(table))
+            return false;
+
+        return await UpdateAsync(
+            new Dictionary<string, object?>
+            {
+                [$"owners/{ownerUid.Trim()}/{table.Trim()}/{EscapeFirebaseKey(recordId.Trim())}"] = null
+            },
+            cancellationToken);
+    }
+
     public async Task<bool> PublishApplicationDataChangedAsync(
         IReadOnlyCollection<object> changes,
         string? ownerUid = null,
@@ -90,7 +199,7 @@ public sealed class FirebaseRealtimeService
         var payload = new Dictionary<string, object?>
         {
             ["eventId"] = eventId,
-            ["source"] = "NEON",
+            ["source"] = "FIREBASE_SSoT",
             ["timestamp"] = DateTime.UtcNow.ToString("O"),
             ["changes"] = changes
         };
@@ -178,8 +287,8 @@ public sealed class FirebaseRealtimeService
 
 
     /// <summary>
-    /// Publishes the committed Neon row snapshots that changed in one EF save.
-    /// Firebase is only a realtime read model; Neon remains authoritative.
+    /// Legacy bridge: publishes committed server row snapshots that changed in one EF save.
+    /// Used only during the staged migration; Firebase is the target SSOT.
     /// Only scalar properties are exported, so EF navigation graphs/cycles and
     /// calculated client state are never copied into Firebase.
     /// </summary>
@@ -203,7 +312,11 @@ public sealed class FirebaseRealtimeService
             if (string.IsNullOrWhiteSpace(key))
                 continue;
 
-            var path = $"owners/{ownerUid}/data/{entityName}/{EscapeFirebaseKey(key)}";
+            var firebaseTable = GetFirebaseTable(entityName);
+            if (string.IsNullOrWhiteSpace(firebaseTable))
+                continue;
+
+            var path = $"owners/{ownerUid}/{firebaseTable}/{EscapeFirebaseKey(key)}";
             if (entry.State == EntityState.Deleted)
             {
                 updates[path] = null;
@@ -298,7 +411,11 @@ public sealed class FirebaseRealtimeService
                     row["_entity"] = entityName;
                     row["_key"] = key;
                     row["_syncedUtc"] = DateTime.UtcNow.ToString("O");
-                    page[$"owners/{ownerUid}/data/{entityName}/{EscapeFirebaseKey(key)}"] = row;
+                    var firebaseTable = GetFirebaseTable(entityName);
+                    if (string.IsNullOrWhiteSpace(firebaseTable))
+                        continue;
+
+                    page[$"owners/{ownerUid}/{firebaseTable}/{EscapeFirebaseKey(key)}"] = row;
                     count++;
                 }
                 if (page.Count > 0)
@@ -313,6 +430,37 @@ public sealed class FirebaseRealtimeService
         }
         return total;
     }
+
+    // Firebase paths intentionally match the existing Android owner-node
+    // layout. This is a transport/read-model mapping only; it does not alter
+    // the Neon schema or any business logic.
+    private static string? GetFirebaseTable(string entityName)
+        => entityName switch
+        {
+            "Employee" => "employees",
+            "AttendanceLog" => "attendance",
+            "SalaryAdvance" => "advance_payments",
+            "PayrollHistory" => "payroll_history",
+            "LeaveRequest" => "leave_requests",
+            "ShiftSchedule" => "shift_schedules",
+            "CompanyHoliday" => "shop_closed_days",
+            "CompanySetting" => "company_settings",
+            "DailySummary" => "daily_summaries",
+            "FeatureSettings" => "feature_settings",
+            "ProfessionalTaxSlab" => "professional_tax_slabs",
+            "AuditLog" => "audit_logs",
+            "BonusRecord" => "bonus_records",
+            "YearEndSummary" => "year_end_summaries",
+            "TaxDeclaration" => "tax_declarations",
+            "ResignationRequest" => "resignation_requests",
+            "FnFSettlement" => "fnf_settlements",
+            "ReportDefinition" => "report_definitions",
+            "AttendanceRegularization" => "regularizations",
+            "FBPComponent" => "fbp_components",
+            "FlexibleBenefitDeclaration" => "fbp_declarations",
+            "GeoPunchAudit" => "geo_punch_audits",
+            _ => null
+        };
 
     private static readonly HashSet<string> RealtimeEntities = new(StringComparer.Ordinal)
     {
@@ -378,6 +526,56 @@ public sealed class FirebaseRealtimeService
 
     private async Task<bool> SetAsync(string path, object value, CancellationToken cancellationToken)
         => await UpdateAsync(new Dictionary<string, object?> { [path] = value }, cancellationToken);
+
+    private async Task<JsonElement?> GetJsonAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        var context = await _context.Value;
+        if (context == null)
+            return null;
+
+        try
+        {
+            var client = _httpClientFactory.CreateClient("FirebaseRealtime");
+            var uri = new Uri(
+                $"{context.DatabaseUrl.TrimEnd('/')}/{path.TrimStart('/')}.json");
+
+            using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+            request.Headers.Authorization =
+                new AuthenticationHeaderValue(
+                    "Bearer",
+                    await context.GetAccessTokenAsync());
+
+            using var response =
+                await client.SendAsync(request, cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning(
+                    "Firebase realtime read failed with HTTP {Status} for {Path}",
+                    (int)response.StatusCode,
+                    path);
+                return null;
+            }
+
+            var json = await response.Content.ReadAsStringAsync(cancellationToken);
+            if (string.IsNullOrWhiteSpace(json) || json == "null")
+                return null;
+
+            using var document = JsonDocument.Parse(json);
+            return document.RootElement.Clone();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Firebase realtime read deferred for {Path}", path);
+            return null;
+        }
+    }
 
     private async Task<bool> UpdateAsync(
         IReadOnlyDictionary<string, object?> updates,

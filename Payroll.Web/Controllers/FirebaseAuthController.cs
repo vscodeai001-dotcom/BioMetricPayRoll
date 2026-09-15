@@ -1,9 +1,6 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
-using Payroll.Shared.Data;
 using Payroll.Web.Services;
 
 namespace Payroll.Web.Controllers;
@@ -12,43 +9,48 @@ namespace Payroll.Web.Controllers;
 [Route("api/firebase")]
 public sealed class FirebaseAuthController : ControllerBase
 {
-    private readonly UserManager<IdentityUser> _userManager;
-    private readonly IDbContextFactory<AppDbContext> _dbFactory;
     private readonly FirebaseRealtimeService _firebase;
 
-    public FirebaseAuthController(
-        UserManager<IdentityUser> userManager,
-        IDbContextFactory<AppDbContext> dbFactory,
-        FirebaseRealtimeService firebase)
+    public FirebaseAuthController(FirebaseRealtimeService firebase)
     {
-        _userManager = userManager;
-        _dbFactory = dbFactory;
         _firebase = firebase;
     }
 
+    /// <summary>
+    /// Creates the Firebase custom token used by the browser realtime layer.
+    /// This endpoint deliberately does not query Neon/PostgreSQL. The
+    /// authenticated ASP.NET identity claims are already sufficient for the
+    /// Firebase transport identity and role.
+    ///
+    /// Existing login/session flow is unchanged. This only removes an
+    /// unnecessary Neon dependency from the Firebase realtime connection.
+    /// </summary>
     [HttpGet("auth-token")]
     [Authorize]
-    public async Task<IActionResult> GetAuthToken(CancellationToken cancellationToken)
+    public async Task<IActionResult> GetAuthToken(
+        CancellationToken cancellationToken)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
         if (string.IsNullOrWhiteSpace(userId))
             return Unauthorized();
 
-        var user = await _userManager.FindByIdAsync(userId);
-        if (user == null)
-            return Unauthorized();
+        var role = User.FindFirstValue(ClaimTypes.Role);
+        if (string.IsNullOrWhiteSpace(role))
+            role = "Employee";
 
-        var roles = await _userManager.GetRolesAsync(user);
-        var role = roles.FirstOrDefault() ?? "Employee";
+        // EmployeeId is retained in the Firebase token contract for backward
+        // compatibility. The existing Android employee identity remains in
+        // its authenticated session; Firebase realtime access does not need
+        // a fresh Neon lookup here.
+        var employeeIdClaim =
+            User.FindFirst("employee_id")?.Value
+            ?? User.FindFirst("EmployeeId")?.Value
+            ?? User.FindFirst("employeeId")?.Value;
 
-        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
-        var employeeId = await db.Employees.AsNoTracking()
-            .Where(x => x.AspNetUserId == user.Id && !x.IsDeleted)
-            .Select(x => (int?)x.EmployeeID)
-            .FirstOrDefaultAsync(cancellationToken) ?? 0;
+        _ = int.TryParse(employeeIdClaim, out var employeeId);
 
         var token = await _firebase.CreateCustomTokenAsync(
-            user.Id,
+            userId,
             employeeId,
             role,
             cancellationToken);
@@ -57,7 +59,11 @@ public sealed class FirebaseAuthController : ControllerBase
         {
             return StatusCode(
                 StatusCodes.Status503ServiceUnavailable,
-                new { success = false, message = "Firebase realtime bridge is not configured." });
+                new
+                {
+                    success = false,
+                    message = "Firebase realtime bridge is not configured."
+                });
         }
 
         return Ok(new
@@ -66,7 +72,7 @@ public sealed class FirebaseAuthController : ControllerBase
             token,
             employeeId,
             role,
-            ownerUid = _firebase.ResolveOwnerUid(user.Id, role)
+            ownerUid = _firebase.ResolveOwnerUid(userId, role)
         });
     }
 }
