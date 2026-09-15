@@ -34,12 +34,24 @@ window.attendanceRefresh = (function () {
                 cache: 'no-store'
             });
 
-            if (!response.ok)
+            if (!response.ok) {
+                console.warn(
+                    'Firebase realtime auth endpoint returned HTTP ' +
+                    response.status +
+                    '. Retrying without requiring a page refresh.'
+                );
+                scheduleRetry();
                 return;
+            }
 
             const authResult = await response.json();
-            if (!authResult || !authResult.token)
+            if (!authResult || !authResult.token) {
+                console.warn(
+                    'Firebase realtime auth token was empty. Retrying without requiring a page refresh.'
+                );
+                scheduleRetry();
                 return;
+            }
 
             if (!firebase.apps.length) {
                 firebase.initializeApp({
@@ -55,6 +67,10 @@ window.attendanceRefresh = (function () {
             await firebase.auth().signInWithCustomToken(authResult.token);
             firebaseDatabase = firebase.database();
             firebaseStarted = true;
+
+            console.log(
+                'Firebase realtime transport authenticated. Live GPS listener is active.'
+            );
 
             const liveRef = firebaseDatabase.ref('tracking/live');
             liveRef.on('child_added', onFirebaseLiveLocation);
@@ -80,7 +96,11 @@ window.attendanceRefresh = (function () {
 
             console.log('Firebase realtime transport connected.');
         } catch (error) {
-            console.warn('Firebase realtime transport unavailable.', error);
+            console.warn(
+                'Firebase realtime transport unavailable. Retrying automatically.',
+                error
+            );
+            scheduleRetry();
         } finally {
             firebaseStarting = false;
         }
@@ -91,12 +111,13 @@ window.attendanceRefresh = (function () {
             const data = snapshot.val();
             if (!data || !data.EmployeeId) return;
 
-            await notifyListeners('LocationChanged', data);
-            // Use the same browser event consumed by the existing admin map
-            // realtime bridge. This keeps Firebase and SignalR presentation
-            // paths identical without changing the Blazor component/layout.
+            // Dispatch the browser event first. The Leaflet map can therefore
+            // react immediately even if a Blazor circuit is busy reconnecting.
             window.dispatchEvent(new CustomEvent('location-data-changed', { detail: data }));
             window.dispatchEvent(new CustomEvent('firebase-location-changed', { detail: data }));
+
+            // Keep the existing Blazor state synchronization path as well.
+            await notifyListeners('LocationChanged', data);
         } catch (error) {
             console.warn('Firebase live location callback failed.', error);
         }

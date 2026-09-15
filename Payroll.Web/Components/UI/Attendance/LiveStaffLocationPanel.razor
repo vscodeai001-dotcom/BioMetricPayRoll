@@ -3388,9 +3388,9 @@
             catch { }
 
             // Register a browser-side fast path for GPS coordinates. This
-            // animates the existing Leaflet marker immediately when a
-            // LocationChanged SignalR event arrives, while Blazor continues
-            // to own authoritative state and lifecycle decisions.
+            // now consumes the same Firebase realtime event used by the
+            // standalone tracking transport, so the admin map does not wait
+            // for SignalR or a manual Refresh.
             try
             {
                 await JSRuntime.InvokeVoidAsync(
