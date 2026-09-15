@@ -178,7 +178,8 @@ else
         try
         {
             await using var dbContext = await DbFactory.CreateDbContextAsync();
-            ptSlabs = await dbContext.ProfessionalTaxSlabs.OrderBy(s => s.MinSalary).ToListAsync();
+            ptSlabs = await dbContext.ProfessionalTaxSlabs.ToListAsync();
+            ptSlabs = ptSlabs.OrderBy(s => s.MinSalary).ToList();
         }
         catch { }
     }

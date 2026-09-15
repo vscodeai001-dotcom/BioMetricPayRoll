@@ -200,7 +200,8 @@ else
                 companySettings.EnableTdsDeduction = featureSettings.EnableTdsDeduction;
             }
 
-            ptSlabs = await dbContext.ProfessionalTaxSlabs.AsNoTracking().OrderBy(s => s.MinSalary).ToListAsync();
+            ptSlabs = await dbContext.ProfessionalTaxSlabs.AsNoTracking().ToListAsync();
+            ptSlabs = ptSlabs.OrderBy(s => s.MinSalary).ToList();
 
             // 3. Load Employees
             employeeList = await dbContext.Employees

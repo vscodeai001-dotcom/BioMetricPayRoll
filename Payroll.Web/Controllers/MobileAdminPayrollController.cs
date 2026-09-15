@@ -97,7 +97,8 @@ public sealed class MobileAdminPayrollController : ControllerBase
             company.EnableShiftAllowance = feature.EnableShiftAllowance;
             company.EnableTdsDeduction = feature.EnableTdsDeduction;
 
-            var ptSlabs = await db.ProfessionalTaxSlabs.AsNoTracking().OrderBy(x => x.MinSalary).ToListAsync();
+            var ptSlabs = await db.ProfessionalTaxSlabs.AsNoTracking().ToListAsync();
+            ptSlabs = ptSlabs.OrderBy(x => x.MinSalary).ToList();
             var employees = await db.Employees.AsNoTracking().Where(x => !x.IsDeleted).OrderBy(x => x.Name).ToListAsync();
             if (employees.Count == 0)
                 return Ok(new { success = true, rows = Array.Empty<PayrollDisplayRowDto>() });
