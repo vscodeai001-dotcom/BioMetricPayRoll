@@ -206,13 +206,10 @@ var connectionString =
     builder.Configuration.GetConnectionString(
         "DefaultConnection");
 
-// Production credentials must come from the platform environment, never
-// from source-controlled appsettings.json. Keep the existing connection
-// design unchanged while allowing Render/local deployment to provide the
-// complete Neon connection string securely.
 if (string.IsNullOrWhiteSpace(connectionString))
 {
-    connectionString = Environment.GetEnvironmentVariable("DATABASE_URL")
+    connectionString =
+        Environment.GetEnvironmentVariable("DATABASE_URL")
         ?? Environment.GetEnvironmentVariable("NEON_CONNECTION_STRING");
 }
 
@@ -220,6 +217,60 @@ if (string.IsNullOrWhiteSpace(connectionString))
 {
     throw new InvalidOperationException(
         "DefaultConnection is not configured. Set DATABASE_URL or NEON_CONNECTION_STRING.");
+}
+
+// Neon provides DATABASE_URL in PostgreSQL URI format:
+// postgresql://username:password@host/database?sslmode=require&channel_binding=require
+//
+// Npgsql expects a key/value connection string. Convert the URI here while
+// keeping DATABASE_URL itself outside source control.
+if (connectionString.StartsWith(
+        "postgresql://",
+        StringComparison.OrdinalIgnoreCase) ||
+    connectionString.StartsWith(
+        "postgres://",
+        StringComparison.OrdinalIgnoreCase))
+{
+    var neonUri = new Uri(connectionString);
+
+    var userInfo = neonUri.UserInfo.Split(
+        ':',
+        2,
+        StringSplitOptions.None);
+
+    if (userInfo.Length != 2)
+    {
+        throw new InvalidOperationException(
+            "Invalid Neon PostgreSQL connection URL.");
+    }
+
+    var username = Uri.UnescapeDataString(userInfo[0]);
+    var password = Uri.UnescapeDataString(userInfo[1]);
+
+    var databaseName =
+        neonUri.AbsolutePath.TrimStart('/');
+
+    if (string.IsNullOrWhiteSpace(databaseName))
+    {
+        databaseName = "neondb";
+    }
+
+    var npgsqlConnectionString =
+        new Npgsql.NpgsqlConnectionStringBuilder
+        {
+            Host = neonUri.Host,
+            Port = neonUri.IsDefaultPort
+                ? 5432
+                : neonUri.Port,
+            Database = databaseName,
+            Username = username,
+            Password = password,
+            SslMode = Npgsql.SslMode.Require,
+            ChannelBinding = Npgsql.ChannelBinding.Require
+        };
+
+    connectionString =
+        npgsqlConnectionString.ConnectionString;
 }
 
 
