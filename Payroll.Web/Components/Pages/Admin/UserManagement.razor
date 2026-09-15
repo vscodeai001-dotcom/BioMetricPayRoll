@@ -151,6 +151,30 @@ else
                     EmployeeName = linked?.Name ?? "Unlinked",
                 });
             }
+
+            // Existing Firebase Auth users that were manually added in the
+            // Firebase Console do not automatically receive the application
+            // role/employee/owner claims. Synchronize claims for those users
+            // without touching their Firebase password. This is intentionally
+            // best-effort and does not block the User Management screen.
+            foreach (var item in userList.Where(x => !string.IsNullOrWhiteSpace(x.Email)))
+            {
+                try
+                {
+                    await FirebaseRealtime.EnsureFirebaseUserAsync(
+                        item.Email,
+                        string.Empty,
+                        item.CurrentRole,
+                        item.EmployeeId ?? 0,
+                        item.EmployeeName,
+                        existingUid: null,
+                        updatePasswordIfExisting: false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Firebase claim synchronization skipped for {Email}", item.Email);
+                }
+            }
         }
         catch (Exception ex)
         {
