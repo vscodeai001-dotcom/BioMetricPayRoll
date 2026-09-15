@@ -16,6 +16,7 @@
 @inject ILogger<UserManagement> _logger
 @inject AuditService AuditService
 @inject Payroll.Web.Services.AttendanceRefreshService AttendanceRefresh
+@inject FirebaseRealtimeService FirebaseRealtime
 
 @attribute [Authorize(Roles = "SuperAdmin")]
 
@@ -169,6 +170,7 @@ else
 
             await UserManager.AddToRoleAsync(newUser, newUserForm.InitialRole);
 
+            var linkedEmployeeId = 0;
             if (newUserForm.EmployeeId.HasValue)
             {
                 var emp = await dbContext.Employees.FindAsync(newUserForm.EmployeeId.Value);
@@ -176,9 +178,27 @@ else
                 {
                     emp.Email = newUser.Email;
                     emp.AspNetUserId = newUser.Id;
+                    linkedEmployeeId = emp.EmployeeID;
                     dbContext.Update(emp);
                     await dbContext.SaveChangesAsync();
                 }
+            }
+
+            // Provision the same account in Firebase so the native Android app
+            // can authenticate directly without Payroll.Web being online.
+            var firebaseUid = await FirebaseRealtime.EnsureFirebaseUserAsync(
+                newUser.Email ?? newUser.UserName ?? string.Empty,
+                newUserForm.Password,
+                newUserForm.InitialRole,
+                linkedEmployeeId,
+                newUser.UserName);
+
+            if (string.IsNullOrWhiteSpace(firebaseUid))
+            {
+                // Local Identity creation remains intact, but report the
+                // Firebase provisioning failure instead of silently claiming
+                // that the account is ready for standalone Android login.
+                toastService.ShowWarning("User created locally, but Firebase account provisioning failed.");
             }
 
             await AttendanceRefresh.NotifyGlobalRefreshAsync("USER_CREATED");
@@ -235,6 +255,22 @@ else
                     throw new Exception("Failed to add new role: " + string.Join(", ", addResult.Errors.Select(e => e.Description)));
                 }
             }
+
+            var linkedEmployee = await (await DbFactory.CreateDbContextAsync())
+                .Employees
+                .AsNoTracking()
+                .FirstOrDefaultAsync(e => e.AspNetUserId == user.Id);
+
+            // Role changes are mirrored to Firebase custom claims. Existing
+            // Android sessions will pick up the new claims on their next token
+            // refresh without changing the application flow.
+            await FirebaseRealtime.EnsureFirebaseUserAsync(
+                user.Email ?? user.UserName ?? string.Empty,
+                string.Empty,
+                newRoleForUser,
+                linkedEmployee?.EmployeeID ?? 0,
+                user.UserName,
+                user.Id);
 
             await AttendanceRefresh.NotifyGlobalRefreshAsync("USER_ROLE_UPDATED");
             toastService.ShowSuccess($"Role updated to {newRoleForUser}.");

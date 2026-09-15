@@ -83,6 +83,96 @@ public sealed class FirebaseRealtimeService
         }
     }
 
+    /// <summary>
+    /// Ensures an Identity user also has a Firebase Authentication account and
+    /// carries the same role/employee/owner contract used by native Android.
+    /// Password is supplied only at account creation time and is never stored.
+    /// </summary>
+    public async Task<string?> EnsureFirebaseUserAsync(
+        string email,
+        string password,
+        string role,
+        int employeeId = 0,
+        string? displayName = null,
+        string? existingUid = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(email))
+            return null;
+
+        var context = await _context.Value;
+        if (context == null)
+            return null;
+
+        try
+        {
+            var auth = FirebaseAuth.GetAuth(context.App);
+            UserRecord? user = null;
+
+            if (!string.IsNullOrWhiteSpace(existingUid))
+            {
+                try
+                {
+                    user = await auth.GetUserAsync(existingUid, cancellationToken);
+                }
+                catch (FirebaseAuthException ex) when (ex.AuthErrorCode == AuthErrorCode.UserNotFound)
+                {
+                    user = null;
+                }
+            }
+
+            if (user == null)
+            {
+                try
+                {
+                    user = await auth.GetUserByEmailAsync(email, cancellationToken);
+                }
+                catch (FirebaseAuthException ex) when (ex.AuthErrorCode == AuthErrorCode.UserNotFound)
+                {
+                    if (string.IsNullOrWhiteSpace(password))
+                    {
+                        _logger.LogWarning(
+                            "Firebase account for {Email} does not exist and no password was supplied for provisioning.",
+                            email);
+                        return null;
+                    }
+
+                    user = await auth.CreateUserAsync(
+                        new UserRecordArgs
+                        {
+                            Email = email,
+                            Password = password,
+                            EmailVerified = true,
+                            DisplayName = displayName
+                        },
+                        cancellationToken);
+                }
+            }
+
+            var claims = new Dictionary<string, object>
+            {
+                ["role"] = string.IsNullOrWhiteSpace(role) ? "Employee" : role,
+                ["employee_id"] = employeeId,
+                ["owner_uid"] = ResolveOwnerUid(user.Uid, role)
+            };
+
+            await auth.SetCustomUserClaimsAsync(
+                user.Uid,
+                claims,
+                cancellationToken);
+
+            return user.Uid;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "Unable to provision Firebase Authentication user for {Email}",
+                email);
+            return null;
+        }
+    }
+
     // ---------------------------------------------------------------------
     // Firebase SSOT owner-store primitives
     // ---------------------------------------------------------------------
