@@ -49,7 +49,32 @@ public sealed class FirebaseSuperAdminProvisioningService : BackgroundService
             user = await auth.CreateUserAsync(new UserRecordArgs { Email = email, Password = password, EmailVerified = true, DisplayName = "SuperAdmin" }, ct);
         }
         if (user != null)
-            await auth.SetCustomUserClaimsAsync(user.Uid, new Dictionary<string, object> { ["role"] = "SuperAdmin", ["owner_uid"] = _configuration["Firebase:OwnerUid"] ?? "biometricpayroll" }, ct);
+        {
+            // The canonical SuperAdmin uses one credential on Web and Android.
+            // When SUPERADMIN_PASSWORD is supplied, synchronize the Firebase
+            // password as well as the role claims. Never log the password.
+            if (!string.IsNullOrWhiteSpace(password))
+            {
+                await auth.UpdateUserAsync(
+                    new UserRecordArgs
+                    {
+                        Uid = user.Uid,
+                        Password = password,
+                        EmailVerified = true,
+                        DisplayName = "SuperAdmin"
+                    },
+                    ct);
+            }
+
+            await auth.SetCustomUserClaimsAsync(
+                user.Uid,
+                new Dictionary<string, object>
+                {
+                    ["role"] = "SuperAdmin",
+                    ["owner_uid"] = _configuration["Firebase:OwnerUid"] ?? "biometricpayroll"
+                },
+                ct);
+        }
     }
 
     private async Task EnsureLocalIdentityAsync(string email, string? password)
@@ -70,6 +95,15 @@ public sealed class FirebaseSuperAdminProvisioningService : BackgroundService
             var result = await users.CreateAsync(user, password);
             if (!result.Succeeded) throw new InvalidOperationException(string.Join("; ", result.Errors.Select(x => x.Description)));
         }
+        if (!string.IsNullOrWhiteSpace(password))
+        {
+            var resetToken = await users.GeneratePasswordResetTokenAsync(user);
+            var passwordResult = await users.ResetPasswordAsync(user, resetToken, password);
+            if (!passwordResult.Succeeded)
+                throw new InvalidOperationException(
+                    string.Join("; ", passwordResult.Errors.Select(x => x.Description)));
+        }
+
         if (!await users.IsInRoleAsync(user, "SuperAdmin"))
         {
             var result = await users.AddToRoleAsync(user, "SuperAdmin");
