@@ -264,6 +264,144 @@ public sealed class MobileEmployeeController : ControllerBase
         });
     }
 
+    [HttpPost("firebase-session")]
+    [AllowAnonymous]
+    public async Task<IActionResult> FirebaseSession([FromBody] FirebaseSessionRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.IdToken) || string.IsNullOrWhiteSpace(request.DeviceId))
+            return BadRequest(new { success = false, message = "Firebase ID token and device ID are required." });
+
+        var firebaseToken = await _firebase.VerifyIdTokenAsync(request.IdToken, checkRevoked: true, HttpContext.RequestAborted);
+        if (firebaseToken == null)
+            return Unauthorized(new { success = false, code = "FIREBASE_TOKEN_INVALID", message = "Firebase authentication could not be verified." });
+
+        var email = firebaseToken.Claims.TryGetValue("email", out var emailValue)
+            ? emailValue?.ToString()
+            : null;
+        if (string.IsNullOrWhiteSpace(email))
+            return Unauthorized(new { success = false, code = "EMAIL_MISSING", message = "Firebase account email is missing." });
+
+        var user = await _userManager.FindByEmailAsync(email);
+        if (user == null)
+            return Unauthorized(new { success = false, code = "IDENTITY_NOT_LINKED", message = "Firebase account is not linked to an application user." });
+
+        await using var db = await _dbFactory.CreateDbContextAsync(HttpContext.RequestAborted);
+        var employee = await db.Employees.AsNoTracking()
+            .FirstOrDefaultAsync(x => x.AspNetUserId == user.Id || x.Email == user.Email, HttpContext.RequestAborted);
+
+        var roles = await _userManager.GetRolesAsync(user);
+        var primaryRole = roles.FirstOrDefault() ?? "Employee";
+        var isAdmin = primaryRole.Contains("Admin", StringComparison.OrdinalIgnoreCase);
+        var isSuperAdmin = string.Equals(primaryRole, "SuperAdmin", StringComparison.OrdinalIgnoreCase);
+
+        if (employee == null && !isAdmin && !isSuperAdmin)
+            return Unauthorized(new { success = false, code = "NOT_LINKED", message = "Firebase account is not linked to an active employee." });
+
+        // Firebase custom claims are preferred, but the local application role/link
+        // remains the compatibility authority during this migration. This lets an
+        // existing Firebase Console-created employee sign in immediately after the
+        // account has been linked in User Management.
+        var claimedEmployeeId = firebaseToken.Claims.TryGetValue("employee_id", out var employeeClaim)
+            ? Convert.ToInt32(employeeClaim)
+            : 0;
+        var employeeId = employee?.EmployeeID ?? claimedEmployeeId;
+        var suppliedDeviceId = request.DeviceId.Trim();
+        var mobileDeviceId = NormalizeMobileDeviceId(suppliedDeviceId);
+        var enforceSingleDevicePolicy = !isAdmin && !isSuperAdmin;
+
+        var existing = enforceSingleDevicePolicy
+            ? await db.EmployeeDeviceLocks.FirstOrDefaultAsync(x => x.UserId == user.Id, HttpContext.RequestAborted)
+            : null;
+
+        var sameDevice = existing != null &&
+            (string.Equals(existing.DeviceId, mobileDeviceId, StringComparison.Ordinal) ||
+             string.Equals(existing.DeviceId, suppliedDeviceId, StringComparison.Ordinal));
+
+        if (enforceSingleDevicePolicy && existing != null && !sameDevice && !request.ForceReplace)
+        {
+            await _attendanceMonitor.RecordAsync(
+                "SECOND_DEVICE_ATTEMPT", user.Id, user.Email ?? email, mobileDeviceId, "Android",
+                "EXISTING_SESSION_FOUND", "SINGLE_DEVICE_POLICY",
+                new { ExistingSessionSinceUtc = existing.CreatedAtUtc }, existing.DeviceId);
+
+            return Conflict(new
+            {
+                success = false,
+                code = "EXISTING_SESSION",
+                message = "This employee is already logged in on another device.",
+                activeSinceUtc = existing.CreatedAtUtc
+            });
+        }
+
+        if (enforceSingleDevicePolicy && existing != null && !sameDevice)
+        {
+            await _attendanceMonitor.RecordAsync(
+                "FORCE_LOGOUT_REQUESTED", user.Id, user.Email ?? email, mobileDeviceId, "Android",
+                "REQUESTED", "NEW_DEVICE_REPLACE",
+                new { ForceReplace = request.ForceReplace }, existing.DeviceId);
+
+            if (employee != null)
+                await _geo.EndAllGpsSessionsAsync(employee.EmployeeID, "FORCE_LOGGED_OUT");
+
+            var stampResult = await _userManager.UpdateSecurityStampAsync(user);
+            if (!stampResult.Succeeded)
+                return StatusCode(500, new { success = false, message = "Unable to replace the existing employee session." });
+
+            var oldDeviceId = existing.DeviceId;
+            db.EmployeeDeviceLocks.Remove(existing);
+            await db.SaveChangesAsync(HttpContext.RequestAborted);
+
+            await _attendanceMonitor.RecordAsync(
+                "FORCED_SESSION_LOGOUT", user.Id, user.Email ?? email, oldDeviceId, "Android",
+                "TERMINATED", "REPLACED_BY_NEW_DEVICE",
+                new { NewDeviceId = mobileDeviceId }, oldDeviceId);
+            existing = null;
+        }
+
+        if (enforceSingleDevicePolicy)
+        {
+            if (existing == null)
+            {
+                db.EmployeeDeviceLocks.Add(new EmployeeDeviceLock
+                {
+                    Id = Guid.NewGuid(),
+                    UserId = user.Id,
+                    DeviceId = mobileDeviceId,
+                    CreatedAtUtc = DateTime.UtcNow,
+                    LastSeenAtUtc = DateTime.UtcNow
+                });
+            }
+            else
+            {
+                existing.LastSeenAtUtc = DateTime.UtcNow;
+            }
+            await db.SaveChangesAsync(HttpContext.RequestAborted);
+        }
+
+        var token = _tokens.Create(user.Id, employeeId, mobileDeviceId, primaryRole);
+        var ownerUid = _firebase.ResolveOwnerUid(firebaseToken.Uid, primaryRole);
+
+        await _attendanceMonitor.RecordAsync(
+            "LOGIN_SUCCESS", user.Id, user.Email ?? email, mobileDeviceId, "Android", "SUCCESS",
+            request.ForceReplace ? "NEW_DEVICE_AFTER_FORCE_REPLACE" : "FIREBASE_SESSION_STARTED",
+            new { EmployeeId = employeeId, Role = primaryRole, FirebaseUid = firebaseToken.Uid });
+
+        return Ok(new MobileLoginResponse
+        {
+            Success = true,
+            Token = token,
+            FirebaseOwnerUid = ownerUid,
+            EmployeeId = employeeId,
+            Name = employee?.Name ?? user.UserName ?? "Employee",
+            Email = employee?.Email ?? user.Email ?? email,
+            Role = primaryRole,
+            Message = "Firebase login successful",
+            MonthlySalary = employee?.MonthlySalary ?? 0,
+            PaidLeaveBalance = employee?.PaidLeaveBalance ?? 0,
+            SickLeaveBalance = employee?.SickLeaveBalance ?? 0
+        });
+    }
+
     [HttpGet("me")]
     [Authorize(AuthenticationSchemes = "MobileBearer")]
     public async Task<IActionResult> Me()
@@ -781,6 +919,13 @@ public sealed class MobileEmployeeController : ControllerBase
     private int GetEmployeeId()
     {
         return int.TryParse(User.FindFirstValue("employee_id"), out var id) ? id : 0;
+    }
+
+    public sealed class FirebaseSessionRequest
+    {
+        public string IdToken { get; set; } = string.Empty;
+        public string DeviceId { get; set; } = string.Empty;
+        public bool ForceReplace { get; set; }
     }
 
     public sealed class MobileLoginRequest

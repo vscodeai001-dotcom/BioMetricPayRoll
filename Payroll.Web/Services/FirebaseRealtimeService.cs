@@ -51,6 +51,33 @@ public sealed class FirebaseRealtimeService
         return actorUid;
     }
 
+    public async Task<FirebaseToken?> VerifyIdTokenAsync(
+        string idToken,
+        bool checkRevoked = false,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(idToken))
+            return null;
+
+        var context = await _context.Value;
+        if (context == null)
+            return null;
+
+        try
+        {
+            // Firebase Admin SDK validates signature, issuer, audience and expiry.
+            // This is used only as the authentication bridge for the existing
+            // Employee mobile session; payroll business rules remain unchanged.
+            return await FirebaseAuth.GetAuth(context.App)
+                .VerifyIdTokenAsync(idToken, checkRevoked);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Firebase ID token verification failed for mobile authentication.");
+            return null;
+        }
+    }
+
     public async Task<string?> CreateCustomTokenAsync(
         string uid,
         int employeeId,
