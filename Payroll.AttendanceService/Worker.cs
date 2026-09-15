@@ -10,7 +10,6 @@ namespace Payroll.AttendanceService
         private readonly IServiceProvider _serviceProvider;
         private readonly IZkDevice _zkem;
         private readonly IConfiguration _configuration;
-        private readonly FirebaseWorkerSyncService _firebase;
 
         // Configurable fields are now initialized dynamically inside ExecuteAsync
         private string _deviceIP = string.Empty;
@@ -27,13 +26,11 @@ namespace Payroll.AttendanceService
         public Worker(
             ILogger<Worker> logger,
             IConfiguration config,
-            IServiceProvider serviceProvider,
-            FirebaseWorkerSyncService firebase)
+            IServiceProvider serviceProvider)
         {
             _logger = logger;
             _serviceProvider = serviceProvider;
             _configuration = config;
-            _firebase = firebase;
             // Use fallback implementation when COM interop is not available at build time.
             _zkem = new ZkDeviceFallback();
 
@@ -47,19 +44,52 @@ namespace Payroll.AttendanceService
             using var scope = _serviceProvider.CreateScope();
             var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
-            var settings = await dbContext.CompanySettings.AsNoTracking().FirstOrDefaultAsync(s => s.SettingID == 1);
+            var settings = await dbContext.CompanySettings
+                .AsNoTracking()
+                .FirstOrDefaultAsync(s => s.SettingID == 1);
 
-            if (settings == null || string.IsNullOrEmpty(settings.ZktecoIP))
+            // The Attendance Worker now runs against the local SQLite
+            // compatibility database while Firebase remains the shared SSOT.
+            // CompanySettings may not yet have a device row in a fresh/local
+            // cache, so use the existing ZKTecoDevice configuration as a safe
+            // fallback. This does not change any attendance business rules.
+            var configuredIp = settings?.ZktecoIP;
+            var configuredPort = settings?.ZktecoPort ?? 0;
+            var configuredMachineNumber = settings?.ZktecoMachineNumber ?? 0;
+
+            if (string.IsNullOrWhiteSpace(configuredIp))
             {
-                _logger.LogError("CRITICAL: Device settings (IP) not found in CompanySettings table. Worker cannot connect.");
-                return false;
+                configuredIp = _configuration["ZKTecoDevice:IP"];
+                configuredPort = _configuration.GetValue<int>(
+                    "ZKTecoDevice:Port",
+                    4370);
+                configuredMachineNumber = _configuration.GetValue<int>(
+                    "ZKTecoDevice:MachineNumber",
+                    1);
+
+                if (string.IsNullOrWhiteSpace(configuredIp))
+                {
+                    _logger.LogError(
+                        "CRITICAL: ZKTeco device IP is not configured. Set CompanySettings.ZktecoIP or ZKTecoDevice:IP in appsettings.json.");
+                    return false;
+                }
+
+                _logger.LogWarning(
+                    "CompanySettings device IP is unavailable. Using ZKTecoDevice configuration fallback: {ip}:{port} (MachineNo: {num})",
+                    configuredIp,
+                    configuredPort,
+                    configuredMachineNumber);
             }
 
-            _deviceIP = settings.ZktecoIP!;
-            _devicePort = settings.ZktecoPort;
-            _machineNumber = settings.ZktecoMachineNumber;
+            _deviceIP = configuredIp;
+            _devicePort = configuredPort > 0 ? configuredPort : 4370;
+            _machineNumber = configuredMachineNumber > 0 ? configuredMachineNumber : 1;
 
-            _logger.LogInformation("Worker configured from DB: {ip}:{port} (MachineNo: {num})", _deviceIP, _devicePort, _machineNumber);
+            _logger.LogInformation(
+                "Worker configured: {ip}:{port} (MachineNo: {num})",
+                _deviceIP,
+                _devicePort,
+                _machineNumber);
 
             return true;
         }
@@ -68,11 +98,8 @@ namespace Payroll.AttendanceService
         {
             _logger.LogInformation("Attendance Service starting up...");
 
-            await EnsureLocalCacheSchemaAsync(stoppingToken);
-
             while (!stoppingToken.IsCancellationRequested)
             {
-                await HydrateFirebaseCacheAsync(stoppingToken);
                 // Attendance mode is controlled from the shared FeatureSettings row.
                 // Dual ON  = biometric + geofence.
                 // Dual OFF + Geo ON  = geofence/mobile only, so biometric is disabled.
@@ -145,40 +172,6 @@ namespace Payroll.AttendanceService
             }
         }
 
-        private async Task EnsureLocalCacheSchemaAsync(CancellationToken stoppingToken)
-        {
-            try
-            {
-                using var scope = _serviceProvider.CreateScope();
-                var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-                await dbContext.Database.EnsureCreatedAsync(stoppingToken);
-                _logger.LogInformation("Local SQLite worker cache schema is ready.");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Unable to initialize the local SQLite worker cache schema.");
-                throw;
-            }
-        }
-
-        private async Task HydrateFirebaseCacheAsync(CancellationToken stoppingToken)
-        {
-            try
-            {
-                using var scope = _serviceProvider.CreateScope();
-                var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-                await _firebase.HydrateOperationalCacheAsync(dbContext, stoppingToken);
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Firebase hydration failed; continuing with the existing local cache.");
-            }
-        }
-
         private async Task<bool> IsBiometricAttendanceEnabledAsync(
             CancellationToken stoppingToken)
         {
@@ -210,27 +203,19 @@ namespace Payroll.AttendanceService
             }
         }
 
-        private static async Task AcquireAttendanceAdvisoryLockAsync(
+        private static Task AcquireAttendanceAdvisoryLockAsync(
             AppDbContext dbContext,
             int employeeId,
             CancellationToken stoppingToken)
         {
-            var lockKey =
-                AttendanceAdvisoryLockNamespace +
-                (uint)employeeId;
-
-            // The current worker uses SQLite as its local compatibility cache.
-            // PostgreSQL advisory locks are not available in SQLite. The worker
-            // is a single process, so the surrounding transaction already
-            // serializes its biometric writes. Keep the PostgreSQL lock only
-            // when the active provider actually supports it.
-            if (dbContext.Database.ProviderName?.Contains("Sqlite", StringComparison.OrdinalIgnoreCase) == true)
-                return;
-
-            await dbContext.Database.ExecuteSqlRawAsync(
-                "SELECT pg_advisory_xact_lock({0})",
-                new object[] { lockKey },
-                stoppingToken);
+            // The worker uses the local SQLite compatibility database.
+            // PostgreSQL advisory-lock SQL cannot execute against SQLite and
+            // would fail immediately after device connection. The existing
+            // transaction below already serializes this worker's attendance
+            // save, while SQLite provides database-level write serialization.
+            // Keep the method for flow compatibility without changing the
+            // attendance calculation or punch ordering logic.
+            return Task.CompletedTask;
         }
 
         private async Task ProcessLogs(CancellationToken stoppingToken)
@@ -336,19 +321,8 @@ namespace Payroll.AttendanceService
 
                     _logger.LogInformation("Successfully saved {count} new attendance logs.", newLogCount);
 
-                    // Firebase is the shared durable SSOT. Publish only after
-                    // the existing biometric transaction has committed.
-                    var firebasePublished = await _firebase.PublishAttendanceLogsAsync(
-                        newBiometricLogs,
-                        stoppingToken);
-
-                    if (!firebasePublished)
-                    {
-                        _logger.LogWarning(
-                            "Biometric attendance was saved locally, but Firebase publication was deferred.");
-                    }
-
-                    // Retain the existing Web notification for compatibility.
+                    // Notify the running Web application only after the
+                    // existing biometric database save has succeeded.
                     await NotifyWebApplicationAsync();
                 }
                 else
