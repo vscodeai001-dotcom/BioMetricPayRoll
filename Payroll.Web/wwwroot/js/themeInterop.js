@@ -2688,6 +2688,25 @@ window.destroyGeoMap =
         delete window.payrollGeoMaps[mapId];
     };
 
+
+// ============================================================
+// API-KEY-FREE MAP TILE PRESENTATION
+// ============================================================
+
+window.ensurePayrollDarkOsmTiles = function () {
+    if (document.getElementById('payroll-dark-osm-tile-style')) return;
+
+    const style = document.createElement('style');
+    style.id = 'payroll-dark-osm-tile-style';
+    style.textContent =
+        '.leaflet-tile-pane .payroll-dark-osm-tiles {' +
+        'filter: invert(0.88) hue-rotate(180deg) brightness(0.72) contrast(1.05) saturate(0.72);' +
+        '}';
+    document.head.appendChild(style);
+};
+
+window.ensurePayrollDarkOsmTiles();
+
 // ============================================================
 // ADMIN LIVE STAFF MAP
 // ============================================================
@@ -3179,7 +3198,7 @@ window.updateAdminLiveStaffMap =
                         }
                     );
 
-                L.tileLayer(
+                const standardTileLayer = L.tileLayer(
                     'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
                     {
                         maxZoom: 19,
@@ -3187,6 +3206,26 @@ window.updateAdminLiveStaffMap =
                             '© OpenStreetMap contributors'
                     }
                 ).addTo(map);
+
+                // Dark mode uses the same OpenStreetMap data with a local CSS
+                // presentation layer. This removes the CARTO API-key dependency.
+                const darkTileLayer = L.tileLayer(
+                    'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+                    {
+                        maxZoom: 19,
+                        className: 'payroll-dark-osm-tiles',
+                        attribution:
+                            '© OpenStreetMap contributors'
+                    }
+                );
+
+                const satelliteTileLayer = L.tileLayer(
+                    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+                    {
+                        maxZoom: 19,
+                        attribution: 'Tiles © Esri'
+                    }
+                );
 
                 // CRITICAL: Set initial view to prevent "Set map center and zoom first" errors
                 // when subsequent operations (like collision offset calc) are called before fitBounds.
@@ -3227,6 +3266,13 @@ window.updateAdminLiveStaffMap =
                     map: map,
                     officeMarker:
                         officeMarker,
+                    baseLayers: {
+                        standard: standardTileLayer,
+                        dark: darkTileLayer,
+                        satellite: satelliteTileLayer
+                    },
+                    baseLayer: 'standard',
+                    userSelectedLayer: false,
                     circle: null,
                     markers: {},
                     lines: {},
@@ -4006,18 +4052,23 @@ window.enhanceAdminLiveMap = function (mapId, office, staff, selectedId) {
 
         // Base layers are created once and selected without replacing the map.
         if (!state.baseLayers) {
-            const dark = L.tileLayer(
-                'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-                { maxZoom: 20, attribution: '© OpenStreetMap © CARTO' }
-            );
-            const satellite = L.tileLayer(
-                'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-                { maxZoom: 19, attribution: 'Tiles © Esri' }
-            );
             state.baseLayers = {
-                standard: null,
-                dark: dark,
-                satellite: satellite
+                standard: L.tileLayer(
+                    'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+                    { maxZoom: 19, attribution: '© OpenStreetMap contributors' }
+                ),
+                dark: L.tileLayer(
+                    'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+                    {
+                        maxZoom: 19,
+                        className: 'payroll-dark-osm-tiles',
+                        attribution: '© OpenStreetMap contributors'
+                    }
+                ),
+                satellite: L.tileLayer(
+                    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+                    { maxZoom: 19, attribution: 'Tiles © Esri' }
+                )
             };
         }
 
@@ -4196,7 +4247,14 @@ window.enhanceEmployeeGeoMap = function (mapId) {
                     } else if (action === 'layer') {
                         state.baseLayer = state.baseLayer === 'standard' ? 'dark' : state.baseLayer === 'dark' ? 'satellite' : 'standard';
                         if (!state.baseLayers) state.baseLayers = {};
-                        if (!state.baseLayers.dark) state.baseLayers.dark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {maxZoom:20, attribution:'© OpenStreetMap © CARTO'});
+                        if (!state.baseLayers.dark) state.baseLayers.dark = L.tileLayer(
+                            'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+                            {
+                                maxZoom: 19,
+                                className: 'payroll-dark-osm-tiles',
+                                attribution: '© OpenStreetMap contributors'
+                            }
+                        );
                         if (!state.baseLayers.satellite) state.baseLayers.satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {maxZoom:19, attribution:'Tiles © Esri'});
                         Object.keys(state.baseLayers).forEach(function(k){ const l=state.baseLayers[k]; if(!l)return; if(k===state.baseLayer)l.addTo(map); else if(map.hasLayer(l))map.removeLayer(l); });
                     } else if (action === 'fullscreen') {
