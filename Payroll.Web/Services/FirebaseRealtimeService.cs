@@ -1,7 +1,6 @@
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
-using System.Net.Http.Headers;
 using FirebaseAdmin;
 using FirebaseAdmin.Auth;
 using Microsoft.EntityFrameworkCore;
@@ -323,13 +322,7 @@ public sealed class FirebaseRealtimeService
                 continue;
             }
 
-            var row = new Dictionary<string, object?>(StringComparer.Ordinal);
-            foreach (var property in entry.Properties)
-            {
-                if (property.Metadata.IsShadowProperty())
-                    continue;
-                row[property.Metadata.Name] = NormalizeFirebaseValue(property.CurrentValue);
-            }
+            var row = BuildFirebaseRow(entry, entityName, key);
             row["_entity"] = entityName;
             row["_key"] = key;
             row["_updatedUtc"] = DateTime.UtcNow.ToString("O");
@@ -406,8 +399,9 @@ public sealed class FirebaseRealtimeService
                     if (keyParts.Count != keyColumns.Length)
                         continue;
                     var key = string.Join("|", keyParts);
-                    var row = JsonElementToObject(doc.RootElement) as Dictionary<string, object?>
-                              ?? new Dictionary<string, object?>();
+                    var rawRow = JsonElementToObject(doc.RootElement) as Dictionary<string, object?>
+                                 ?? new Dictionary<string, object?>();
+                    var row = MapDatabaseRowToFirebase(entityName, rawRow);
                     row["_entity"] = entityName;
                     row["_key"] = key;
                     row["_syncedUtc"] = DateTime.UtcNow.ToString("O");
@@ -488,6 +482,280 @@ public sealed class FirebaseRealtimeService
     private static string EscapeFirebaseKey(string value)
         => value.Replace(".", "%2E").Replace("#", "%23").Replace("$", "%24")
             .Replace("[", "%5B").Replace("]", "%5D").Replace("/", "%2F");
+
+    private static Dictionary<string, object?> BuildFirebaseRow(
+        EntityEntry entry,
+        string entityName,
+        string key)
+    {
+        var row = new Dictionary<string, object?>(StringComparer.Ordinal);
+
+        object? Raw(params string[] names)
+        {
+            foreach (var name in names)
+            {
+                var property = entry.Metadata.FindProperty(name);
+                if (property != null)
+                    return entry.Property(property.Name).CurrentValue;
+            }
+            return null;
+        }
+
+        object? Value(params string[] names) => NormalizeFirebaseValue(Raw(names));
+
+        string? StringValue(params string[] names)
+            => Raw(names)?.ToString();
+
+        void Put(string name, object? value)
+        {
+            if (value != null) row[name] = value;
+        }
+
+        // Canonical Firebase contract matches the existing Android entity names.
+        // Extra server-only fields are intentionally omitted from these module
+        // contracts; Neon schema and business rules remain unchanged.
+        switch (entityName)
+        {
+            case "Employee":
+                Put("employeeId", StringValue("EmployeeID"));
+                Put("name", Value("Name"));
+                Put("dob", ToUnixMilliseconds(Value("DOB")));
+                Put("role", Value("Role"));
+                Put("salaryRate", Value("MonthlySalary"));
+                Put("salaryType", Value("PayrollTypeOverride"));
+                Put("salaryCalculationMethod", Value("SalaryCalculationMethod"));
+                Put("biometricId", Value("BiometricID"));
+                Put("shiftStart", Value("ShiftStartTime"));
+                Put("shiftEnd", Value("ShiftEndTime"));
+                Put("breakHours", ToDoubleHours(Value("StandardBreakMinutes")));
+                Put("hireDate", ToUnixMilliseconds(Value("HireDate")));
+                Put("terminateDate", ToUnixMilliseconds(Value("TerminationDate")));
+                Put("compOffDayOfWeek", Value("CompOffDayOfWeek"));
+                Put("email", Value("Email"));
+                Put("enablePf", Value("EnablePF"));
+                Put("enableEsi", Value("EnableESI"));
+                Put("uanNumber", Value("UAN"));
+                Put("esiNumber", Value("ESINumber"));
+                Put("nightShiftAllowance", Value("NightShiftAllowance"));
+                Put("tdsRatePercent", Value("TdsRatePercent"));
+                Put("bankAccountNumber", Value("BankAccountNumber"));
+                Put("bankIfscCode", Value("BankIfscCode"));
+                Put("bankName", Value("BankName"));
+                Put("enableShiftRotation", Value("EnableShiftRotation"));
+                Put("rotationGroup", Value("RotationGroup"));
+                Put("shiftRotationPattern", Value("ShiftRotationPattern"));
+                Put("isActive", Value("IsDeleted") is bool deleted ? !deleted : true);
+                break;
+
+            case "AttendanceLog":
+                Put("attendanceId", StringValue("LogID"));
+                Put("employeeId", StringValue("EmployeeID"));
+                Put("biometricId", Value("BiometricID"));
+                Put("checkInTime", ToUnixMilliseconds(Raw("PunchTime")));
+                Put("createdAt", ToUnixMilliseconds(Raw("PunchTime")));
+                Put("note", Value("LogType"));
+                Put("synced", true);
+                break;
+
+            case "SalaryAdvance":
+                Put("advanceId", StringValue("AdvanceID"));
+                Put("employeeId", StringValue("EmployeeID"));
+                Put("amount", Value("Amount"));
+                Put("date", ToUnixMilliseconds(Value("AdvanceDate")));
+                Put("recoveryPaymentId", Value("PayrollID_Paid"));
+                Put("isRecovered", Value("PayrollID_Paid") != null);
+                break;
+
+            case "LeaveRequest":
+                Put("id", StringValue("LeaveRequestID"));
+                Put("staffId", StringValue("EmployeeID"));
+                Put("leaveType", Value("LeaveType"));
+                Put("startDate", ToUnixMilliseconds(Value("LeaveDate")));
+                Put("endDate", ToUnixMilliseconds(Value("EndDate")));
+                Put("reason", Value("Notes"));
+                Put("status", Value("IsApproved") is bool approved ? (approved ? "Approved" : "Rejected") : "Pending");
+                Put("adminNotes", Value("Notes"));
+                Put("isHalfDay", Value("IsHalfDay"));
+                Put("createdAt", ToUnixMilliseconds(Raw("LeaveDate")));
+                break;
+
+            case "AttendanceRegularization":
+                Put("id", StringValue("RegularizationId"));
+                Put("staffId", StringValue("EmployeeId"));
+                Put("date", Value("DateOfPunch"));
+                Put("punchType", Value("IsInPunch") is bool inPunch ? (inPunch ? "IN" : "OUT") : "IN");
+                Put("requestedTime", ToUnixMilliseconds(Raw("PunchTimeNew"), Raw("DateOfPunch")));
+                Put("reason", Value("Reason"));
+                Put("status", Value("Status"));
+                Put("adminRemarks", Value("AdminRemarks"));
+                Put("submittedAt", ToUnixMilliseconds(Raw("SubmissionDate")));
+                break;
+
+            case "ResignationRequest":
+                Put("requestId", StringValue("RequestId"));
+                Put("employeeId", StringValue("EmployeeId"));
+                Put("submissionDate", ToUnixMilliseconds(Raw("SubmissionDate")));
+                Put("desiredLastWorkingDay", ToUnixMilliseconds(Raw("DesiredLastWorkingDay")));
+                Put("reason", Value("Reason"));
+                Put("status", Value("Status"));
+                Put("approvedLastWorkingDay", ToUnixMilliseconds(Raw("ApprovedLastWorkingDay")));
+                Put("adminRemarks", Value("AdminRemarks"));
+                Put("isSettled", Value("IsSettled"));
+                break;
+
+            case "ShiftSchedule":
+                Put("scheduleId", Value("ScheduleID"));
+                Put("employeeId", StringValue("EmployeeID"));
+                Put("shiftDate", Value("ShiftDate"));
+                Put("startTime", Value("StartTime"));
+                Put("endTime", Value("EndTime"));
+                Put("isRecurringPattern", Value("IsRecurringPattern"));
+                Put("patternDurationDays", Value("PatternDurationDays"));
+                Put("appliesToDayOfWeek", Value("AppliesToDayOfWeek"));
+                break;
+
+            case "CompanyHoliday":
+                Put("id", StringValue("HolidayID"));
+                Put("shopId", "");
+                Put("date", ToUnixMilliseconds(Raw("HolidayDate")));
+                Put("paySalary", true);
+                Put("reason", Value("HolidayName"));
+                Put("affectedEmployeeIds", Array.Empty<string>());
+                break;
+
+            default:
+                foreach (var property in entry.Properties)
+                {
+                    if (property.Metadata.IsShadowProperty()) continue;
+                    var name = ToFirebasePropertyName(property.Metadata.Name);
+                    row[name] = NormalizeFirebaseValue(property.CurrentValue);
+                }
+                break;
+        }
+
+        return row;
+    }
+
+    private static Dictionary<string, object?> MapDatabaseRowToFirebase(
+        string entityName,
+        Dictionary<string, object?> raw)
+    {
+        var row = new Dictionary<string, object?>(StringComparer.Ordinal);
+        object? Get(params string[] names)
+        {
+            foreach (var name in names)
+                if (raw.TryGetValue(name, out var value)) return value;
+            return null;
+        }
+        void Put(string name, object? value) { if (value != null) row[name] = value; }
+
+        switch (entityName)
+        {
+            case "Employee":
+                Put("employeeId", Get("employeeid")); Put("name", Get("name"));
+                Put("dob", ToUnixMilliseconds(Get("dob"))); Put("role", Get("role"));
+                Put("salaryRate", Get("monthlysalary")); Put("salaryType", Get("payroll_type_override"));
+                Put("salaryCalculationMethod", Get("salarycalculationmethod")); Put("biometricId", Get("biometricid"));
+                Put("shiftStart", Get("shiftstarttime")); Put("shiftEnd", Get("shiftendtime"));
+                Put("breakHours", ToDoubleHours(Get("standardbreakminutes")));
+                Put("hireDate", ToUnixMilliseconds(Get("hiredate"))); Put("terminateDate", ToUnixMilliseconds(Get("terminationdate")));
+                Put("compOffDayOfWeek", Get("comp_off_day")); Put("email", Get("email"));
+                Put("enablePf", Get("enable_pf")); Put("enableEsi", Get("enable_esi"));
+                Put("uanNumber", Get("uan_number")); Put("esiNumber", Get("esi_number"));
+                Put("nightShiftAllowance", Get("nightshiftallowance")); Put("tdsRatePercent", Get("tds_rate_percent"));
+                Put("bankAccountNumber", Get("bank_account_number")); Put("bankIfscCode", Get("bank_ifsc_code"));
+                Put("bankName", Get("bank_name")); Put("enableShiftRotation", Get("enable_shift_rotation"));
+                Put("rotationGroup", Get("rotation_group")); Put("shiftRotationPattern", Get("shift_rotation_pattern"));
+                Put("isActive", Get("is_deleted") is bool deleted ? !deleted : true);
+                break;
+            case "AttendanceLog":
+                Put("attendanceId", Get("logid")); Put("employeeId", Get("employeeid"));
+                Put("biometricId", Get("biometricid")); Put("checkInTime", ToUnixMilliseconds(Get("punchtime")));
+                Put("createdAt", ToUnixMilliseconds(Get("punchtime"))); Put("note", Get("logtype")); Put("synced", true);
+                break;
+            case "SalaryAdvance":
+                Put("advanceId", Get("advanceid")); Put("employeeId", Get("employeeid"));
+                Put("amount", Get("amount")); Put("date", ToUnixMilliseconds(Get("advancedate")));
+                Put("recoveryPaymentId", Get("payrollid_paid")); Put("isRecovered", Get("payrollid_paid") != null); break;
+            case "LeaveRequest":
+                Put("id", Get("leaverequestid")); Put("staffId", Get("employeeid")); Put("leaveType", Get("leavetype"));
+                Put("startDate", ToUnixMilliseconds(Get("leavedate"))); Put("endDate", ToUnixMilliseconds(Get("leavedate")));
+                Put("reason", Get("notes")); Put("status", Get("isapproved") is bool a ? (a ? "Approved" : "Rejected") : "Pending");
+                Put("adminNotes", Get("notes")); Put("isHalfDay", Get("is_half_day")); Put("createdAt", ToUnixMilliseconds(Get("leavedate"))); break;
+            case "AttendanceRegularization":
+                Put("id", Get("regularization_id")); Put("staffId", Get("employee_id")); Put("date", Get("date_of_punch"));
+                Put("punchType", Get("is_in_punch") is bool i ? (i ? "IN" : "OUT") : "IN");
+                Put("requestedTime", ToUnixMilliseconds(Get("punch_time_new"), Get("date_of_punch"))); Put("reason", Get("reason")); Put("status", Get("status"));
+                Put("adminRemarks", Get("admin_remarks")); Put("submittedAt", ToUnixMilliseconds(Get("submission_date"))); break;
+            case "ResignationRequest":
+                Put("requestId", Get("request_id")); Put("employeeId", Get("employee_id")); Put("submissionDate", ToUnixMilliseconds(Get("submission_date")));
+                Put("desiredLastWorkingDay", ToUnixMilliseconds(Get("desired_last_working_day"))); Put("reason", Get("reason"));
+                Put("status", Get("status")); Put("approvedLastWorkingDay", ToUnixMilliseconds(Get("approved_last_working_day")));
+                Put("adminRemarks", Get("admin_remarks")); Put("isSettled", Get("is_settled")); break;
+            case "ShiftSchedule":
+                Put("scheduleId", Get("scheduleid")); Put("employeeId", Get("employeeid")); Put("shiftDate", Get("shiftdate"));
+                Put("startTime", Get("starttime")); Put("endTime", Get("endtime")); Put("isRecurringPattern", Get("is_recurring_pattern"));
+                Put("patternDurationDays", Get("pattern_duration_days")); Put("appliesToDayOfWeek", Get("applies_to_day_of_week")); break;
+            case "CompanyHoliday":
+                Put("id", Get("holidayid")); Put("shopId", ""); Put("date", ToUnixMilliseconds(Get("holidaydate")));
+                Put("paySalary", true); Put("reason", Get("holidayname")); Put("affectedEmployeeIds", Array.Empty<string>()); break;
+            default:
+                foreach (var kv in raw) row[ToFirebasePropertyName(kv.Key)] = NormalizeFirebaseValue(kv.Value);
+                break;
+        }
+        return row;
+    }
+
+    private static string ToFirebasePropertyName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return name;
+        var normalized = name.Replace("_", " ");
+        var words = normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (words.Length > 1)
+            normalized = words[0] + string.Concat(words.Skip(1).Select(x => char.ToUpperInvariant(x[0]) + x[1..].ToLowerInvariant()));
+        else
+            normalized = char.ToLowerInvariant(normalized[0]) + normalized[1..];
+        normalized = normalized.Replace("Id", "Id", StringComparison.Ordinal);
+        return normalized;
+    }
+
+    private static object? ToUnixMilliseconds(object? value, object? secondary = null)
+    {
+        if (value == null) return null;
+        if (value is DateTime dt) return new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc)).ToUnixTimeMilliseconds();
+        if (value is DateTimeOffset dto) return dto.ToUnixTimeMilliseconds();
+        if (value is DateOnly d) return new DateTimeOffset(d.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc)).ToUnixTimeMilliseconds();
+        if (value is TimeOnly t)
+        {
+            if (secondary is DateOnly date) return new DateTimeOffset(date.ToDateTime(t, DateTimeKind.Utc)).ToUnixTimeMilliseconds();
+            return t.ToTimeSpan().TotalMilliseconds;
+        }
+        if (value is string s)
+        {
+            if (long.TryParse(s, out var l)) return l;
+            if (DateTimeOffset.TryParse(s, out var parsed)) return parsed.ToUnixTimeMilliseconds();
+            if (DateOnly.TryParse(s, out var date))
+            {
+                if (secondary is TimeOnly time)
+                    return new DateTimeOffset(date.ToDateTime(time, DateTimeKind.Utc)).ToUnixTimeMilliseconds();
+                if (secondary is string secondaryText && TimeOnly.TryParse(secondaryText, out var secondaryTime))
+                    return new DateTimeOffset(date.ToDateTime(secondaryTime, DateTimeKind.Utc)).ToUnixTimeMilliseconds();
+                return new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc)).ToUnixTimeMilliseconds();
+            }
+            if (secondary is DateOnly secondaryDate && TimeOnly.TryParse(s, out var parsedTime))
+                return new DateTimeOffset(secondaryDate.ToDateTime(parsedTime, DateTimeKind.Utc)).ToUnixTimeMilliseconds();
+            if (secondary is string secondaryDateText && DateOnly.TryParse(secondaryDateText, out var parsedDate) && TimeOnly.TryParse(s, out var parsedTime2))
+                return new DateTimeOffset(parsedDate.ToDateTime(parsedTime2, DateTimeKind.Utc)).ToUnixTimeMilliseconds();
+        }
+        return value;
+    }
+
+    private static object? ToDoubleHours(object? minutes)
+    {
+        if (minutes is null) return null;
+        if (double.TryParse(minutes.ToString(), out var m)) return m / 60.0;
+        return null;
+    }
 
     private static object? NormalizeFirebaseValue(object? value)
     {
