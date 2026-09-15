@@ -206,10 +206,13 @@ var connectionString =
     builder.Configuration.GetConnectionString(
         "DefaultConnection");
 
+// Production credentials must come from the platform environment, never
+// from source-controlled appsettings.json. Keep the existing connection
+// design unchanged while allowing Render/local deployment to provide the
+// complete Neon connection string securely.
 if (string.IsNullOrWhiteSpace(connectionString))
 {
-    connectionString =
-        Environment.GetEnvironmentVariable("DATABASE_URL")
+    connectionString = Environment.GetEnvironmentVariable("DATABASE_URL")
         ?? Environment.GetEnvironmentVariable("NEON_CONNECTION_STRING");
 }
 
@@ -217,60 +220,6 @@ if (string.IsNullOrWhiteSpace(connectionString))
 {
     throw new InvalidOperationException(
         "DefaultConnection is not configured. Set DATABASE_URL or NEON_CONNECTION_STRING.");
-}
-
-// Neon provides DATABASE_URL in PostgreSQL URI format:
-// postgresql://username:password@host/database?sslmode=require&channel_binding=require
-//
-// Npgsql expects a key/value connection string. Convert the URI here while
-// keeping DATABASE_URL itself outside source control.
-if (connectionString.StartsWith(
-        "postgresql://",
-        StringComparison.OrdinalIgnoreCase) ||
-    connectionString.StartsWith(
-        "postgres://",
-        StringComparison.OrdinalIgnoreCase))
-{
-    var neonUri = new Uri(connectionString);
-
-    var userInfo = neonUri.UserInfo.Split(
-        ':',
-        2,
-        StringSplitOptions.None);
-
-    if (userInfo.Length != 2)
-    {
-        throw new InvalidOperationException(
-            "Invalid Neon PostgreSQL connection URL.");
-    }
-
-    var username = Uri.UnescapeDataString(userInfo[0]);
-    var password = Uri.UnescapeDataString(userInfo[1]);
-
-    var databaseName =
-        neonUri.AbsolutePath.TrimStart('/');
-
-    if (string.IsNullOrWhiteSpace(databaseName))
-    {
-        databaseName = "neondb";
-    }
-
-    var npgsqlConnectionString =
-        new Npgsql.NpgsqlConnectionStringBuilder
-        {
-            Host = neonUri.Host,
-            Port = neonUri.IsDefaultPort
-                ? 5432
-                : neonUri.Port,
-            Database = databaseName,
-            Username = username,
-            Password = password,
-            SslMode = Npgsql.SslMode.Require,
-            ChannelBinding = Npgsql.ChannelBinding.Require
-        };
-
-    connectionString =
-        npgsqlConnectionString.ConnectionString;
 }
 
 
@@ -936,52 +885,76 @@ app.MapHub<AttendanceRefreshHub>(
 // ============================================================
 // DATABASE MIGRATION
 // ============================================================
+//
+// Firebase is the realtime SSOT migration path. Automatic EF/Neon
+// migrations are disabled by default so application startup never
+// consumes Neon transfer just to check/apply the schema.
+//
+// IMPORTANT:
+// Existing EF/Identity business services are intentionally retained
+// until their individual modules are migrated to Firebase. This keeps
+// the current Web application flow, layout, business rules and
+// calculations intact.
+//
+// To temporarily run the legacy EF migration on a controlled/local
+// database, set:
+//     Database:AutoMigrate=true
+//
+// Production/Firebase-first deployments should leave this false.
+//
 
-try
+var autoMigrate =
+    builder.Configuration.GetValue<bool>(
+        "Database:AutoMigrate");
+
+if (autoMigrate)
 {
-    using var scope =
-        app.Services.CreateScope();
+    try
+    {
+        using var scope =
+            app.Services.CreateScope();
 
+        var db =
+            scope.ServiceProvider
+                .GetRequiredService<
+                    AppDbContext>();
 
-    var db =
-        scope.ServiceProvider
-            .GetRequiredService<
-                AppDbContext>();
+        await db.Database.MigrateAsync();
 
+        // Defensive schema repair for deployments where a feature-toggle
+        // migration was recorded but the physical column is missing.
+        await db.Database.ExecuteSqlRawAsync(@"
+            ALTER TABLE public.feature_settings
+            ADD COLUMN IF NOT EXISTS enable_dual_attendance boolean NOT NULL DEFAULT false;
 
-    await db.Database.MigrateAsync();
+            ALTER TABLE public.feature_settings
+            ADD COLUMN IF NOT EXISTS enable_automatic_geofence_punching boolean NOT NULL DEFAULT false;
+        ");
 
-    // Defensive schema repair for deployments where a feature-toggle migration
-    // was recorded in __EFMigrationsHistory but the physical column was later
-    // removed manually. This is idempotent and prevents settings pages from
-    // failing with PostgreSQL 42703 (undefined_column).
-    await db.Database.ExecuteSqlRawAsync(@"
-        ALTER TABLE public.feature_settings
-        ADD COLUMN IF NOT EXISTS enable_dual_attendance boolean NOT NULL DEFAULT false;
+        await ValidateDatabaseSchemaAsync(
+            db,
+            app.Services
+                .GetRequiredService<
+                    ILogger<Program>>());
+    }
+    catch (Exception ex)
+    {
+        var logger =
+            app.Services
+                .GetRequiredService<
+                    ILogger<Program>>();
 
-        ALTER TABLE public.feature_settings
-        ADD COLUMN IF NOT EXISTS enable_automatic_geofence_punching boolean NOT NULL DEFAULT false;
-    ");
+        logger.LogError(
+            ex,
+            "Error during optional legacy EF database migration or startup schema validation.");
 
-    await ValidateDatabaseSchemaAsync(
-        db,
-        app.Services
-            .GetRequiredService<
-                ILogger<Program>>());
+        throw;
+    }
 }
-catch (Exception ex)
+else
 {
-    var logger =
-        app.Services
-            .GetRequiredService<
-                ILogger<Program>>();
-
-
-    logger.LogError(
-        ex,
-        "Error during DB migration or startup schema validation.");
-
-    throw;
+    app.Logger.LogInformation(
+        "Automatic EF/Neon database migration is disabled. Firebase-first realtime services remain enabled.");
 }
 
 
