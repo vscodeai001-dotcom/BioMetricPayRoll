@@ -305,6 +305,33 @@ public sealed class MobileEmployeeController : ControllerBase
             ? Convert.ToInt32(employeeClaim)
             : 0;
         var employeeId = employee?.EmployeeID ?? claimedEmployeeId;
+
+        // Manual Firebase Console-created Employee accounts do not carry the
+        // application claims that Web-created accounts receive. Once Firebase
+        // has already verified the password, this is a safe provisioning point:
+        // stamp the canonical role/employee/owner claims onto that existing UID.
+        // No password is stored or changed here.
+        if (!string.IsNullOrWhiteSpace(firebaseToken.Uid))
+        {
+            var provisionedUid = await _firebase.EnsureFirebaseUserAsync(
+                email,
+                password: string.Empty,
+                role: primaryRole,
+                employeeId: employeeId,
+                displayName: employee?.Name ?? user.UserName ?? email,
+                existingUid: firebaseToken.Uid,
+                updatePasswordIfExisting: false,
+                cancellationToken: HttpContext.RequestAborted);
+
+            if (string.IsNullOrWhiteSpace(provisionedUid))
+            {
+                _logger.LogWarning(
+                    "Firebase claims provisioning was unavailable for employee {Email} ({Uid}); continuing with verified Firebase authentication and local employee role.",
+                    email,
+                    firebaseToken.Uid);
+            }
+        }
+
         var suppliedDeviceId = request.DeviceId.Trim();
         var mobileDeviceId = NormalizeMobileDeviceId(suppliedDeviceId);
         var enforceSingleDevicePolicy = !isAdmin && !isSuperAdmin;
