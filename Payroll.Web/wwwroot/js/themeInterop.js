@@ -2689,6 +2689,204 @@ window.destroyGeoMap =
     };
 
 
+
+// ============================================================
+// PREMIUM MAP UI PRESENTATION
+// ============================================================
+// The controls are created dynamically by the map runtime. Keep their styling
+// here so they remain above Leaflet panes, readable in light/dark themes,
+// and usable on narrow screens without changing the existing map flow.
+window.ensurePayrollPremiumMapStyles = function () {
+    if (document.getElementById('payroll-premium-map-styles')) return;
+
+    const style = document.createElement('style');
+    style.id = 'payroll-premium-map-styles';
+    style.textContent = `
+      .payroll-premium-map-ui,
+      .payroll-premium-employee-map-ui {
+        position:absolute;
+        z-index:1000;
+        left:14px;
+        right:14px;
+        top:14px;
+        pointer-events:none;
+        font-family:inherit;
+      }
+
+      .payroll-map-commandbar,
+      .payroll-employee-map-tools {
+        display:flex;
+        align-items:center;
+        flex-wrap:wrap;
+        gap:7px;
+        width:fit-content;
+        max-width:100%;
+        padding:7px;
+        border:1px solid rgba(255,255,255,.18);
+        border-radius:14px;
+        background:rgba(15,23,42,.88);
+        box-shadow:0 10px 28px rgba(0,0,0,.28);
+        backdrop-filter:blur(14px);
+        -webkit-backdrop-filter:blur(14px);
+        pointer-events:auto;
+      }
+
+      .payroll-map-search-wrap {
+        display:flex;
+        align-items:center;
+        min-width:190px;
+        height:36px;
+        padding:0 10px;
+        border-radius:10px;
+        background:rgba(255,255,255,.10);
+        border:1px solid rgba(255,255,255,.16);
+      }
+
+      .payroll-map-search-icon {
+        margin-right:7px;
+        color:#cbd5e1;
+        font-size:16px;
+      }
+
+      .payroll-map-search {
+        width:100%;
+        min-width:0;
+        border:0;
+        outline:0;
+        color:#f8fafc;
+        background:transparent;
+        font-size:12px;
+      }
+
+      .payroll-map-search::placeholder { color:#94a3b8; }
+
+      .payroll-map-filter {
+        height:36px;
+        border:1px solid rgba(255,255,255,.16);
+        border-radius:10px;
+        padding:0 10px;
+        color:#f8fafc;
+        background:#1e293b;
+        font-size:12px;
+        pointer-events:auto;
+      }
+
+      .payroll-map-tool,
+      .payroll-employee-map-tools button {
+        height:36px;
+        min-width:72px;
+        padding:0 11px;
+        border:1px solid rgba(148,163,184,.28);
+        border-radius:10px;
+        color:#e2e8f0;
+        background:rgba(30,41,59,.88);
+        font:600 11px/1 inherit;
+        cursor:pointer;
+        transition:transform .15s ease,background .15s ease,border-color .15s ease;
+      }
+
+      .payroll-map-tool:hover,
+      .payroll-employee-map-tools button:hover {
+        background:rgba(51,65,85,.98);
+        border-color:rgba(96,165,250,.7);
+        transform:translateY(-1px);
+      }
+
+      .payroll-map-tool.active,
+      .payroll-employee-map-tools button.active {
+        background:rgba(37,99,235,.92);
+        border-color:rgba(147,197,253,.85);
+        color:white;
+      }
+
+      .payroll-map-statusbar,
+      .payroll-employee-map-live {
+        display:flex;
+        align-items:center;
+        gap:14px;
+        width:fit-content;
+        max-width:100%;
+        margin-top:7px;
+        padding:6px 10px;
+        border-radius:10px;
+        background:rgba(15,23,42,.78);
+        color:#cbd5e1;
+        font-size:10px;
+        box-shadow:0 6px 18px rgba(0,0,0,.20);
+        pointer-events:none;
+      }
+
+      .payroll-map-statusbar i,
+      .payroll-map-live-dot {
+        display:inline-block;
+        width:7px;
+        height:7px;
+        margin-right:4px;
+        border-radius:50%;
+        background:#22c55e;
+        box-shadow:0 0 9px rgba(34,197,94,.7);
+      }
+
+      .payroll-map-status-stale i { background:#f59e0b; }
+      .payroll-map-status-out i { background:#ef4444; }
+
+      .payroll-map-fullscreen {
+        position:fixed !important;
+        inset:0 !important;
+        width:100vw !important;
+        height:100vh !important;
+        z-index:99999 !important;
+        border-radius:0 !important;
+      }
+
+      .payroll-premium-employee-map-ui {
+        top:10px;
+        left:50%;
+        right:auto;
+        transform:translateX(-50%);
+      }
+
+      @media (max-width: 900px) {
+        .payroll-premium-map-ui {
+          left:8px;
+          right:8px;
+          top:8px;
+        }
+        .payroll-map-commandbar {
+          width:100%;
+          overflow-x:auto;
+          flex-wrap:nowrap;
+        }
+        .payroll-map-search-wrap { min-width:145px; }
+        .payroll-map-tool { min-width:62px; }
+      }
+
+      @media (max-width: 600px) {
+        .payroll-map-statusbar {
+          gap:8px;
+          font-size:9px;
+          overflow:hidden;
+          white-space:nowrap;
+        }
+        .payroll-map-commandbar {
+          padding:5px;
+          gap:5px;
+        }
+        .payroll-map-filter { max-width:105px; }
+        .payroll-map-tool span { display:none; }
+        .payroll-map-tool { min-width:38px; padding:0 8px; }
+      }
+
+      .leaflet-control-zoom {
+        margin-top:74px !important;
+      }
+
+      .payroll-premium-employee-map-ui + * { pointer-events:auto; }
+    `;
+    document.head.appendChild(style);
+};
+window.ensurePayrollPremiumMapStyles();
+
 // ============================================================
 // API-KEY-FREE MAP TILE PRESENTATION
 // ============================================================
