@@ -95,6 +95,7 @@ public sealed class FirebaseRealtimeService
         int employeeId = 0,
         string? displayName = null,
         string? existingUid = null,
+        bool updatePasswordIfExisting = false,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(email))
@@ -147,6 +148,22 @@ public sealed class FirebaseRealtimeService
                         },
                         cancellationToken);
                 }
+            }
+
+            // A successful Identity password check is a safe one-time migration
+            // point for native Firebase Email/Password authentication. Never
+            // store the password. If the caller explicitly requests migration,
+            // synchronize the Firebase password so the next Android login can be
+            // Firebase-only.
+            if (updatePasswordIfExisting && !string.IsNullOrWhiteSpace(password))
+            {
+                await auth.UpdateUserAsync(
+                    new UserRecordArgs
+                    {
+                        Uid = user.Uid,
+                        Password = password
+                    },
+                    cancellationToken);
             }
 
             var claims = new Dictionary<string, object>

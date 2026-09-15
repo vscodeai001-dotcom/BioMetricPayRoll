@@ -223,10 +223,26 @@ public sealed class MobileEmployeeController : ControllerBase
             request.ForceReplace ? "NEW_DEVICE_AFTER_FORCE_REPLACE" : "SESSION_STARTED",
             new { EmployeeId = employee?.EmployeeID ?? 0, Role = primaryRole });
 
+        // Successful legacy Identity authentication is the migration bridge for
+        // existing employees. It creates/repairs the matching Firebase Auth
+        // account, synchronizes the password used for this successful login, and
+        // stamps the employee/role/owner claims. The password is never stored.
+        var firebaseUid = await _firebase.EnsureFirebaseUserAsync(
+            user.Email ?? emailIdentifier.Trim(),
+            request.Password,
+            primaryRole,
+            employee?.EmployeeID ?? 0,
+            employee?.Name ?? user.UserName,
+            existingUid: null,
+            updatePasswordIfExisting: true,
+            cancellationToken: HttpContext.RequestAborted);
+
         var token = _tokens.Create(user.Id, employee?.EmployeeID ?? 0, mobileDeviceId, primaryRole);
-        var firebaseOwnerUid = _firebase.ResolveOwnerUid(user.Id, primaryRole);
+        var firebaseOwnerUid = _firebase.ResolveOwnerUid(
+            firebaseUid ?? user.Id,
+            primaryRole);
         var firebaseToken = await _firebase.CreateCustomTokenAsync(
-            user.Id,
+            firebaseUid ?? user.Id,
             employee?.EmployeeID ?? 0,
             primaryRole,
             HttpContext.RequestAborted);
