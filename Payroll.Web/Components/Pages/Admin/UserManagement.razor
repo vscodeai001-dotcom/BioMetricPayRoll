@@ -128,7 +128,18 @@ else
                         role = roleName!;
                 }
 
-                var linked = allEmployees.FirstOrDefault(e => e.AspNetUserId == u.Id);
+                var isCanonicalSuperAdmin =
+                    string.Equals(
+                        u.Email ?? u.UserName,
+                        "prakashshiva368@gmail.com",
+                        StringComparison.OrdinalIgnoreCase);
+
+                if (isCanonicalSuperAdmin)
+                    role = "SuperAdmin";
+
+                var linked = isCanonicalSuperAdmin
+                    ? null
+                    : allEmployees.FirstOrDefault(e => e.AspNetUserId == u.Id);
 
                 userList.Add(new UserRoleViewModel
                 {

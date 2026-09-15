@@ -2689,9 +2689,16 @@
                 needsAuthoritativeRefresh = true;
             }
 
+            // Firebase is the realtime source for the incoming GPS fix.
+            // Never block a brand-new live employee on the SQL/compatibility
+            // snapshot. The Firebase packet is already an authoritative live
+            // coordinate and must be rendered immediately.
             if (needsAuthoritativeRefresh)
             {
-                await RefreshLocations();
+                // Keep the packet on-screen immediately. A later application
+                // event/session event can reconcile the authoritative DB state.
+                mapNeedsUpdate = true;
+                await InvokeAsync(StateHasChanged);
             }
             else
             {
@@ -2872,9 +2879,11 @@
 
             locations.Add(newLocation);
 
-            // Still set needsAuthoritativeRefresh to true to ensure
-            // the full Employee object is loaded if it's missing.
-            needsAuthoritativeRefresh = !employees.Any(e => e.EmployeeID == employeeId);
+            // Do not wait for the SQL compatibility snapshot here. The
+            // employee's live Firebase GPS packet must appear immediately.
+            // The existing employee list can supply the display name when
+            // available; otherwise the map safely uses its existing fallback.
+            needsAuthoritativeRefresh = false;
             return true;
         }
 
@@ -2893,7 +2902,25 @@
             existing.SessionId != Guid.Empty &&
             existing.SessionId != sessionId)
         {
-            needsAuthoritativeRefresh = true;
+            // A new Firebase GPS session supersedes the previous live session.
+            // Accept it immediately instead of waiting for the compatibility
+            // database snapshot to catch up.
+            var replacement = new LiveEmployeeLocation
+            {
+                EmployeeId = employeeId,
+                Latitude = latitude,
+                Longitude = longitude,
+                AccuracyMeters = TryGetJsonDouble(json, "AccuracyMeters", out var newAcc) ? newAcc : 0,
+                DistanceMeters = TryGetJsonDouble(json, "DistanceMeters", out var newDist) ? newDist : 0,
+                AllowedRadiusMeters = TryGetJsonInt(json, "AllowedRadiusMeters", out var newRadiusVal) ? newRadiusVal : currentOfficeRadius,
+                IsWithinAllowedRadius = TryGetJsonBool(json, "IsWithinAllowedRadius", out var newWithin) ? newWithin : true,
+                LastUpdatedUtc = payloadAtUtc,
+                SessionStartedUtc = TryGetJsonDateTime(json, "SessionStartedUtc", out var newStart) ? newStart : DateTime.UtcNow,
+                SessionId = sessionId
+            };
+
+            locations[existingIndex] = replacement;
+            needsAuthoritativeRefresh = false;
             return true;
         }
 
