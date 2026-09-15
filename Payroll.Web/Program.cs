@@ -5,7 +5,6 @@ using System.Globalization;
 
 using Hangfire;
 using Hangfire.Dashboard;
-using Hangfire.PostgreSql;
 
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
@@ -346,7 +345,6 @@ builder.Services.AddHttpContextAccessor();
 // the ASP.NET Core container. Without processing X-Forwarded-Proto,
 // ASP.NET Core can see the incoming request as HTTP even though the
 // browser is using HTTPS. Identity then generates redirects such as:
-//   http://biometric-payroll.onrender.com/Identity/Account/Login
 //
 // That HTTP redirect is blocked when /my-attendance is running inside
 // the HTTPS Blazor document/frame. Trust the Render proxy headers so
