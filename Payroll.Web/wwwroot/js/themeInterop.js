@@ -2877,6 +2877,50 @@ window.ensurePayrollPremiumMapStyles = function () {
         .payroll-map-filter { max-width:105px; }
         .payroll-map-tool span { display:none; }
         .payroll-map-tool { min-width:38px; padding:0 8px; }
+
+        /* Employee Remote Punch: force a compact 2 x 2 command grid on
+           narrow cards. This prevents the toolbar from becoming a tall
+           single-column stack that gets clipped by the map viewport. */
+        .payroll-premium-employee-map-ui .payroll-employee-map-tools {
+          left:8px !important;
+          right:8px !important;
+          top:8px !important;
+          width:auto !important;
+          max-width:none !important;
+          display:grid !important;
+          grid-template-columns:repeat(2,minmax(0,1fr));
+          gap:5px !important;
+          padding:5px !important;
+          box-sizing:border-box !important;
+          justify-content:stretch !important;
+        }
+        .payroll-premium-employee-map-ui .payroll-employee-map-tools button {
+          width:100% !important;
+          min-width:0 !important;
+          height:32px !important;
+          padding:0 5px !important;
+          box-sizing:border-box !important;
+          overflow:hidden;
+          text-overflow:ellipsis;
+        }
+        .payroll-premium-employee-map-ui .payroll-employee-map-tools button span {
+          display:inline !important;
+          margin-left:2px;
+        }
+        .payroll-premium-employee-map-ui .payroll-employee-map-live {
+          left:8px !important;
+          right:8px !important;
+          bottom:8px !important;
+          width:max-content;
+          max-width:calc(100% - 16px);
+        }
+      }
+
+      @media (max-width: 320px) {
+        .payroll-premium-employee-map-ui .payroll-employee-map-tools button {
+          font-size:9px !important;
+          height:30px !important;
+        }
       }
 
       .leaflet-control-zoom {
