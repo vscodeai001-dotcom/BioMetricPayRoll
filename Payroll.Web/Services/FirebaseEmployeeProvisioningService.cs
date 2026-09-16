@@ -35,7 +35,7 @@ public sealed class FirebaseEmployeeProvisioningService : BackgroundService
         // account and the existing payroll employee record. This reconciliation
         // intentionally keeps running so Firebase Console-created users are
         // provisioned even when they are added after Web startup.
-        await Task.Delay(TimeSpan.FromSeconds(3), stoppingToken);
+        await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -54,7 +54,7 @@ public sealed class FirebaseEmployeeProvisioningService : BackgroundService
                     "Firebase Employee claim provisioning cycle failed; the next cycle will retry.");
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+            await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
         }
     }
 
