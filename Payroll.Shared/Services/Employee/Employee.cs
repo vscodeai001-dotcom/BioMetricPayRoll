@@ -124,6 +124,13 @@ namespace Payroll.Shared.Data
         [Column("is_deleted")]
         public bool IsDeleted { get; set; } = false;
 
+        // Temporary initial password used at employee creation time.
+        // WARNING: This is transient and NOT persisted to the local SQLite
+        // compatibility database. It is used only during the current request
+        // to provision Identity/Firebase accounts and is cleared immediately.
+        [NotMapped]
+        public string? InitialPassword { get; set; }
+
         // --- BANKING DETAILS ---
         [StringLength(50)]
         [Column("bank_account_number")]

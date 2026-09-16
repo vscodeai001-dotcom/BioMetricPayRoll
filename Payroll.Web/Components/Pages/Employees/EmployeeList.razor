@@ -3,6 +3,7 @@
 @using System.Globalization
 @using Microsoft.AspNetCore.Authorization
 @using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.AspNetCore.Identity
 @using global::Payroll.Shared
 @using global::Payroll.Shared.Data
 @using global::Payroll.Web.Components.Pages.Employees
@@ -15,6 +16,9 @@
 @inject IJSRuntime JSRuntime
 @inject ILogger<EmployeeList> _logger
 @inject IToastService toastService
+@inject UserManager<IdentityUser> UserManager
+@inject RoleManager<IdentityRole> RoleManager
+@inject Payroll.Web.Services.FirebaseRealtimeService FirebaseRealtime
 @attribute [Authorize(Roles = "Employee, SuperAdmin")]
 
 <PageTitle>Employee Management</PageTitle>
@@ -414,7 +418,102 @@ private CultureInfo inrCulture = new CultureInfo("en-IN");
 
             if (currentEmployee.EmployeeID == 0)
             {
+                // Create local Employee row first to obtain EmployeeID
                 dbContext.Employees.Add(currentEmployee);
+                await dbContext.SaveChangesAsync();
+
+                // If an initial password was provided, create an Identity user
+                // and provision the same account in Firebase so Android login works
+                if (!string.IsNullOrWhiteSpace(currentEmployee.InitialPassword) && !string.IsNullOrWhiteSpace(currentEmployee.Email))
+                {
+                    var email = currentEmployee.Email!.Trim();
+
+                    // Avoid duplicate Identity users
+                    var existingUser = await UserManager.FindByEmailAsync(email);
+                    if (existingUser == null)
+                    {
+                        var newUser = new IdentityUser { Email = email, UserName = email, EmailConfirmed = true };
+                        var createResult = await UserManager.CreateAsync(newUser, currentEmployee.InitialPassword);
+                        if (createResult.Succeeded)
+                        {
+                            // Assign Employee role by default
+                            if (!await RoleManager.RoleExistsAsync("Employee"))
+                                await RoleManager.CreateAsync(new IdentityRole("Employee"));
+
+                            await UserManager.AddToRoleAsync(newUser, "Employee");
+
+                            // Link to Employee row
+                            var emp = await dbContext.Employees.FindAsync(currentEmployee.EmployeeID);
+                            if (emp != null)
+                            {
+                                emp.AspNetUserId = newUser.Id;
+                                emp.Email = email;
+                                dbContext.Update(emp);
+                                await dbContext.SaveChangesAsync();
+                            }
+
+                            // Provision Firebase account with same password and claims
+                            try
+                            {
+                                await FirebaseRealtime.EnsureFirebaseUserAsync(
+                                    email,
+                                    currentEmployee.InitialPassword,
+                                    "Employee",
+                                    currentEmployee.EmployeeID,
+                                    currentEmployee.Name);
+                            }
+                            catch (Exception fex)
+                            {
+                                _logger.LogWarning(fex, "Firebase provisioning failed for {Email}", email);
+                            }
+                        }
+                        else
+                        {
+                            _logger.LogError("Failed to create Identity user for {Email}: {Errors}", email, string.Join("; ", createResult.Errors.Select(e => e.Description)));
+                        }
+                    }
+                    else
+                    {
+                        // Existing Identity user - if AspNetUserId not set, link it
+                        if (string.IsNullOrWhiteSpace(currentEmployee.AspNetUserId))
+                        {
+                            var emp = await dbContext.Employees.FindAsync(currentEmployee.EmployeeID);
+                            if (emp != null)
+                            {
+                                emp.AspNetUserId = existingUser.Id;
+                                emp.Email = email;
+                                dbContext.Update(emp);
+                                await dbContext.SaveChangesAsync();
+                            }
+                        }
+
+                        // Optionally update Firebase password/claims
+                        try
+                        {
+                            await FirebaseRealtime.EnsureFirebaseUserAsync(
+                                email,
+                                currentEmployee.InitialPassword,
+                                "Employee",
+                                currentEmployee.EmployeeID,
+                                currentEmployee.Name,
+                                existingUid: null,
+                                updatePasswordIfExisting: true);
+                        }
+                        catch (Exception fex)
+                        {
+                            _logger.LogWarning(fex, "Firebase update failed for existing user {Email}", email);
+                        }
+                    }
+
+                    // Clear the plaintext initial password immediately
+                    var e = await dbContext.Employees.FindAsync(currentEmployee.EmployeeID);
+                    if (e != null)
+                    {
+                        e.InitialPassword = null;
+                        dbContext.Update(e);
+                        await dbContext.SaveChangesAsync();
+                    }
+                }
             }
             else
             {
@@ -422,10 +521,9 @@ private CultureInfo inrCulture = new CultureInfo("en-IN");
                 if (existing != null)
                 {
                     dbContext.Entry(existing).CurrentValues.SetValues(currentEmployee);
+                    await dbContext.SaveChangesAsync();
                 }
             }
-
-            await dbContext.SaveChangesAsync();
 
             await AttendanceRefresh.NotifyEmployeeChangedAsync(currentEmployee.EmployeeID == 0 ? null : currentEmployee.EmployeeID, currentEmployee.EmployeeID == 0 ? "CREATED" : "UPDATED");
 

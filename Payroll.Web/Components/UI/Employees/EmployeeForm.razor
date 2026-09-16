@@ -13,6 +13,14 @@
         <label class="form-label small fw-bold text-primary mb-0">Email Address</label>
         <input type="email" class="form-control form-control-sm" @bind="Employee.Email" placeholder="user@company.com" />
     </div>
+    @if (Employee.EmployeeID == 0)
+    {
+        <div class="col-md-3">
+            <label class="form-label small fw-bold text-primary mb-0">Initial Password</label>
+            <input type="password" class="form-control form-control-sm" @bind="Employee.InitialPassword" placeholder="Temporary password for employee app" />
+            <div class="form-text small text-muted">Optional. If provided, Identity and Firebase accounts will be provisioned using this password.</div>
+        </div>
+    }
     <div class="col-md-2">
         <label class="form-label small fw-bold text-primary mb-0">Bio ID <span class="text-danger">*</span></label>
         <input class="form-control form-control-sm" @bind="Employee.BiometricID" placeholder="101" />
