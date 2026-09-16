@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Payroll.Shared.Data;
+using Payroll.Web.Services;
 
 namespace Payroll.Web.Security;
 
@@ -11,17 +12,20 @@ public sealed class MobileTokenAuthenticationHandler : AuthenticationHandler<Aut
 {
     private readonly MobileEmployeeTokenService _tokens;
     private readonly IDbContextFactory<AppDbContext> _dbFactory;
+    private readonly FirebaseRealtimeService _firebase;
 
     public MobileTokenAuthenticationHandler(
         IOptionsMonitor<AuthenticationSchemeOptions> options,
         ILoggerFactory logger,
         UrlEncoder encoder,
         MobileEmployeeTokenService tokens,
-        IDbContextFactory<AppDbContext> dbFactory)
+        IDbContextFactory<AppDbContext> dbFactory,
+        FirebaseRealtimeService firebase)
         : base(options, logger, encoder)
     {
         _tokens = tokens;
         _dbFactory = dbFactory;
+        _firebase = firebase;
     }
 
     protected override async Task<AuthenticateResult> HandleAuthenticateAsync()
@@ -35,26 +39,109 @@ public sealed class MobileTokenAuthenticationHandler : AuthenticationHandler<Aut
             return AuthenticateResult.NoResult();
 
         var token = header["Bearer ".Length..].Trim();
-        if (!_tokens.TryRead(token, out var payload))
+
+        // Preserve the existing opaque mobile-token path unchanged.
+        if (_tokens.TryRead(token, out var payload))
+            return await AuthenticateOpaqueTokenAsync(payload);
+
+        // Firebase-native Employee sessions use the Firebase ID token directly.
+        // This keeps all existing Employee controllers/screens while removing
+        // the Web login/session bridge from Android authentication.
+        var firebaseToken = await _firebase.VerifyIdTokenAsync(
+            token,
+            checkRevoked: true,
+            Context.RequestAborted);
+
+        if (firebaseToken == null)
         {
-            // Tell the mobile client this is an authoritative authentication
-            // failure. Network errors never reach this handler.
             Response.Headers["X-Mobile-Session-State"] = "REAUTH_REQUIRED";
             return AuthenticateResult.Fail("Invalid or expired mobile session.");
         }
 
+        var uid = firebaseToken.Uid;
+        var email = firebaseToken.Claims.TryGetValue("email", out var emailValue)
+            ? emailValue?.ToString()
+            : null;
+        var role = firebaseToken.Claims.TryGetValue("role", out var roleValue)
+            ? roleValue?.ToString() ?? "Employee"
+            : "Employee";
+        var employeeId = firebaseToken.Claims.TryGetValue("employee_id", out var employeeValue)
+            ? Convert.ToInt32(employeeValue)
+            : 0;
+        var ownerUid = firebaseToken.Claims.TryGetValue("owner_uid", out var ownerValue)
+            ? ownerValue?.ToString()
+            : null;
+
+        await using var firebaseDb = await _dbFactory.CreateDbContextAsync(Context.RequestAborted);
+        var employee = employeeId > 0
+            ? await firebaseDb.Employees.AsNoTracking().FirstOrDefaultAsync(x => x.EmployeeID == employeeId && !x.IsDeleted, Context.RequestAborted)
+            : null;
+
+        if (employee == null && !string.IsNullOrWhiteSpace(email))
+        {
+            employee = await firebaseDb.Employees.AsNoTracking()
+                .FirstOrDefaultAsync(x => x.Email == email && !x.IsDeleted, Context.RequestAborted);
+            employeeId = employee?.EmployeeID ?? employeeId;
+        }
+
+        var isAdmin = role.Contains("Admin", StringComparison.OrdinalIgnoreCase);
+        if (employee == null && !isAdmin)
+            return AuthenticateResult.Fail("Employee session is invalid or not linked.");
+
+        if (!isAdmin)
+        {
+            var sessionPath = $"employee_sessions/{uid}";
+            var session = await _firebase.GetGlobalRecordAsync(sessionPath, Context.RequestAborted);
+            if (session == null || session.Value.ValueKind != System.Text.Json.JsonValueKind.Object)
+                return AuthenticateResult.Fail("Employee Firebase session is not active on this device.");
+
+            var sessionDevice = session.Value.TryGetProperty("deviceId", out var deviceElement)
+                ? deviceElement.GetString()
+                : null;
+            if (string.IsNullOrWhiteSpace(sessionDevice))
+                return AuthenticateResult.Fail("Employee Firebase session is not active on this device.");
+
+            // The client supplies its Android ID as the compatibility device
+            // claim on protected calls. Existing screens do not change.
+            var requestedDevice = Request.Headers["X-Android-Device-Id"].FirstOrDefault();
+            if (!string.IsNullOrWhiteSpace(requestedDevice) &&
+                !string.Equals(sessionDevice, requestedDevice, StringComparison.Ordinal))
+                return AuthenticateResult.Fail("Mobile session is no longer active on this device.");
+        }
+
+        var claims = new List<Claim>
+        {
+            new Claim(ClaimTypes.NameIdentifier, uid),
+            new Claim(ClaimTypes.Name, employee?.Name ?? email ?? "Administrator"),
+            new Claim(ClaimTypes.Role, role),
+            new Claim("employee_id", (employee?.EmployeeID ?? employeeId).ToString()),
+            new Claim("mobile_session", "true")
+        };
+        var firebaseDeviceId = Request.Headers["X-Android-Device-Id"].FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(firebaseDeviceId))
+        {
+            claims.Add(new Claim("device_id", firebaseDeviceId));
+            claims.Add(new Claim("BioMetric-Employee-Device", firebaseDeviceId));
+        }
+        if (!string.IsNullOrWhiteSpace(email)) claims.Add(new Claim(ClaimTypes.Email, email));
+        if (!string.IsNullOrWhiteSpace(ownerUid)) claims.Add(new Claim("owner_uid", ownerUid));
+        if (!string.IsNullOrWhiteSpace(employee?.Email)) claims.Add(new Claim("employee_email", employee.Email));
+
+        var identity = new ClaimsIdentity(claims, Scheme.Name);
+        return AuthenticateResult.Success(new AuthenticationTicket(new ClaimsPrincipal(identity), Scheme.Name));
+    }
+
+    private async Task<AuthenticateResult> AuthenticateOpaqueTokenAsync(MobileEmployeeTokenPayload payload)
+    {
         await using var db = await _dbFactory.CreateDbContextAsync(Context.RequestAborted);
         var lockRecord = await db.EmployeeDeviceLocks
             .FirstOrDefaultAsync(x => x.UserId == payload.UserId, Context.RequestAborted);
 
         if (lockRecord == null)
-        {
             return AuthenticateResult.Fail("Mobile session is no longer active on this device.");
-        }
 
         const string mobilePrefix = "ANDROID:";
-        var normalizedPayloadDeviceId = payload.DeviceId.StartsWith(
-            mobilePrefix, StringComparison.OrdinalIgnoreCase)
+        var normalizedPayloadDeviceId = payload.DeviceId.StartsWith(mobilePrefix, StringComparison.OrdinalIgnoreCase)
             ? payload.DeviceId
             : mobilePrefix + payload.DeviceId;
 
@@ -63,32 +150,19 @@ public sealed class MobileTokenAuthenticationHandler : AuthenticationHandler<Aut
             string.Equals(lockRecord.DeviceId, normalizedPayloadDeviceId, StringComparison.Ordinal);
 
         if (!deviceMatches)
-        {
             return AuthenticateResult.Fail("Mobile session is no longer active on this device.");
-        }
-
-        // Upgrade legacy mobile locks on the first authenticated request and
-        // refresh the mobile lease. No schema change is required.
-        if (!string.Equals(lockRecord.DeviceId, normalizedPayloadDeviceId, StringComparison.Ordinal))
-        {
-            lockRecord.DeviceId = normalizedPayloadDeviceId;
-        }
 
         lockRecord.LastSeenAtUtc = DateTime.UtcNow;
-
-        // Ensure the mobile heartbeat is saved even if the request is aborted
-        // by a rapid socket close or poor network.
+        if (!string.Equals(lockRecord.DeviceId, normalizedPayloadDeviceId, StringComparison.Ordinal))
+            lockRecord.DeviceId = normalizedPayloadDeviceId;
         await db.SaveChangesAsync(CancellationToken.None);
 
         var employee = await db.Employees
             .AsNoTracking()
             .FirstOrDefaultAsync(x => x.EmployeeID == payload.EmployeeId && !x.IsDeleted, Context.RequestAborted);
 
-        // Security check for staff: they MUST be linked to an employee record.
-        // Admins/SuperAdmins can use the portal even if unlinked (EmployeeId 0).
         var role = payload.Role ?? "Employee";
         var isAdmin = role.Contains("Admin", StringComparison.OrdinalIgnoreCase);
-
         if (employee == null && !isAdmin)
             return AuthenticateResult.Fail("Employee session is invalid or not linked.");
 
@@ -108,4 +182,5 @@ public sealed class MobileTokenAuthenticationHandler : AuthenticationHandler<Aut
         var identity = new ClaimsIdentity(claims, Scheme.Name);
         return AuthenticateResult.Success(new AuthenticationTicket(new ClaimsPrincipal(identity), Scheme.Name));
     }
+
 }

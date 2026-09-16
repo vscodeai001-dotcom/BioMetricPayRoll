@@ -170,6 +170,7 @@ builder.Services.AddHttpClient("FirebaseRealtime");
 builder.Services.AddSingleton<FirebaseRealtimeService>();
 builder.Services.AddHostedService<FirebaseSqliteSyncService>();
 builder.Services.AddHostedService<FirebaseSuperAdminProvisioningService>();
+builder.Services.AddHostedService<FirebaseEmployeeProvisioningService>();
 
 builder.Services.AddSingleton<
     AttendanceRefreshService>();

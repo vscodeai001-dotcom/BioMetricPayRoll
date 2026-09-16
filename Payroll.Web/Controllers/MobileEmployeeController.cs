@@ -497,6 +497,14 @@ public sealed class MobileEmployeeController : ControllerBase
             await db.SaveChangesAsync();
         }
 
+        // Firebase-native Employee sessions use the same single-device lock
+        // stored at employee_sessions/{firebaseUid}. Remove it on explicit
+        // logout so the next device can acquire the session immediately.
+        var firebaseUid = userId;
+        await _firebase.DeleteGlobalRecordAsync(
+            $"employee_sessions/{firebaseUid}",
+            HttpContext.RequestAborted);
+
         await _attendanceMonitor.RecordAsync(
             "DEVICE_LOCK_RELEASED", userId, User.FindFirstValue(ClaimTypes.Email), deviceId, "Android", "SUCCESS", "MANUAL_LOGOUT");
         await _attendanceMonitor.RecordAsync(

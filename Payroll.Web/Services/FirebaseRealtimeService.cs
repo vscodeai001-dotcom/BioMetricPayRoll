@@ -274,6 +274,28 @@ public sealed class FirebaseRealtimeService
             cancellationToken);
     }
 
+    public async Task<JsonElement?> GetGlobalRecordAsync(
+        string path,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return null;
+
+        return await GetJsonAsync(path.Trim('/'), cancellationToken);
+    }
+
+    public async Task<bool> DeleteGlobalRecordAsync(
+        string path,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return false;
+
+        return await UpdateAsync(
+            new Dictionary<string, object?> { [path.Trim('/')] = null },
+            cancellationToken);
+    }
+
     public async Task<JsonElement?> GetOwnerRecordAsync(
         string ownerUid,
         string table,
