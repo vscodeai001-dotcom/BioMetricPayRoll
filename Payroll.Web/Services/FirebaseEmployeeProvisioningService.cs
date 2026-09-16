@@ -54,7 +54,7 @@ public sealed class FirebaseEmployeeProvisioningService : BackgroundService
                     "Firebase Employee claim provisioning cycle failed; the next cycle will retry.");
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+            await Task.Delay(TimeSpan.FromSeconds(3600), stoppingToken);
         }
     }
 

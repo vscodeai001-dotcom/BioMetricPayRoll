@@ -60,10 +60,11 @@ public sealed class FirebaseSqliteSyncService : BackgroundService
     {
         await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
 
-        var ownerUid =
-            _configuration["Firebase:OwnerUid"]
-            ?? Environment.GetEnvironmentVariable("FIREBASE_OWNER_UID")
-            ?? "biometricpayroll";
+        var ownerUid = _configuration["Firebase:OwnerUid"]?.Trim();
+        if (string.IsNullOrWhiteSpace(ownerUid))
+            ownerUid = Environment.GetEnvironmentVariable("FIREBASE_OWNER_UID")?.Trim();
+        if (string.IsNullOrWhiteSpace(ownerUid))
+            ownerUid = "biometricpayroll";
 
         // First hydrate the local compatibility projection so the existing Web
         // screens have a complete initial view of the Firebase SSOT.
@@ -79,28 +80,43 @@ public sealed class FirebaseSqliteSyncService : BackgroundService
             {
                 await _firebase.StreamOwnerChangesAsync(
                     ownerUid,
-                    async (relativePath, _, ct) =>
+                    async (relativePath, eventData, ct) =>
                     {
-                        var tables = TablesForFirebasePath(relativePath);
-                        if (tables.Count == 0)
+                        var target = ParseFirebasePath(relativePath);
+                        if (target is null)
                             return;
 
-                        foreach (var table in tables)
-                        {
-                            if (!Tables.TryGetValue(table.EntityName, out var firebaseTable))
-                                continue;
+                        if (!Tables.TryGetValue(target.Value.EntityName, out var firebaseTable))
+                            return;
 
-                            var changed = await SyncTableAsync(
-                                table.EntityName,
+                        bool changed;
+
+                        // Firebase sends data:null when a record/table is deleted.
+                        // Re-reading the table alone cannot remove the stale local row.
+                        if (eventData.HasValue &&
+                            eventData.Value.ValueKind == JsonValueKind.Null)
+                        {
+                            changed = await DeleteLocalFirebaseRecordAsync(
+                                target.Value.EntityName,
+                                target.Value.RecordKey,
+                                ct);
+                        }
+                        else
+                        {
+                            // PUT/PATCH events may contain only a partial row. Fetch the
+                            // canonical Firebase table so the local compatibility cache
+                            // always receives the complete record.
+                            changed = await SyncTableAsync(
+                                target.Value.EntityName,
                                 firebaseTable,
                                 ownerUid,
                                 ct);
+                        }
 
-                            if (changed)
-                            {
-                                await _refreshService.NotifyApplicationDataChangedAsync(
-                                    new[] { table.EntityName });
-                            }
+                        if (changed)
+                        {
+                            await _refreshService.NotifyApplicationDataChangedAsync(
+                                new[] { target.Value.EntityName });
                         }
                     },
                     stoppingToken);
@@ -142,21 +158,90 @@ public sealed class FirebaseSqliteSyncService : BackgroundService
         return await UpsertTableAsync(entityName, json.Value, ct);
     }
 
-    private sealed record FirebasePathTable(string EntityName);
+    private readonly record struct FirebasePathTarget(string EntityName, string? RecordKey);
 
-    private static IReadOnlyList<FirebasePathTable> TablesForFirebasePath(string relativePath)
+    private static FirebasePathTarget? ParseFirebasePath(string relativePath)
     {
         var normalized = (relativePath ?? "/").Trim('/');
         if (string.IsNullOrWhiteSpace(normalized))
-            return Tables.Keys.Select(x => new FirebasePathTable(x)).ToArray();
+            return null;
 
-        var firebaseTable = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries)[0];
+        var parts = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var firebaseTable = parts[0];
         var entity = Tables.FirstOrDefault(x =>
             string.Equals(x.Value, firebaseTable, StringComparison.Ordinal));
 
-        return string.IsNullOrWhiteSpace(entity.Key)
-            ? Array.Empty<FirebasePathTable>()
-            : new[] { new FirebasePathTable(entity.Key) };
+        if (string.IsNullOrWhiteSpace(entity.Key))
+            return null;
+
+        if (parts.Length == 1)
+            return new FirebasePathTarget(entity.Key, null);
+
+        var key = Uri.UnescapeDataString(parts[1]);
+        key = key.Replace("%2E", ".", StringComparison.OrdinalIgnoreCase)
+            .Replace("%23", "#", StringComparison.OrdinalIgnoreCase)
+            .Replace("%24", "$", StringComparison.OrdinalIgnoreCase)
+            .Replace("%5B", "[", StringComparison.OrdinalIgnoreCase)
+            .Replace("%5D", "]", StringComparison.OrdinalIgnoreCase)
+            .Replace("%2F", "/", StringComparison.OrdinalIgnoreCase);
+
+        return new FirebasePathTarget(entity.Key, key);
+    }
+
+    private async Task<bool> DeleteLocalFirebaseRecordAsync(
+        string entityName,
+        string? firebaseKey,
+        CancellationToken ct)
+    {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<AppDbContext>>();
+        await using var db = await factory.CreateDbContextAsync(ct);
+
+        var entityType = db.Model.GetEntityTypes()
+            .FirstOrDefault(x => x.ClrType.Name == entityName);
+        if (entityType == null)
+            return false;
+
+        if (string.IsNullOrWhiteSpace(firebaseKey))
+        {
+            var query = GetEntitySet(db, entityType.ClrType);
+
+            var rows = await query
+                .Cast<object>()
+                .ToListAsync(ct);
+            if (rows.Count == 0)
+                return false;
+
+            using var tableScope = _firebaseSyncWriteScope.Enter();
+            db.RemoveRange(rows);
+            await db.SaveChangesAsync(ct);
+            return true;
+        }
+
+        var keys = entityType.FindPrimaryKey()?.Properties;
+        if (keys == null || keys.Count == 0)
+            return false;
+
+        var keyParts = firebaseKey.Split('|');
+        if (keyParts.Length < keys.Count)
+            return false;
+
+        var keyValues = new object?[keys.Count];
+        for (var i = 0; i < keys.Count; i++)
+        {
+            keyValues[i] = ConvertStringValue(keyParts[i], keys[i].ClrType);
+            if (keyValues[i] is null)
+                return false;
+        }
+
+        var existing = await db.FindAsync(entityType.ClrType, keyValues, ct);
+        if (existing == null)
+            return false;
+
+        using var recordScope = _firebaseSyncWriteScope.Enter();
+        db.Remove(existing);
+        await db.SaveChangesAsync(ct);
+        return true;
     }
 
     private async Task<bool> UpsertTableAsync(
@@ -356,6 +441,23 @@ public sealed class FirebaseSqliteSyncService : BackgroundService
         new(value.Where(char.IsLetterOrDigit)
             .Select(char.ToLowerInvariant)
             .ToArray());
+
+    private static IQueryable GetEntitySet(
+        DbContext db,
+        Type entityType)
+    {
+        var setMethod = typeof(DbContext)
+            .GetMethods()
+            .First(method =>
+                method.Name == nameof(DbContext.Set) &&
+                method.IsGenericMethodDefinition &&
+                method.GetGenericArguments().Length == 1 &&
+                method.GetParameters().Length == 0);
+
+        return (IQueryable)setMethod
+            .MakeGenericMethod(entityType)
+            .Invoke(db, null)!;
+    }
 
     private static object? ConvertStringValue(
         string value,

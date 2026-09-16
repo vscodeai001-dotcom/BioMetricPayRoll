@@ -8,6 +8,7 @@ using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.EntityFrameworkCore.Metadata;
 using System.Collections;
 using Google.Apis.Auth.OAuth2;
+using Payroll.Shared.Data;
 
 namespace Payroll.Web.Services;
 
@@ -701,6 +702,8 @@ public sealed class FirebaseRealtimeService
                 Put("dob", ToUnixMilliseconds(Value("DOB")));
                 Put("role", Value("Role"));
                 Put("salaryRate", Value("MonthlySalary"));
+                Put("paidLeaveBalance", Value("PaidLeaveBalance"));
+                Put("sickLeaveBalance", Value("SickLeaveBalance"));
                 Put("salaryType", Value("PayrollTypeOverride"));
                 Put("salaryCalculationMethod", Value("SalaryCalculationMethod"));
                 Put("biometricId", Value("BiometricID"));
@@ -833,7 +836,10 @@ public sealed class FirebaseRealtimeService
             case "Employee":
                 Put("employeeId", Get("employeeid")); Put("name", Get("name"));
                 Put("dob", ToUnixMilliseconds(Get("dob"))); Put("role", Get("role"));
-                Put("salaryRate", Get("monthlysalary")); Put("salaryType", Get("payroll_type_override"));
+                Put("salaryRate", Get("monthlysalary"));
+                Put("paidLeaveBalance", Get("paidleavebalance"));
+                Put("sickLeaveBalance", Get("sickleavebalance"));
+                Put("salaryType", Get("payroll_type_override"));
                 Put("salaryCalculationMethod", Get("salarycalculationmethod")); Put("biometricId", Get("biometricid"));
                 Put("shiftStart", Get("shiftstarttime")); Put("shiftEnd", Get("shiftendtime"));
                 Put("breakHours", ToDoubleHours(Get("standardbreakminutes")));
@@ -964,6 +970,67 @@ public sealed class FirebaseRealtimeService
         };
     }
 
+
+    /// <summary>
+    /// One-time/backfill migration from the existing local compatibility database
+    /// into Firebase. Existing Firebase records are never overwritten. Once a
+    /// record exists in Firebase, Firebase remains the runtime SSOT.
+    /// </summary>
+    public async Task<int> SeedMissingFirebaseRecordsAsync(
+        IDbContextFactory<AppDbContext> factory,
+        string ownerUid,
+        CancellationToken cancellationToken = default)
+    {
+        if (factory == null || string.IsNullOrWhiteSpace(ownerUid)) return 0;
+        var seeded = 0;
+        await using var db = await factory.CreateDbContextAsync(cancellationToken);
+
+        foreach (var entityName in RealtimeEntities)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var table = GetFirebaseTable(entityName);
+            if (string.IsNullOrWhiteSpace(table)) continue;
+
+            var remote = await GetOwnerTableAsync(ownerUid, table, cancellationToken);
+            var existingKeys = remote.HasValue && remote.Value.ValueKind == JsonValueKind.Object
+                ? remote.Value.EnumerateObject().Select(x => x.Name).ToHashSet(StringComparer.Ordinal)
+                : new HashSet<string>(StringComparer.Ordinal);
+
+            var entityType = db.Model.GetEntityTypes()
+                .FirstOrDefault(x => x.ClrType.Name == entityName);
+            if (entityType == null) continue;
+
+            var query = GetEntitySet(db, entityType.ClrType);
+            var rows = await query
+                .Cast<object>()
+                .ToListAsync(cancellationToken);
+            var updates = new Dictionary<string, object?>(StringComparer.Ordinal);
+
+            foreach (var row in rows)
+            {
+                var entry = db.Entry(row);
+                var key = BuildKey(entry);
+                if (string.IsNullOrWhiteSpace(key) || existingKeys.Contains(key)) continue;
+
+                var firebaseRow = BuildFirebaseRow(entry, entityName, key);
+                firebaseRow["_entity"] = entityName;
+                firebaseRow["_key"] = key;
+                firebaseRow["_updatedUtc"] = DateTime.UtcNow.ToString("O");
+                updates[$"owners/{ownerUid}/{table}/{EscapeFirebaseKey(key)}"] = firebaseRow;
+
+                if (updates.Count >= 100)
+                {
+                    if (await UpdateAsync(updates, cancellationToken)) seeded += updates.Count;
+                    updates.Clear();
+                }
+            }
+
+            if (updates.Count > 0 && await UpdateAsync(updates, cancellationToken))
+                seeded += updates.Count;
+        }
+
+        return seeded;
+    }
 
     public async Task<bool> EnsureConfiguredAsync()
     {
@@ -1190,6 +1257,23 @@ public sealed class FirebaseRealtimeService
                 "Firebase Admin bridge is not configured. Configure Firebase:ServiceAccountPath, GOOGLE_APPLICATION_CREDENTIALS, FIREBASE_SERVICE_ACCOUNT_JSON, or Application Default Credentials.");
             return null;
         }
+    }
+
+    private static IQueryable GetEntitySet(
+        DbContext db,
+        Type entityType)
+    {
+        var setMethod = typeof(DbContext)
+            .GetMethods()
+            .First(method =>
+                method.Name == nameof(DbContext.Set) &&
+                method.IsGenericMethodDefinition &&
+                method.GetGenericArguments().Length == 1 &&
+                method.GetParameters().Length == 0);
+
+        return (IQueryable)setMethod
+            .MakeGenericMethod(entityType)
+            .Invoke(db, null)!;
     }
 
     private sealed class FirebaseContext
