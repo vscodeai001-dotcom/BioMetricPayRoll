@@ -31,14 +31,17 @@ public sealed class FirebaseEmployeeProvisioningService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Firebase claims are the long-lived bridge between the Firebase Auth
+        // account and the existing payroll employee record. This reconciliation
+        // intentionally keeps running so Firebase Console-created users are
+        // provisioned even when they are added after Web startup.
         await Task.Delay(TimeSpan.FromSeconds(3), stoppingToken);
 
-        for (var attempt = 1; !stoppingToken.IsCancellationRequested; attempt++)
+        while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 await ProvisionLinkedEmployeesAsync(stoppingToken);
-                return;
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -46,9 +49,12 @@ public sealed class FirebaseEmployeeProvisioningService : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Firebase Employee claim provisioning attempt {Attempt} failed; retrying.", attempt);
-                await Task.Delay(TimeSpan.FromSeconds(15), stoppingToken);
+                _logger.LogWarning(
+                    ex,
+                    "Firebase Employee claim provisioning cycle failed; the next cycle will retry.");
             }
+
+            await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
         }
     }
 
@@ -76,12 +82,24 @@ public sealed class FirebaseEmployeeProvisioningService : BackgroundService
         {
             ct.ThrowIfCancellationRequested();
             var email = employee.Email!.Trim();
-            var identity = !string.IsNullOrWhiteSpace(employee.AspNetUserId)
-                ? await users.FindByIdAsync(employee.AspNetUserId)
-                : await users.FindByEmailAsync(email);
 
-            if (identity == null)
-                continue;
+            // The payroll Employee row is the canonical link for an Employee.
+            // Identity is consulted only to avoid accidentally stamping an
+            // Admin/SuperAdmin account as Employee. Firebase Console-created
+            // users do not need an Identity row for this claim backfill.
+            IdentityUser? identity = null;
+            if (!string.IsNullOrWhiteSpace(employee.AspNetUserId))
+                identity = await users.FindByIdAsync(employee.AspNetUserId);
+            identity ??= await users.FindByEmailAsync(email);
+
+            if (identity != null)
+            {
+                var identityRoles = await users.GetRolesAsync(identity);
+                if (identityRoles.Any(role =>
+                        role.Equals("Admin", StringComparison.OrdinalIgnoreCase) ||
+                        role.Equals("SuperAdmin", StringComparison.OrdinalIgnoreCase)))
+                    continue;
+            }
 
             UserRecord? firebaseUser;
             try
@@ -109,6 +127,54 @@ public sealed class FirebaseEmployeeProvisioningService : BackgroundService
             count++;
         }
 
-        _logger.LogInformation("Firebase Employee claim provisioning completed. Linked employees provisioned: {Count}.", count);
+        await ProvisionAdministrativeUsersAsync(users, auth, ownerUid, ct);
+
+        _logger.LogInformation(
+            "Firebase claim provisioning cycle completed. Employees provisioned: {Count}.",
+            count);
     }
+
+    private async Task ProvisionAdministrativeUsersAsync(
+        UserManager<IdentityUser> users,
+        FirebaseAuth auth,
+        string ownerUid,
+        CancellationToken ct)
+    {
+        var identities = await users.Users.AsNoTracking().ToListAsync(ct);
+
+        foreach (var identity in identities)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var roles = await users.GetRolesAsync(identity);
+            var role = roles.FirstOrDefault(r =>
+                r.Equals("SuperAdmin", StringComparison.OrdinalIgnoreCase) ||
+                r.Equals("Admin", StringComparison.OrdinalIgnoreCase));
+
+            if (role == null || string.IsNullOrWhiteSpace(identity.Email))
+                continue;
+
+            UserRecord firebaseUser;
+            try
+            {
+                firebaseUser = await auth.GetUserByEmailAsync(identity.Email.Trim(), ct);
+            }
+            catch (FirebaseAuthException ex) when (ex.AuthErrorCode == AuthErrorCode.UserNotFound)
+            {
+                // Never invent an administrative password here. The account
+                // must first exist in Firebase Authentication.
+                continue;
+            }
+
+            await auth.SetCustomUserClaimsAsync(
+                firebaseUser.Uid,
+                new Dictionary<string, object>
+                {
+                    ["role"] = role,
+                    ["owner_uid"] = ownerUid
+                },
+                ct);
+        }
+    }
+
 }
