@@ -135,16 +135,16 @@ public sealed class FirebaseSuperAdminProvisioningService : BackgroundService
         var roles = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>();
         if (!await roles.RoleExistsAsync("SuperAdmin"))
         {
-            var result = await roles.CreateAsync(new IdentityRole("SuperAdmin"));
-            if (!result.Succeeded) throw new InvalidOperationException(string.Join("; ", result.Errors.Select(x => x.Description)));
+            var createRoleResult = await roles.CreateAsync(new IdentityRole("SuperAdmin"));
+            if (!createRoleResult.Succeeded) throw new InvalidOperationException(string.Join("; ", createRoleResult.Errors.Select(x => x.Description)));
         }
         var user = await users.FindByEmailAsync(email);
         if (user == null)
         {
             if (string.IsNullOrWhiteSpace(password)) { _logger.LogWarning("Local SuperAdmin {Email} does not exist. Set SUPERADMIN_PASSWORD once to provision it.", email); return; }
             user = new IdentityUser { UserName = email, Email = email, EmailConfirmed = true };
-            var result = await users.CreateAsync(user, password);
-            if (!result.Succeeded) throw new InvalidOperationException(string.Join("; ", result.Errors.Select(x => x.Description)));
+            var createUserResult = await users.CreateAsync(user, password);
+            if (!createUserResult.Succeeded) throw new InvalidOperationException(string.Join("; ", createUserResult.Errors.Select(x => x.Description)));
         }
         if (!string.IsNullOrWhiteSpace(password))
         {
@@ -166,9 +166,9 @@ public sealed class FirebaseSuperAdminProvisioningService : BackgroundService
                     string.Join("; ", removeRolesResult.Errors.Select(x => x.Description)));
         }
 
-        var result = await users.AddToRoleAsync(user, "SuperAdmin");
-        if (!result.Succeeded)
+        var addRoleResult = await users.AddToRoleAsync(user, "SuperAdmin");
+        if (!addRoleResult.Succeeded)
             throw new InvalidOperationException(
-                string.Join("; ", result.Errors.Select(x => x.Description)));
+                string.Join("; ", addRoleResult.Errors.Select(x => x.Description)));
     }
 }

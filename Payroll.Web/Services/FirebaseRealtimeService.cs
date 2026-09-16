@@ -222,7 +222,7 @@ public sealed class FirebaseRealtimeService
     // ---------------------------------------------------------------------
     // These methods are deliberately table-whitelisted. They provide the Web
     // layer with a Firebase-native CRUD path without exposing arbitrary
-    // database paths to callers. The existing Neon-backed business services
+    // database paths to callers. The existing legacy database-backed business services
     // can be migrated module-by-module without changing UI/layout/business
     // rules.
 
@@ -260,6 +260,116 @@ public sealed class FirebaseRealtimeService
     public bool IsFirebaseSsotTable(string table)
         => !string.IsNullOrWhiteSpace(table) &&
            FirebaseSsotTables.Contains(table.Trim());
+
+    /// <summary>
+    /// Opens Firebase Realtime Database's REST streaming endpoint for one
+    /// owner's node. Firebase sends an initial snapshot followed by put/patch
+    /// events whenever Web or Android changes the SSOT. The callback receives
+    /// the Firebase-relative path and event data. The stream is intentionally
+    /// read-only; writes continue through the normal Firebase CRUD methods.
+    /// </summary>
+    public async Task StreamOwnerChangesAsync(
+        string ownerUid,
+        Func<string, JsonElement?, CancellationToken, Task> onChange,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(ownerUid))
+            throw new ArgumentException("Firebase owner UID is required.", nameof(ownerUid));
+
+        ArgumentNullException.ThrowIfNull(onChange);
+
+        var context = await _context.Value;
+        if (context == null)
+            throw new InvalidOperationException("Firebase Admin bridge is not configured.");
+
+        var client = _httpClientFactory.CreateClient("FirebaseRealtime");
+        client.Timeout = Timeout.InfiniteTimeSpan;
+
+        var path = $"owners/{ownerUid.Trim()}";
+        var uri = new Uri(
+            $"{context.DatabaseUrl.TrimEnd('/')}/{path}.json");
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+        request.Headers.Authorization = new AuthenticationHeaderValue(
+            "Bearer", await context.GetAccessTokenAsync());
+        request.Headers.Accept.Clear();
+        request.Headers.Accept.Add(
+            new MediaTypeWithQualityHeaderValue("text/event-stream"));
+        request.Headers.ConnectionClose = false;
+
+        using var response = await client.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            throw new HttpRequestException(
+                $"Firebase realtime stream failed with HTTP {(int)response.StatusCode}: " +
+                (body.Length > 500 ? body[..500] : body));
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var reader = new StreamReader(stream);
+
+        string? eventType = null;
+        var dataLines = new List<string>();
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var line = await reader.ReadLineAsync(cancellationToken);
+            if (line == null)
+                break;
+
+            if (line.StartsWith("event:", StringComparison.OrdinalIgnoreCase))
+            {
+                eventType = line[6..].Trim();
+                continue;
+            }
+
+            if (line.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+            {
+                dataLines.Add(line[5..].TrimStart());
+                continue;
+            }
+
+            if (line.Length != 0 || dataLines.Count == 0)
+                continue;
+
+            var data = string.Join("\n", dataLines);
+            dataLines.Clear();
+
+            if (string.IsNullOrWhiteSpace(data) ||
+                string.Equals(eventType, "keep-alive", StringComparison.OrdinalIgnoreCase))
+            {
+                eventType = null;
+                continue;
+            }
+
+            try
+            {
+                using var document = JsonDocument.Parse(data);
+                var root = document.RootElement;
+                var relativePath = root.TryGetProperty("path", out var pathElement)
+                    ? pathElement.GetString() ?? "/"
+                    : "/";
+                JsonElement? eventData = root.TryGetProperty("data", out var dataElement)
+                    ? dataElement.Clone()
+                    : null;
+
+                await onChange(relativePath, eventData, cancellationToken);
+            }
+            catch (JsonException ex)
+            {
+                _logger.LogDebug(ex, "Ignoring malformed Firebase realtime stream event.");
+            }
+            finally
+            {
+                eventType = null;
+            }
+        }
+    }
 
     public async Task<JsonElement?> GetOwnerTableAsync(
         string ownerUid,
@@ -582,7 +692,7 @@ public sealed class FirebaseRealtimeService
 
         // Canonical Firebase contract matches the existing Android entity names.
         // Extra server-only fields are intentionally omitted from these module
-        // contracts; Neon schema and business rules remain unchanged.
+        // contracts; legacy schema and business rules remain unchanged.
         switch (entityName)
         {
             case "Employee":

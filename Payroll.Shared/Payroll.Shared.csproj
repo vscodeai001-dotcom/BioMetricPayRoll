@@ -13,7 +13,15 @@
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="8.0.21" />
   </ItemGroup>
 
+  <!--
+    Legacy EF migration snapshots in this folder were generated for the old
+    PostgreSQL/Neon provider and reference Npgsql types. They are retained as
+    historical source files, but are not part of the Firebase-only runtime
+    build. The live application uses Firebase as the shared SSOT.
+  -->
   <ItemGroup>
+    <Compile Remove="Migrations\**\*.cs" />
+    <None Include="Migrations\**\*.cs" />
     <Folder Include="Data\Migrations\" />
   </ItemGroup>
 

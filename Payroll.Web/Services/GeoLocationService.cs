@@ -349,7 +349,7 @@ public class GeoLocationService
                     return false;
             }
 
-            // Session-level PostgreSQL advisory lock coordinates GPS updates
+            // legacy database advisory lock coordinates GPS updates
             // and logout/session-end operations across Web/Worker instances.
             // This closes the race where an old GPS request could repopulate
             // LiveLocationStore immediately after logout.

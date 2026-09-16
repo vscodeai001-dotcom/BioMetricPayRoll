@@ -37,51 +37,73 @@ public sealed class FirebaseSqliteSyncService : BackgroundService
     private readonly FirebaseRealtimeService _firebase;
     private readonly IConfiguration _configuration;
     private readonly ILogger<FirebaseSqliteSyncService> _logger;
+    private readonly FirebaseSyncWriteScope _firebaseSyncWriteScope;
+    private readonly AttendanceRefreshService _refreshService;
 
     public FirebaseSqliteSyncService(
         IServiceScopeFactory scopeFactory,
         FirebaseRealtimeService firebase,
         IConfiguration configuration,
-        ILogger<FirebaseSqliteSyncService> logger)
+        ILogger<FirebaseSqliteSyncService> logger,
+        FirebaseSyncWriteScope firebaseSyncWriteScope,
+        AttendanceRefreshService refreshService)
     {
         _scopeFactory = scopeFactory;
         _firebase = firebase;
         _configuration = configuration;
         _logger = logger;
+        _firebaseSyncWriteScope = firebaseSyncWriteScope;
+        _refreshService = refreshService;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
 
+        var ownerUid =
+            _configuration["Firebase:OwnerUid"]
+            ?? Environment.GetEnvironmentVariable("FIREBASE_OWNER_UID")
+            ?? "biometricpayroll";
+
+        // First hydrate the local compatibility projection so the existing Web
+        // screens have a complete initial view of the Firebase SSOT.
+        await SyncAllTablesAsync(ownerUid, stoppingToken);
+
+        // From this point forward Firebase's REST event stream is the trigger.
+        // There is no fixed polling interval. A dropped stream is reconnected
+        // automatically; Web UI notifications are raised only after the local
+        // compatibility projection has been updated.
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                var ownerUid =
-                    _configuration["Firebase:OwnerUid"]
-                    ?? Environment.GetEnvironmentVariable("FIREBASE_OWNER_UID")
-                    ?? "biometricpayroll";
+                await _firebase.StreamOwnerChangesAsync(
+                    ownerUid,
+                    async (relativePath, _, ct) =>
+                    {
+                        var tables = TablesForFirebasePath(relativePath);
+                        if (tables.Count == 0)
+                            return;
 
-                foreach (var table in Tables)
-                {
-                    stoppingToken.ThrowIfCancellationRequested();
+                        foreach (var table in tables)
+                        {
+                            if (!Tables.TryGetValue(table.EntityName, out var firebaseTable))
+                                continue;
 
-                    var json =
-                        await _firebase.GetOwnerTableAsync(
-                            ownerUid,
-                            table.Value,
-                            stoppingToken);
+                            var changed = await SyncTableAsync(
+                                table.EntityName,
+                                firebaseTable,
+                                ownerUid,
+                                ct);
 
-                    if (json is null ||
-                        json.Value.ValueKind != JsonValueKind.Object)
-                        continue;
-
-                    await UpsertTableAsync(
-                        table.Key,
-                        json.Value,
-                        stoppingToken);
-                }
+                            if (changed)
+                            {
+                                await _refreshService.NotifyApplicationDataChangedAsync(
+                                    new[] { table.EntityName });
+                            }
+                        }
+                    },
+                    stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -91,16 +113,53 @@ public sealed class FirebaseSqliteSyncService : BackgroundService
             {
                 _logger.LogWarning(
                     ex,
-                    "Firebase -> SQLite synchronization deferred.");
-            }
+                    "Firebase realtime stream disconnected. Reconnecting.");
 
-            await Task.Delay(
-                TimeSpan.FromSeconds(5),
-                stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(3), stoppingToken);
+            }
         }
     }
 
-    private async Task UpsertTableAsync(
+    private async Task SyncAllTablesAsync(string ownerUid, CancellationToken ct)
+    {
+        foreach (var table in Tables)
+        {
+            ct.ThrowIfCancellationRequested();
+            await SyncTableAsync(table.Key, table.Value, ownerUid, ct);
+        }
+    }
+
+    private async Task<bool> SyncTableAsync(
+        string entityName,
+        string firebaseTable,
+        string ownerUid,
+        CancellationToken ct)
+    {
+        var json = await _firebase.GetOwnerTableAsync(ownerUid, firebaseTable, ct);
+        if (json is null || json.Value.ValueKind != JsonValueKind.Object)
+            return false;
+
+        return await UpsertTableAsync(entityName, json.Value, ct);
+    }
+
+    private sealed record FirebasePathTable(string EntityName);
+
+    private static IReadOnlyList<FirebasePathTable> TablesForFirebasePath(string relativePath)
+    {
+        var normalized = (relativePath ?? "/").Trim('/');
+        if (string.IsNullOrWhiteSpace(normalized))
+            return Tables.Keys.Select(x => new FirebasePathTable(x)).ToArray();
+
+        var firebaseTable = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries)[0];
+        var entity = Tables.FirstOrDefault(x =>
+            string.Equals(x.Value, firebaseTable, StringComparison.Ordinal));
+
+        return string.IsNullOrWhiteSpace(entity.Key)
+            ? Array.Empty<FirebasePathTable>()
+            : new[] { new FirebasePathTable(entity.Key) };
+    }
+
+    private async Task<bool> UpsertTableAsync(
         string entityName,
         JsonElement table,
         CancellationToken ct)
@@ -120,11 +179,13 @@ public sealed class FirebaseSqliteSyncService : BackgroundService
                 .FirstOrDefault(x => x.ClrType.Name == entityName);
 
         if (entityType == null)
-            return;
+            return false;
 
         var keys = entityType.FindPrimaryKey()?.Properties;
         if (keys == null || keys.Count == 0)
-            return;
+            return false;
+
+        var changedAny = false;
 
         foreach (var child in table.EnumerateObject())
         {
@@ -133,7 +194,7 @@ public sealed class FirebaseSqliteSyncService : BackgroundService
 
             try
             {
-                await UpsertRecordAsync(
+                changedAny |= await UpsertRecordAsync(
                     db,
                     entityType,
                     keys,
@@ -151,10 +212,16 @@ public sealed class FirebaseSqliteSyncService : BackgroundService
             }
         }
 
-        await db.SaveChangesAsync(ct);
+        if (changedAny)
+        {
+            using var syncScope = _firebaseSyncWriteScope.Enter();
+            await db.SaveChangesAsync(ct);
+        }
+
+        return changedAny;
     }
 
-    private static async Task UpsertRecordAsync(
+    private static async Task<bool> UpsertRecordAsync(
         AppDbContext db,
         IEntityType entityType,
         IReadOnlyList<IProperty> keys,
@@ -193,7 +260,7 @@ public sealed class FirebaseSqliteSyncService : BackgroundService
         }
 
         if (keyValues.Any(x => x is null))
-            return;
+            return false;
 
         var existing =
             await db.FindAsync(
@@ -206,7 +273,7 @@ public sealed class FirebaseSqliteSyncService : BackgroundService
             Activator.CreateInstance(entityType.ClrType);
 
         if (target == null)
-            return;
+            return false;
 
         var changed = false;
 
@@ -251,6 +318,8 @@ public sealed class FirebaseSqliteSyncService : BackgroundService
             db.Add(target);
         else if (existing != null && changed)
             db.Entry(target).State = EntityState.Modified;
+
+        return changed;
     }
 
     private static JsonElement? FindJsonValue(

@@ -19,7 +19,7 @@ namespace Payroll.Web.Services
     ///
     /// Admin and SuperAdmin accounts are NOT restricted.
     ///
-    /// The PostgreSQL UNIQUE(UserId) constraint is the final
+    /// The legacy database uniqueness constraint is the final
     /// concurrency authority.
     /// </summary>
     public sealed class EmployeeSingleSessionSignInManager

@@ -18,12 +18,12 @@ public sealed class FirebaseAuthController : ControllerBase
 
     /// <summary>
     /// Creates the Firebase custom token used by the browser realtime layer.
-    /// This endpoint deliberately does not query Neon/PostgreSQL. The
+    /// This endpoint deliberately does not query legacy PostgreSQL. The
     /// authenticated ASP.NET identity claims are already sufficient for the
     /// Firebase transport identity and role.
     ///
     /// Existing login/session flow is unchanged. This only removes an
-    /// unnecessary Neon dependency from the Firebase realtime connection.
+    /// unnecessary legacy database dependency from the Firebase realtime connection.
     /// </summary>
     [HttpGet("auth-token")]
     [Authorize]
@@ -41,7 +41,7 @@ public sealed class FirebaseAuthController : ControllerBase
         // EmployeeId is retained in the Firebase token contract for backward
         // compatibility. The existing Android employee identity remains in
         // its authenticated session; Firebase realtime access does not need
-        // a fresh Neon lookup here.
+        // a fresh database lookup here.
         var employeeIdClaim =
             User.FindFirst("employee_id")?.Value
             ?? User.FindFirst("EmployeeId")?.Value

@@ -35,6 +35,7 @@ public sealed class ApplicationDataChangeInterceptor : SaveChangesInterceptor
     private readonly AttendanceRefreshService _refreshService;
     private readonly FirebaseRealtimeService _firebase;
     private readonly IHttpContextAccessor _httpContextAccessor;
+    private readonly FirebaseSyncWriteScope _firebaseSyncWriteScope;
 
     private readonly ConditionalWeakTable<DbContext, PendingChange> _pending = new();
 
@@ -54,11 +55,13 @@ public sealed class ApplicationDataChangeInterceptor : SaveChangesInterceptor
     public ApplicationDataChangeInterceptor(
         AttendanceRefreshService refreshService,
         FirebaseRealtimeService firebase,
-        IHttpContextAccessor httpContextAccessor)
+        IHttpContextAccessor httpContextAccessor,
+        FirebaseSyncWriteScope firebaseSyncWriteScope)
     {
         _refreshService = refreshService;
         _firebase = firebase;
         _httpContextAccessor = httpContextAccessor;
+        _firebaseSyncWriteScope = firebaseSyncWriteScope;
     }
 
     public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
@@ -117,7 +120,7 @@ public sealed class ApplicationDataChangeInterceptor : SaveChangesInterceptor
 
     private void MarkIfUserFacingChange(DbContext? db)
     {
-        if (db == null)
+        if (db == null || _firebaseSyncWriteScope.IsActive)
             return;
 
         var changedEntities = db.ChangeTracker
