@@ -6,20 +6,9 @@ using Payroll.Shared.Data;
 namespace Payroll.Web.Services;
 
 /// <summary>
-/// Background reconciliation service for Firebase Employee/Admin/SuperAdmin
-/// claims.
-///
-/// IMPORTANT:
-/// - This service does NOT generate passwords.
-/// - This service does NOT change Firebase passwords.
-/// - This service does NOT send credentials by email.
-/// - Employee Firebase Authentication accounts are created automatically
-///   during Employee creation, using the password entered by the Admin.
-/// - This service only synchronizes Firebase custom claims for accounts
-///   that already exist.
-///
-/// Firebase is the realtime synchronization/SSOT layer.
-/// Existing application/database logic is preserved.
+/// One-time/backfill provisioning for Firebase Console-created Employee Auth
+/// accounts. It adds the canonical employee_id/role/owner_uid claims without
+/// changing passwords or payroll data.
 /// </summary>
 public sealed class FirebaseEmployeeProvisioningService : BackgroundService
 {
@@ -42,7 +31,10 @@ public sealed class FirebaseEmployeeProvisioningService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Give the application a moment to finish startup.
+        // Firebase claims are the long-lived bridge between the Firebase Auth
+        // account and the existing payroll employee record. This reconciliation
+        // intentionally keeps running so Firebase Console-created users are
+        // provisioned even when they are added after Web startup.
         await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
@@ -51,8 +43,7 @@ public sealed class FirebaseEmployeeProvisioningService : BackgroundService
             {
                 await ProvisionLinkedEmployeesAsync(stoppingToken);
             }
-            catch (OperationCanceledException)
-                when (stoppingToken.IsCancellationRequested)
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
                 return;
             }
@@ -60,145 +51,69 @@ public sealed class FirebaseEmployeeProvisioningService : BackgroundService
             {
                 _logger.LogWarning(
                     ex,
-                    "Firebase claim provisioning cycle failed. " +
-                    "The next cycle will retry automatically.");
+                    "Firebase Employee claim provisioning cycle failed; the next cycle will retry.");
             }
 
-            // Background reconciliation only.
-            // Realtime CRUD synchronization is handled by the Firebase
-            // realtime pipeline and does not depend on this interval.
-            await Task.Delay(
-                TimeSpan.FromSeconds(300),
-                stoppingToken);
+            await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
         }
     }
 
     private async Task ProvisionLinkedEmployeesAsync(CancellationToken ct)
     {
         var auth = await _firebase.GetFirebaseAuthAsync(ct);
-
         if (auth == null)
-        {
-            throw new InvalidOperationException(
-                "Firebase Admin SDK is not configured.");
-        }
+            throw new InvalidOperationException("Firebase Admin SDK is not configured.");
 
         using var scope = _scopeFactory.CreateScope();
+        var users = scope.ServiceProvider.GetRequiredService<UserManager<IdentityUser>>();
+        var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<AppDbContext>>();
+        await using var db = await factory.CreateDbContextAsync(ct);
 
-        var users =
-            scope.ServiceProvider
-                .GetRequiredService<UserManager<IdentityUser>>();
-
-        var factory =
-            scope.ServiceProvider
-                .GetRequiredService<IDbContextFactory<AppDbContext>>();
-
-        await using var db =
-            await factory.CreateDbContextAsync(ct);
-
-        var employees = await db.Employees
-            .AsNoTracking()
-            .Where(x =>
-                !x.IsDeleted &&
-                x.EmployeeID > 0 &&
-                x.Email != null &&
-                x.Email != "")
+        var employees = await db.Employees.AsNoTracking()
+            .Where(x => !x.IsDeleted && x.EmployeeID > 0 && x.Email != null && x.Email != "")
             .ToListAsync(ct);
 
-        var ownerUid =
-            _configuration["Firebase:OwnerUid"]
+        var ownerUid = _configuration["Firebase:OwnerUid"]
             ?? Environment.GetEnvironmentVariable("FIREBASE_OWNER_UID")
             ?? "biometricpayroll";
 
         var count = 0;
-
         foreach (var employee in employees)
         {
             ct.ThrowIfCancellationRequested();
-
             var email = employee.Email!.Trim();
 
-            if (string.IsNullOrWhiteSpace(email))
-                continue;
-
-            /*
-             * Check ASP.NET Identity only to make sure that an Admin or
-             * SuperAdmin account is never accidentally assigned Employee
-             * Firebase claims.
-             */
+            // The payroll Employee row is the canonical link for an Employee.
+            // Identity is consulted only to avoid accidentally stamping an
+            // Admin/SuperAdmin account as Employee. Firebase Console-created
+            // users do not need an Identity row for this claim backfill.
             IdentityUser? identity = null;
-
             if (!string.IsNullOrWhiteSpace(employee.AspNetUserId))
-            {
-                identity = await users.FindByIdAsync(
-                    employee.AspNetUserId);
-            }
-
+                identity = await users.FindByIdAsync(employee.AspNetUserId);
             identity ??= await users.FindByEmailAsync(email);
 
             if (identity != null)
             {
-                var identityRoles =
-                    await users.GetRolesAsync(identity);
-
+                var identityRoles = await users.GetRolesAsync(identity);
                 if (identityRoles.Any(role =>
-                        role.Equals(
-                            "Admin",
-                            StringComparison.OrdinalIgnoreCase) ||
-                        role.Equals(
-                            "SuperAdmin",
-                            StringComparison.OrdinalIgnoreCase)))
-                {
+                        role.Equals("Admin", StringComparison.OrdinalIgnoreCase) ||
+                        role.Equals("SuperAdmin", StringComparison.OrdinalIgnoreCase)))
                     continue;
-                }
             }
 
-            UserRecord firebaseUser;
-
+            UserRecord? firebaseUser;
             try
             {
-                /*
-                 * IMPORTANT:
-                 *
-                 * We ONLY look up an existing Firebase Auth account here.
-                 *
-                 * We do NOT create a random password.
-                 * We do NOT log a password.
-                 * We do NOT send a generated password.
-                 *
-                 * New employee accounts are created automatically during
-                 * Employee creation using the Admin-entered password.
-                 */
-                firebaseUser =
-                    await auth.GetUserByEmailAsync(
-                        email,
-                        ct);
+                firebaseUser = await auth.GetUserByEmailAsync(email, ct);
             }
-            catch (FirebaseAuthException ex)
-                when (ex.AuthErrorCode == AuthErrorCode.UserNotFound)
+            catch (FirebaseAuthException ex) when (ex.AuthErrorCode == AuthErrorCode.UserNotFound)
             {
-                _logger.LogInformation(
-                    "Firebase Auth account does not yet exist for employee {Email}. " +
-                    "Waiting for automatic provisioning during Employee creation.",
-                    email);
-
-                continue;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(
-                    ex,
-                    "Unable to look up Firebase employee account for {Email}. " +
-                    "The next reconciliation cycle will retry.",
-                    email);
-
+                // Do not create an account here because this service must never
+                // invent or persist an employee password. User Management or a
+                // successful one-time password migration creates the Auth user.
                 continue;
             }
 
-            /*
-             * Firebase claims are the canonical bridge between the
-             * Firebase Authentication user and the payroll Employee.
-             */
             await auth.SetCustomUserClaimsAsync(
                 firebaseUser.Uid,
                 new Dictionary<string, object>
@@ -212,20 +127,10 @@ public sealed class FirebaseEmployeeProvisioningService : BackgroundService
             count++;
         }
 
-        /*
-         * Keep Admin and SuperAdmin claim synchronization.
-         *
-         * This also does NOT create passwords or Firebase accounts.
-         */
-        await ProvisionAdministrativeUsersAsync(
-            users,
-            auth,
-            ownerUid,
-            ct);
+        await ProvisionAdministrativeUsersAsync(users, auth, ownerUid, ct);
 
         _logger.LogInformation(
-            "Firebase claim provisioning cycle completed. " +
-            "Employees provisioned: {Count}.",
+            "Firebase claim provisioning cycle completed. Employees provisioned: {Count}.",
             count);
     }
 
@@ -235,70 +140,29 @@ public sealed class FirebaseEmployeeProvisioningService : BackgroundService
         string ownerUid,
         CancellationToken ct)
     {
-        var identities =
-            await users.Users
-                .AsNoTracking()
-                .ToListAsync(ct);
+        var identities = await users.Users.AsNoTracking().ToListAsync(ct);
 
         foreach (var identity in identities)
         {
             ct.ThrowIfCancellationRequested();
 
-            if (string.IsNullOrWhiteSpace(identity.Email))
+            var roles = await users.GetRolesAsync(identity);
+            var role = roles.FirstOrDefault(r =>
+                r.Equals("SuperAdmin", StringComparison.OrdinalIgnoreCase) ||
+                r.Equals("Admin", StringComparison.OrdinalIgnoreCase));
+
+            if (role == null || string.IsNullOrWhiteSpace(identity.Email))
                 continue;
-
-            var roles =
-                await users.GetRolesAsync(identity);
-
-            var role =
-                roles.FirstOrDefault(r =>
-                    r.Equals(
-                        "SuperAdmin",
-                        StringComparison.OrdinalIgnoreCase) ||
-                    r.Equals(
-                        "Admin",
-                        StringComparison.OrdinalIgnoreCase));
-
-            if (role == null)
-                continue;
-
-            var email = identity.Email.Trim();
 
             UserRecord firebaseUser;
-
             try
             {
-                /*
-                 * Admin/SuperAdmin Firebase accounts must already exist.
-                 *
-                 * Never generate or change an administrative password from
-                 * this background reconciliation service.
-                 */
-                firebaseUser =
-                    await auth.GetUserByEmailAsync(
-                        email,
-                        ct);
+                firebaseUser = await auth.GetUserByEmailAsync(identity.Email.Trim(), ct);
             }
-            catch (FirebaseAuthException ex)
-                when (ex.AuthErrorCode == AuthErrorCode.UserNotFound)
+            catch (FirebaseAuthException ex) when (ex.AuthErrorCode == AuthErrorCode.UserNotFound)
             {
-                _logger.LogInformation(
-                    "Firebase Auth account does not exist for {Role} {Email}. " +
-                    "Waiting for normal administrative provisioning.",
-                    role,
-                    email);
-
-                continue;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(
-                    ex,
-                    "Unable to look up Firebase account for {Role} {Email}. " +
-                    "The next reconciliation cycle will retry.",
-                    role,
-                    email);
-
+                // Never invent an administrative password here. The account
+                // must first exist in Firebase Authentication.
                 continue;
             }
 
@@ -312,4 +176,5 @@ public sealed class FirebaseEmployeeProvisioningService : BackgroundService
                 ct);
         }
     }
+
 }
