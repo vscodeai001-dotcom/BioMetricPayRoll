@@ -11,6 +11,7 @@
 @inject Payroll.Web.Services.AttendanceRefreshService AttendanceRefresh
 @inject IJSRuntime JSRuntime
 @inject IToastService toastService
+@inject Payroll.Web.Services.FirebaseEmployeeManagementService FirebaseEmployees
 @inject UserManager<IdentityUser> UserManager
 @inject NotificationService NotificationService
 @inject IEmailSender EmailSender // Assuming email is needed for rejected submissions
@@ -122,7 +123,7 @@ else
             .AsNoTracking()
             .ToListAsync();
         
-        var employees = await db.Employees.AsNoTracking().ToDictionaryAsync(e => e.EmployeeID);
+        var employees = (await FirebaseEmployees.GetEmployeesAsync()).ToDictionary(e => e.EmployeeID);
         
         // Aggregate submissions by EmployeeId
         var aggregated = submissions.GroupBy(d => d.EmployeeId)

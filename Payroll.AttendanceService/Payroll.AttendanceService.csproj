@@ -14,7 +14,6 @@
 
     <PublishTrimmed>false</PublishTrimmed>
 
-    <EnableComHosting>true</EnableComHosting>
     <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
 
     <NoWarn>MSB3305</NoWarn>

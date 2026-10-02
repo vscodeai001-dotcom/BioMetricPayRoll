@@ -1,9 +1,8 @@
 @page "/my-shifts"
 @using Microsoft.AspNetCore.Authorization
-@using Microsoft.EntityFrameworkCore
 @using global::Payroll.Shared.Data
 @using Microsoft.AspNetCore.Components.Authorization
-@inject IDbContextFactory<AppDbContext> DbFactory
+@inject Payroll.Web.Services.FirebaseShiftScheduleService FirebaseShiftSchedules
 @inject AuthenticationStateProvider AuthStateProvider
 @inject IToastService toastService
 @inject NavigationManager Navigation
@@ -24,47 +23,78 @@
 }
 else
 {
-    <h3>My Shift Schedule</h3>
-    <p>View your assigned working hours for the month.</p>
+    <div class="page-header-container">
+        <div class="d-flex align-items-center gap-3">
+            <div class="emoji-icon-badge emoji-icon-badge-info">
+                🔄
+            </div>
+            <div>
+                <h2 class="page-header-title">
+                    My Shift Schedule & Roster
+                </h2>
+                <p class="page-header-subtitle">
+                    <span>⏰ View your assigned shift hours, weekly off schedule and rotation timings</span>
+                </p>
+            </div>
+        </div>
 
-    <div class="row mb-3">
-        <div class="col-md-4">
-            <input type="month" class="form-control" @bind="selectedMonth" @bind:after="LoadShifts" />
+        <div class="d-flex align-items-center gap-2">
+            <span class="badge bg-info bg-opacity-10 text-info rounded-pill px-3 py-2 fw-semibold">
+                <span>🌅 Morning</span> • <span>🌆 Evening</span> • <span>🌙 Night</span>
+            </span>
+        </div>
+    </div>
+
+    <div class="card border-0 shadow-sm rounded-4 mb-4">
+        <div class="card-body p-3 p-md-4">
+            <div class="row align-items-center">
+                <div class="col-md-4">
+                    <label class="form-label small fw-bold text-muted">📅 Select Month</label>
+                    <input type="month" class="form-control rounded-3" @bind="selectedMonth" @bind:after="LoadShifts" />
+                </div>
+            </div>
         </div>
     </div>
 
     @if (isLoading)
     {
-        <p><em>Loading schedule...</em></p>
+        <div class="text-center p-5">
+            <div class="spinner-border text-primary" role="status"></div>
+            <p class="mt-3 text-muted fw-semibold">Loading your shift roster... 🔄</p>
+        </div>
     }
     else if (shifts == null || !shifts.Any())
     {
-        <div class="alert alert-info">
-            No specific shifts scheduled for this month. You are likely on the <strong>Default Shift</strong>.
+        <div class="alert alert-info rounded-4 p-4 shadow-sm mb-4">
+            <span class="fs-4 me-2">ℹ️</span>
+            No custom shifts scheduled for this month. You are assigned to the <strong>Default Shift</strong>.
         </div>
         @if (defaultShift != null)
         {
-            <div class="card shadow-sm w-50">
-                <div class="card-body">
-                    <h6>Default Shift Profile</h6>
-                    <p class="mb-1"><strong>Time:</strong> @(defaultShift.ShiftStartTime?.ToString("hh:mm tt") ?? "N/A") - @(defaultShift.ShiftEndTime?.ToString("hh:mm tt") ?? "N/A")</p>
-                    <p class="mb-0"><strong>Weekly Off:</strong> @(defaultShift.CompOffDayOfWeek?.ToString() ?? "None")</p>
+            <div class="card border-0 shadow-sm rounded-4 w-100 w-md-50">
+                <div class="card-body p-4">
+                    <h6 class="fw-bold d-flex align-items-center gap-2">
+                        <span>⏰</span> Default Shift Profile
+                    </h6>
+                    <p class="mb-1 text-muted"><strong>Time:</strong> @(defaultShift.ShiftStartTime?.ToString("hh:mm tt") ?? "N/A") - @(defaultShift.ShiftEndTime?.ToString("hh:mm tt") ?? "N/A")</p>
+                    <p class="mb-0 text-muted"><strong>Weekly Off:</strong> @(defaultShift.CompOffDayOfWeek?.ToString() ?? "None")</p>
                 </div>
             </div>
         }
     }
     else
     {
-        <div class="table-responsive">
-            <table class="table table-sm table-striped table-bordered">
-                <thead class="table-dark">
-                    <tr>
-                        <th>Date</th>
-                        <th>Day</th>
-                        <th>Shift Time</th>
-                        <th>Status</th>
-                    </tr>
-                </thead>
+        <div class="table-responsive-card">
+            <div class="table-responsive">
+                <table class="table table-hover align-middle mb-0">
+                    <thead>
+                        <tr>
+                            <th>📅 Date</th>
+                            <th>🗓️ Day of Week</th>
+                            <th>⏰ Scheduled Shift</th>
+                            <th>📌 Status / Type</th>
+                        </tr>
+                    </thead>
                 <tbody>
                     @foreach (var day in daysInMonth)
                     {
@@ -98,7 +128,8 @@ else
                 </tbody>
             </table>
         </div>
-    }
+    </div>
+}
 }
 
 <AttendanceRefreshListener OnAttendanceChanged="HandleRealtimeRefresh" />
@@ -121,50 +152,47 @@ else
         isLoading = true;
         try
         {
-            await using var db = await DbFactory.CreateDbContextAsync();
-
-            // 1. SECURITY CHECK
-            var settings = await db.FeatureSettings.AsNoTracking().FirstOrDefaultAsync(s => s.Id == 1);
-            if (settings != null)
+            // 1. SECURITY / FEATURE CHECK from Firebase SSOT.
+            var isModuleEnabled = await FirebaseShiftSchedules.IsShiftSchedulingEnabledAsync();
+            var canView = await FirebaseShiftSchedules.CanEmployeeViewShiftsAsync();
+            if (!isModuleEnabled || !canView)
             {
-                // Strict Hierarchy: EnableShiftScheduling (Parent) -> EmployeeCanViewShifts (Child)
-                bool isModuleEnabled = settings.EnableShiftScheduling;
-                bool canView = settings.EmployeeCanViewShifts;
-
-                if (!isModuleEnabled || !canView)
-                {
-                    isAccessDenied = true;
-                    isLoading = false;
-                    return;
-                }
+                isAccessDenied = true;
+                isLoading = false;
+                return;
             }
 
-            // 2. Load Data
+            isAccessDenied = false;
+
+            // 2. Resolve the authenticated employee against the canonical
+            // Firebase employee directory.
             var auth = await AuthStateProvider.GetAuthenticationStateAsync();
-            var email = auth.User.Identity?.Name;
+            var employeeId = int.TryParse(
+                auth.User.FindFirst("employee_id")?.Value, out var claimedEmployeeId)
+                ? claimedEmployeeId
+                : 0;
 
-            if (email != null)
+            // Employee-scoped Firebase rules allow the authenticated employee
+            // to read only their own employee record. Do not read the entire
+            // employees collection and do not fall back to the legacy DB.
+            var emp = await FirebaseShiftSchedules.GetEmployeeAsync(employeeId);
+
+            if (emp == null)
             {
-                var emp = await db.Employees.AsNoTracking().FirstOrDefaultAsync(e => e.Email == email);
-
-                if (emp != null)
-                {
-                    defaultShift = emp;
-                    var start = new DateOnly(selectedMonth.Year, selectedMonth.Month, 1);
-                    var end = start.AddMonths(1).AddDays(-1);
-
-                    daysInMonth.Clear();
-                    for (var dt = start; dt <= end; dt = dt.AddDays(1))
-                    {
-                        daysInMonth.Add(dt);
-                    }
-
-                    shifts = await db.ShiftSchedules
-                        .AsNoTracking()
-                        .Where(s => s.EmployeeID == emp.EmployeeID && s.ShiftDate >= start && s.ShiftDate <= end)
-                        .ToListAsync();
-                }
+                shifts.Clear();
+                defaultShift = null;
+                return;
             }
+
+            defaultShift = emp;
+            var start = new DateOnly(selectedMonth.Year, selectedMonth.Month, 1);
+            var end = start.AddMonths(1).AddDays(-1);
+
+            daysInMonth.Clear();
+            for (var dt = start; dt <= end; dt = dt.AddDays(1))
+                daysInMonth.Add(dt);
+
+            shifts = await FirebaseShiftSchedules.GetSchedulesAsync(emp.EmployeeID, start, end);
         }
         finally { isLoading = false; }
     }

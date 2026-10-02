@@ -1,0 +1,583 @@
+@page "/my-profile"
+@page "/employee/profile"
+@page "/Identity/Account/Manage"
+@page "/Identity/Account/Manage/Index"
+
+@using System.Globalization
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.EntityFrameworkCore
+@using global::Payroll.Shared.Data
+@using global::Payroll.Web.Services
+@attribute [Authorize]
+
+@inject NavigationManager Navigation
+@inject AuthenticationStateProvider Auth
+@inject FirebaseEmployeeManagementService FirebaseEmployees
+@inject FirebaseUserManagementService UserService
+@inject IDbContextFactory<AppDbContext> DbFactory
+
+<PageTitle>Employee Profile - BioMetric + Payroll</PageTitle>
+
+<style>
+    .profile-container {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 1.5rem 1rem 3rem 1rem;
+    }
+
+    .profile-hero-card {
+        background: #ffffff;
+        border: 1px solid rgba(0, 0, 0, 0.08);
+        border-radius: 20px;
+        padding: 2rem;
+        box-shadow: 0 10px 25px rgba(0, 0, 0, 0.04);
+        margin-bottom: 1.75rem;
+        transition: all 0.25s ease;
+        position: relative;
+        overflow: hidden;
+    }
+
+    .profile-hero-card::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 6px;
+        background: linear-gradient(90deg, #4f46e5, #06b6d4, #10b981);
+    }
+
+    body.dark .profile-hero-card,
+    [data-bs-theme="dark"] .profile-hero-card {
+        background: #1b2430;
+        border-color: rgba(255, 255, 255, 0.1);
+        box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+    }
+
+    .profile-avatar-box {
+        width: 96px;
+        height: 96px;
+        border-radius: 50%;
+        display: grid;
+        place-items: center;
+        background: linear-gradient(135deg, rgba(79, 70, 229, 0.15), rgba(6, 182, 212, 0.15));
+        border: 3px solid #4f46e5;
+        color: #4f46e5;
+        font-size: 2.5rem;
+        font-weight: 800;
+        margin: 0 auto 1.25rem auto;
+        box-shadow: 0 8px 20px rgba(79, 70, 229, 0.2);
+    }
+
+    body.dark .profile-avatar-box,
+    [data-bs-theme="dark"] .profile-avatar-box {
+        background: linear-gradient(135deg, rgba(99, 102, 241, 0.25), rgba(45, 212, 191, 0.25));
+        border-color: #818cf8;
+        color: #a5b4fc;
+        box-shadow: 0 8px 22px rgba(0, 0, 0, 0.4);
+    }
+
+    .profile-section-title {
+        font-size: 1rem;
+        font-weight: 800;
+        letter-spacing: 0.3px;
+        color: #4f46e5;
+        margin-bottom: 0.85rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    body.dark .profile-section-title,
+    [data-bs-theme="dark"] .profile-section-title {
+        color: #818cf8;
+    }
+
+    .profile-card {
+        background: #ffffff;
+        border: 1px solid rgba(0, 0, 0, 0.08);
+        border-radius: 16px;
+        padding: 1.5rem;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.03);
+        margin-bottom: 1.75rem;
+    }
+
+    body.dark .profile-card,
+    [data-bs-theme="dark"] .profile-card {
+        background: #1b2430;
+        border-color: rgba(255, 255, 255, 0.08);
+        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25);
+    }
+
+    .profile-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+        gap: 1rem;
+    }
+
+    .profile-item {
+        background: #f8fafc;
+        border: 1px solid rgba(0, 0, 0, 0.05);
+        border-radius: 12px;
+        padding: 0.85rem 1rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.3rem;
+        transition: all 0.2s ease;
+    }
+
+    body.dark .profile-item,
+    [data-bs-theme="dark"] .profile-item {
+        background: #232d3d;
+        border-color: rgba(255, 255, 255, 0.06);
+    }
+
+    .profile-item:hover {
+        border-color: rgba(79, 70, 229, 0.3);
+        transform: translateY(-2px);
+    }
+
+    .profile-item-label {
+        font-size: 0.75rem;
+        font-weight: 700;
+        color: #64748b;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+    }
+
+    body.dark .profile-item-label,
+    [data-bs-theme="dark"] .profile-item-label {
+        color: #94a3b8;
+    }
+
+    .profile-item-value {
+        font-size: 0.95rem;
+        font-weight: 800;
+        color: #0f172a;
+        word-break: break-word;
+    }
+
+    body.dark .profile-item-value,
+    [data-bs-theme="dark"] .profile-item-value {
+        color: #f1f5f9;
+    }
+
+    .profile-badge-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.25rem 0.75rem;
+        border-radius: 999px;
+        font-size: 0.8rem;
+        font-weight: 700;
+    }
+</style>
+
+<div class="profile-container">
+    @if (isLoading)
+    {
+        <div class="p-5 text-center">
+            <div class="spinner-border text-primary" role="status"></div>
+            <p class="mt-3 text-muted fw-semibold">Loading employee profile details...</p>
+        </div>
+    }
+    else
+    {
+        <!-- =====================================================
+             TOP ACTION BAR
+             ===================================================== -->
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <div>
+                <button type="button" class="btn btn-outline-secondary btn-sm rounded-pill px-3" @onclick="GoBack">
+                    <i class="bi bi-arrow-left me-1"></i> Back
+                </button>
+            </div>
+            <div>
+                <span class="badge bg-primary-subtle text-primary border border-primary-subtle px-3 py-2 rounded-pill">
+                    <i class="bi bi-shield-check me-1"></i> Verified Account
+                </span>
+            </div>
+        </div>
+
+        <!-- =====================================================
+             PROFILE HERO CARD (Matches Android ivProfile / Name / Role)
+             ===================================================== -->
+        <div class="profile-hero-card text-center">
+            <div class="profile-avatar-box">
+                @GetAvatarInitials()
+            </div>
+
+            <h3 class="fw-bold mb-1">
+                @(linkedEmployee?.Name ?? userEmail) 👤
+            </h3>
+
+            <p class="text-muted fw-semibold mb-3">
+                @(string.IsNullOrWhiteSpace(linkedEmployee?.Role) ? userRole : linkedEmployee.Role) 👔
+            </p>
+
+            <div class="d-flex justify-content-center flex-wrap gap-2">
+                @if (linkedEmployee != null)
+                {
+                    <span class="profile-badge-pill bg-success-subtle text-success border border-success-subtle">
+                        <span class="spinner-grow spinner-grow-sm text-success me-1" style="width: 7px; height: 7px;"></span>
+                        Active Staff
+                    </span>
+                    <span class="profile-badge-pill bg-primary-subtle text-primary border border-primary-subtle">
+                        🆔 ID: @linkedEmployee.EmployeeID
+                    </span>
+                    @if (!string.IsNullOrWhiteSpace(linkedEmployee.BiometricID))
+                    {
+                        <span class="profile-badge-pill bg-info-subtle text-info border border-info-subtle">
+                            🧬 Bio ID: @linkedEmployee.BiometricID
+                        </span>
+                    }
+                }
+                else
+                {
+                    <span class="profile-badge-pill bg-info-subtle text-info border border-info-subtle">
+                        🛡️ @userRole
+                    </span>
+                }
+
+                @if (!string.IsNullOrWhiteSpace(tenantName))
+                {
+                    <span class="profile-badge-pill bg-secondary-subtle text-secondary border border-secondary-subtle">
+                        🏢 @tenantName
+                    </span>
+                }
+            </div>
+        </div>
+
+        @if (linkedEmployee != null)
+        {
+            <!-- =====================================================
+                 EMPLOYMENT DETAILS (Matches Android detailEmpId, detailEmail, etc.)
+                 ===================================================== -->
+            <div class="profile-section-title">
+                <span>📋</span> Employment Details
+            </div>
+            <div class="profile-card">
+                <div class="profile-grid">
+                    <div class="profile-item">
+                        <span class="profile-item-label">🆔 Employee ID</span>
+                        <span class="profile-item-value">@linkedEmployee.EmployeeID</span>
+                    </div>
+
+                    <div class="profile-item">
+                        <span class="profile-item-label">✉️ Official Email</span>
+                        <span class="profile-item-value">@(string.IsNullOrWhiteSpace(linkedEmployee.Email) ? "--" : linkedEmployee.Email)</span>
+                    </div>
+
+                    <div class="profile-item">
+                        <span class="profile-item-label">📱 Phone Number</span>
+                        <span class="profile-item-value">@(string.IsNullOrWhiteSpace(linkedEmployee.PhoneNumber) ? "--" : linkedEmployee.PhoneNumber)</span>
+                    </div>
+
+                    <div class="profile-item">
+                        <span class="profile-item-label">🗓️ Joining Date</span>
+                        <span class="profile-item-value">@(linkedEmployee.HireDate.HasValue ? linkedEmployee.HireDate.Value.ToString("dd MMMM yyyy") : "--")</span>
+                    </div>
+
+                    <div class="profile-item">
+                        <span class="profile-item-label">🕒 Assigned Shift</span>
+                        <span class="profile-item-value">
+                            @FormatShift()
+                        </span>
+                    </div>
+
+                    <div class="profile-item">
+                        <span class="profile-item-label">💰 Gross Salary</span>
+                        <span class="profile-item-value text-success">
+                            @FormatSalary()
+                        </span>
+                    </div>
+
+                    <div class="profile-item">
+                        <span class="profile-item-label">💼 Salary Mode</span>
+                        <span class="profile-item-value">@linkedEmployee.SalaryType</span>
+                    </div>
+
+                    <div class="profile-item">
+                        <span class="profile-item-label">📊 Calculation Method</span>
+                        <span class="profile-item-value">@(string.IsNullOrWhiteSpace(linkedEmployee.SalaryCalculationMethod) ? "Pro-Rata Hourly" : linkedEmployee.SalaryCalculationMethod)</span>
+                    </div>
+
+                    <div class="profile-item">
+                        <span class="profile-item-label">⏱️ Daily Hours</span>
+                        <span class="profile-item-value">@linkedEmployee.StandardHours hrs / day (Break: @linkedEmployee.StandardBreakMinutes mins)</span>
+                    </div>
+
+                    <div class="profile-item">
+                        <span class="profile-item-label">🏖️ Paid Leave Balance</span>
+                        <span class="profile-item-value">@linkedEmployee.PaidLeaveBalance.ToString("0.0") Days</span>
+                    </div>
+
+                    <div class="profile-item">
+                        <span class="profile-item-label">🤒 Sick Leave Balance</span>
+                        <span class="profile-item-value">@linkedEmployee.SickLeaveBalance.ToString("0.0") Days</span>
+                    </div>
+
+                    <div class="profile-item">
+                        <span class="profile-item-label">⚙️ Overtime Rule</span>
+                        <span class="profile-item-value">@linkedEmployee.OT_Rule</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- =====================================================
+                 BANKING & STATUTORY (Matches Android detailBank, detailIfsc, etc.)
+                 ===================================================== -->
+            <div class="profile-section-title">
+                <span>🏦</span> Banking &amp; Statutory
+            </div>
+            <div class="profile-card">
+                <div class="profile-grid">
+                    <div class="profile-item">
+                        <span class="profile-item-label">🏦 Bank Name</span>
+                        <span class="profile-item-value">@(string.IsNullOrWhiteSpace(linkedEmployee.BankName) ? "--" : linkedEmployee.BankName)</span>
+                    </div>
+
+                    <div class="profile-item">
+                        <span class="profile-item-label">🔢 IFSC Code</span>
+                        <span class="profile-item-value">@(string.IsNullOrWhiteSpace(linkedEmployee.BankIfscCode) ? "--" : linkedEmployee.BankIfscCode)</span>
+                    </div>
+
+                    <div class="profile-item">
+                        <span class="profile-item-label">💳 Account Number</span>
+                        <span class="profile-item-value">@(string.IsNullOrWhiteSpace(linkedEmployee.BankAccountNumber) ? "--" : FormatMaskedAccount(linkedEmployee.BankAccountNumber))</span>
+                    </div>
+
+                    <div class="profile-item">
+                        <span class="profile-item-label">🛡️ PF UAN</span>
+                        <span class="profile-item-value">@(string.IsNullOrWhiteSpace(linkedEmployee.UAN) ? (linkedEmployee.EnablePF ? "Enrolled" : "Not Enrolled") : linkedEmployee.UAN)</span>
+                    </div>
+
+                    <div class="profile-item">
+                        <span class="profile-item-label">🏥 ESI Number</span>
+                        <span class="profile-item-value">@(string.IsNullOrWhiteSpace(linkedEmployee.ESINumber) ? (linkedEmployee.EnableESI ? "Enrolled" : "Not Enrolled") : linkedEmployee.ESINumber)</span>
+                    </div>
+                </div>
+            </div>
+        }
+        else
+        {
+            <div class="alert alert-info border-0 shadow-sm rounded-4 mb-4">
+                <i class="bi bi-info-circle-fill me-2"></i>
+                You are currently logged in as <strong>@userRole</strong> (@userEmail). No separate employee payroll record is linked to this account.
+            </div>
+        }
+
+        <!-- =====================================================
+             SECURITY & PASSWORD UPDATE
+             ===================================================== -->
+        <div class="profile-section-title">
+            <span>🔒</span> Security &amp; Credentials
+        </div>
+        <div class="profile-card">
+            <h6 class="fw-bold mb-2">Update Account Password</h6>
+            <p class="text-muted small mb-3">Ensure your new password contains at least 6 characters.</p>
+
+            @if (!string.IsNullOrWhiteSpace(passwordSuccessMessage))
+            {
+                <div class="alert alert-success alert-dismissible fade show rounded-3" role="alert">
+                    <i class="bi bi-check-circle-fill me-2"></i> @passwordSuccessMessage
+                    <button type="button" class="btn-close" @onclick="() => passwordSuccessMessage = null"></button>
+                </div>
+            }
+
+            @if (!string.IsNullOrWhiteSpace(passwordErrorMessage))
+            {
+                <div class="alert alert-danger alert-dismissible fade show rounded-3" role="alert">
+                    <i class="bi bi-exclamation-triangle-fill me-2"></i> @passwordErrorMessage
+                    <button type="button" class="btn-close" @onclick="() => passwordErrorMessage = null"></button>
+                </div>
+            }
+
+            <div class="row g-3" style="max-width: 520px;">
+                <div class="col-12">
+                    <label class="form-label small fw-bold">New Password</label>
+                    <input type="password" class="form-control" @bind="newPassword" placeholder="Enter new password (min. 6 chars)" />
+                </div>
+                <div class="col-12">
+                    <label class="form-label small fw-bold">Confirm New Password</label>
+                    <input type="password" class="form-control" @bind="confirmPassword" placeholder="Confirm new password" />
+                </div>
+                <div class="col-12 mt-3">
+                    <button type="button" class="btn btn-primary rounded-pill px-4" @onclick="HandlePasswordUpdate" disabled="@isUpdatingPassword">
+                        @if (isUpdatingPassword)
+                        {
+                            <span class="spinner-border spinner-border-sm me-1"></span>
+                            <span>Updating...</span>
+                        }
+                        else
+                        {
+                            <i class="bi bi-key-fill me-1"></i>
+                            <span>Update Password</span>
+                        }
+                    </button>
+                </div>
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    private Employee? linkedEmployee;
+    private bool isLoading = true;
+    private string userEmail = "";
+    private string userRole = "Employee";
+    private string tenantName = "";
+
+    // Password Update State
+    private string newPassword = "";
+    private string confirmPassword = "";
+    private bool isUpdatingPassword = false;
+    private string? passwordSuccessMessage;
+    private string? passwordErrorMessage;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadProfileData();
+    }
+
+    private async Task LoadProfileData()
+    {
+        isLoading = true;
+        try
+        {
+            var authState = await Auth.GetAuthenticationStateAsync();
+            var user = authState.User;
+
+            if (user.Identity?.IsAuthenticated == true)
+            {
+                userEmail = user.Identity.Name ?? "";
+
+                if (user.IsInRole("SuperAdmin")) userRole = "SuperAdmin";
+                else if (user.IsInRole("Admin")) userRole = "Admin";
+                else userRole = "Staff Member";
+
+                if (!string.IsNullOrWhiteSpace(userEmail))
+                {
+                    linkedEmployee = await FirebaseEmployees.GetEmployeeByEmailAsync(userEmail);
+
+                    // Fallback to local DB if not found in Firebase cache
+                    if (linkedEmployee == null)
+                    {
+                        await using var db = await DbFactory.CreateDbContextAsync();
+                        linkedEmployee = await db.Employees
+                            .AsNoTracking()
+                            .FirstOrDefaultAsync(e => e.Email == userEmail && !e.IsDeleted);
+
+                        if (linkedEmployee == null)
+                        {
+                            var userEntity = await db.Users.FirstOrDefaultAsync(u => u.Email == userEmail || u.UserName == userEmail);
+                            if (userEntity != null)
+                            {
+                                linkedEmployee = await db.Employees
+                                    .AsNoTracking()
+                                    .FirstOrDefaultAsync(e => e.AspNetUserId == userEntity.Id && !e.IsDeleted);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error loading employee profile: {ex}");
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private string GetAvatarInitials()
+    {
+        var name = linkedEmployee?.Name ?? userEmail;
+        if (string.IsNullOrWhiteSpace(name)) return "👤";
+        var parts = name.Split(new[] { ' ', '.', '@', '_' }, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 1) return parts[0].Substring(0, Math.Min(2, parts[0].Length)).ToUpper();
+        return (parts[0][0].ToString() + parts[parts.Length - 1][0].ToString()).ToUpper();
+    }
+
+    private string FormatSalary()
+    {
+        if (linkedEmployee == null) return "--";
+        var culture = new CultureInfo("en-IN");
+        if (linkedEmployee.DirectHourlyWage > 0)
+        {
+            return string.Format(culture, "₹{0:N2} / hour", linkedEmployee.DirectHourlyWage);
+        }
+        return string.Format(culture, "₹{0:N2} / month", linkedEmployee.MonthlySalary);
+    }
+
+    private string FormatShift()
+    {
+        if (linkedEmployee == null) return "General Shift";
+        if (linkedEmployee.ShiftStartTime.HasValue && linkedEmployee.ShiftEndTime.HasValue)
+        {
+            var start = linkedEmployee.ShiftStartTime.Value.ToString("hh:mm tt");
+            var end = linkedEmployee.ShiftEndTime.Value.ToString("hh:mm tt");
+            return $"{start} - {end}";
+        }
+        return "General Shift (10:00 AM - 10:00 PM)";
+    }
+
+    private string FormatMaskedAccount(string acc)
+    {
+        if (string.IsNullOrWhiteSpace(acc) || acc.Length <= 4) return acc;
+        return new string('•', acc.Length - 4) + acc.Substring(acc.Length - 4);
+    }
+
+    private async Task HandlePasswordUpdate()
+    {
+        passwordSuccessMessage = null;
+        passwordErrorMessage = null;
+
+        if (string.IsNullOrWhiteSpace(newPassword) || newPassword.Length < 6)
+        {
+            passwordErrorMessage = "Password must be at least 6 characters long.";
+            return;
+        }
+
+        if (newPassword != confirmPassword)
+        {
+            passwordErrorMessage = "Passwords do not match.";
+            return;
+        }
+
+        isUpdatingPassword = true;
+        try
+        {
+            var result = await UserService.ResetPasswordAsync(userEmail, newPassword);
+            if (result.Success)
+            {
+                passwordSuccessMessage = "Your password has been successfully updated!";
+                newPassword = "";
+                confirmPassword = "";
+            }
+            else
+            {
+                passwordErrorMessage = result.Message;
+            }
+        }
+        catch (Exception ex)
+        {
+            passwordErrorMessage = $"Password update failed: {ex.Message}";
+        }
+        finally
+        {
+            isUpdatingPassword = false;
+        }
+    }
+
+    private void GoBack()
+    {
+        Navigation.NavigateTo("employee-home");
+    }
+}

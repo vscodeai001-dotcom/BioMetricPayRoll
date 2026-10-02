@@ -1,74 +1,500 @@
-﻿@using global::Payroll.Shared.Data
+@using global::Payroll.Shared.Data
+@inject IJSRuntime JS
+@implements IAsyncDisposable
 
-<div class="row">
-    <div class="col-md-6 border-end">
-        <h6 class="text-primary border-bottom pb-2 mb-3">Company Details</h6>
-        <div class="mb-2"><label class="small fw-bold">Company Name</label> <input class="form-control form-control-sm" @bind="Settings.CompanyName" /></div>
-        <div class="mb-2"><label class="small fw-bold">Address Line 1</label> <input class="form-control form-control-sm" @bind="Settings.AddressLine1" /></div>
-        <div class="mb-2"><label class="small fw-bold">City, State, Pincode</label> <input class="form-control form-control-sm" @bind="Settings.CityStatePincode" /></div>
-    </div>
-   
-    <div class="col-md-6">
-        <h6 class="text-info border-bottom pb-2 mb-3">Payroll Rules & Device</h6>
-
-        <div class="row g-2 mb-3">
-            <div class="col-12">
-                <label class="small fw-bold">Calc. Method</label>
-                <select class="form-select form-select-sm" @bind="Settings.SalaryCalculationMethod">
-                    <option value="Days in Month">Days in Month</option>
-                    <option value="Fixed 30-Day">Fixed 30-Day</option>
-                    <option value="Pro-Rata Hourly">Pro-Rata Hourly</option>
-                </select>
-            </div>
-            <div class="col-4">
-                <label class="small fw-bold">Cutoff Hr</label>
-                <input type="number" class="form-control form-control-sm" @bind="Settings.WorkDayCutoffHour" placeholder="22" />
-            </div>
-            <div class="col-4">
-                <label class="small fw-bold">Late Grace</label>
-                <input type="number" class="form-control form-control-sm" @bind="Settings.LateGraceMinutes" placeholder="Mins" />
-            </div>
-            <div class="col-4">
-                <label class="small fw-bold">Early Grace</label>
-                <input type="number" class="form-control form-control-sm" @bind="Settings.EndTimeGraceMinutes" placeholder="Mins" />
-            </div>
-            <div class="row g-2 border-top pt-2 mt-2">
-                <div class="col-12 mb-1">
-                    <label class="small fw-bold text-primary">Geo-Fencing (Office Location)</label>
-                    <a href="https://www.google.com/maps" target="_blank" class="float-end small text-decoration-none"><i class="bi bi-map"></i> Open Maps</a>
+<div class="row g-4">
+    @* Left Column: Company Profile, Office Geofence & Hardware *@
+    <div class="col-lg-6 d-flex flex-column gap-3">
+        @* Card 1: Company Profile *@
+        <div class="card border rounded-4 shadow-sm h-auto">
+            <div class="card-header bg-transparent border-bottom py-3 px-4 d-flex align-items-center justify-content-between">
+                <div class="d-flex align-items-center gap-2">
+                    <span class="fs-5">🏢</span>
+                    <h6 class="mb-0 fw-bold text-primary">Company Identity &amp; Profile</h6>
                 </div>
-                <div class="col-4">
-                    <label class="small fw-bold">Latitude</label>
-                    <input type="number" step="any" class="form-control form-control-sm" @bind="Settings.OfficeLatitude" placeholder="12.xxx" />
+                <span class="badge bg-primary-subtle text-primary border border-primary-subtle px-2 py-1 rounded-pill small">General</span>
+            </div>
+            <div class="card-body p-4">
+                <div class="mb-3">
+                    <label class="form-label small fw-bold text-secondary">
+                        <i class="bi bi-building me-1 text-primary"></i> Company Name <span class="text-danger">*</span>
+                    </label>
+                    <input class="form-control rounded-3" @bind="Settings.CompanyName" placeholder="e.g. Acme Corporation" />
                 </div>
-                <div class="col-4">
-                    <label class="small fw-bold">Longitude</label>
-                    <input type="number" step="any" class="form-control form-control-sm" @bind="Settings.OfficeLongitude" placeholder="80.xxx" />
+                <div class="mb-3">
+                    <label class="form-label small fw-bold text-secondary">
+                        <i class="bi bi-geo-alt me-1 text-primary"></i> Office Address Line 1
+                    </label>
+                    <input class="form-control rounded-3" @bind="Settings.AddressLine1" placeholder="e.g. 123 Tech Park, Phase 1" />
                 </div>
-                <div class="col-4">
-                    <label class="small fw-bold">Radius (m)</label>
-                    <input type="number" class="form-control form-control-sm" @bind="Settings.GeoRadiusMeters" placeholder="100" />
+                <div class="mb-0">
+                    <label class="form-label small fw-bold text-secondary">
+                        <i class="bi bi-pin-map me-1 text-primary"></i> City, State, Pincode
+                    </label>
+                    <input class="form-control rounded-3" @bind="Settings.CityStatePincode" placeholder="e.g. Chennai, Tamil Nadu - 600001" />
                 </div>
             </div>
         </div>
 
-        <div class="row g-2 border-top pt-2">
-            <div class="col-6">
-                <label class="small fw-bold">Device IP</label>
-                <input class="form-control form-control-sm" @bind="Settings.ZktecoIP" />
+        @* Card 2: Office Coordinates & Geofencing *@
+        <div class="card border rounded-4 shadow-sm h-auto">
+            <div class="card-header bg-transparent border-bottom py-3 px-4 d-flex align-items-center justify-content-between">
+                <div class="d-flex align-items-center gap-2">
+                    <span class="fs-5">📍</span>
+                    <h6 class="mb-0 fw-bold text-success">Office Geofence &amp; Location</h6>
+                </div>
+                <button type="button" class="btn btn-sm btn-outline-success rounded-pill px-3 py-1 small fw-semibold" @onclick="OpenMapModal">
+                    <i class="bi bi-geo-alt-fill me-1"></i> Open Maps
+                </button>
             </div>
-            <div class="col-3">
-                <label class="small fw-bold">Port</label>
-                <input type="number" class="form-control form-control-sm" @bind="Settings.ZktecoPort" />
+            <div class="card-body p-4">
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <label class="form-label small fw-bold text-secondary">Latitude</label>
+                        <div class="input-group input-group-sm">
+                            <span class="input-group-text bg-body-tertiary">🌐</span>
+                            <input type="number" step="any" class="form-control rounded-end-3" @bind="Settings.OfficeLatitude" placeholder="12.9716" />
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small fw-bold text-secondary">Longitude</label>
+                        <div class="input-group input-group-sm">
+                            <span class="input-group-text bg-body-tertiary">🌐</span>
+                            <input type="number" step="any" class="form-control rounded-end-3" @bind="Settings.OfficeLongitude" placeholder="80.2437" />
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small fw-bold text-secondary">Radius (meters)</label>
+                        <div class="input-group input-group-sm">
+                            <span class="input-group-text bg-body-tertiary">🎯</span>
+                            <input type="number" class="form-control rounded-end-3" @bind="Settings.GeoRadiusMeters" placeholder="100" />
+                        </div>
+                    </div>
+                </div>
+                <div class="form-text small text-muted mt-2">
+                    <i class="bi bi-shield-check text-success me-1"></i>
+                    Defines the boundary for auto-punch check-ins and mobile presence verification.
+                </div>
             </div>
-            <div class="col-3">
-                <label class="small fw-bold">Machine No</label>
-                <input type="number" class="form-control form-control-sm" @bind="Settings.ZktecoMachineNumber" />
+        </div>
+
+        @* Card 3: Biometric Hardware Sync *@
+        <div class="card border rounded-4 shadow-sm h-auto">
+            <div class="card-header bg-transparent border-bottom py-3 px-4 d-flex align-items-center justify-content-between">
+                <div class="d-flex align-items-center gap-2">
+                    <span class="fs-5">📠</span>
+                    <h6 class="mb-0 fw-bold text-secondary">Physical Biometric Device (ZK-Teco)</h6>
+                </div>
+                <span class="badge bg-secondary-subtle text-secondary border px-2 py-1 rounded-pill small">Hardware</span>
+            </div>
+            <div class="card-body p-4">
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label small fw-bold text-secondary">
+                            <i class="bi bi-hdd-network me-1"></i> Device IP Address
+                        </label>
+                        <input class="form-control form-control-sm rounded-3 font-monospace" @bind="Settings.ZktecoIP" placeholder="192.168.1.201" />
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small fw-bold text-secondary">
+                            <i class="bi bi-plug me-1"></i> Port
+                        </label>
+                        <input type="number" class="form-control form-control-sm rounded-3 font-monospace" @bind="Settings.ZktecoPort" placeholder="4370" />
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small fw-bold text-secondary">
+                            <i class="bi bi-hash me-1"></i> Machine No
+                        </label>
+                        <input type="number" class="form-control form-control-sm rounded-3 font-monospace" @bind="Settings.ZktecoMachineNumber" placeholder="1" />
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    @* Right Column: Payroll Timing Rules & GPS Tracking Policy *@
+    <div class="col-lg-6 d-flex flex-column gap-3">
+        @* Card 4: Payroll Rules & Work Timing *@
+        <div class="card border rounded-4 shadow-sm h-auto">
+            <div class="card-header bg-transparent border-bottom py-3 px-4 d-flex align-items-center justify-content-between">
+                <div class="d-flex align-items-center gap-2">
+                    <span class="fs-5">⏱️</span>
+                    <h6 class="mb-0 fw-bold text-warning">Payroll Rules &amp; Shift Timing</h6>
+                </div>
+                <span class="badge bg-warning-subtle text-warning border border-warning-subtle px-2 py-1 rounded-pill small">Attendance Engine</span>
+            </div>
+            <div class="card-body p-4">
+                <div class="mb-3">
+                    <label class="form-label small fw-bold text-secondary">
+                        <i class="bi bi-calculator me-1 text-warning"></i> Salary Calculation Method
+                    </label>
+                    <select class="form-select rounded-3" @bind="Settings.SalaryCalculationMethod">
+                        <option value="Days in Month">📅 Days in Month (Dynamic month days: 28/29/30/31)</option>
+                        <option value="Fixed 30-Day">📆 Fixed 30-Day (Standard 30 days divisor)</option>
+                        <option value="Pro-Rata Hourly">⏱️ Pro-Rata Hourly (Calculated from actual worked hours)</option>
+                    </select>
+                </div>
+
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <div class="p-3 border rounded-3 bg-body-tertiary text-center">
+                            <label class="form-label small fw-bold text-secondary mb-1">
+                                <i class="bi bi-moon-stars text-primary me-1"></i> Cutoff Hr
+                            </label>
+                            <input type="number" class="form-control form-control-sm text-center fw-bold rounded-2" @bind="Settings.WorkDayCutoffHour" placeholder="22" />
+                            <small class="text-muted d-block mt-1" style="font-size: 0.72rem;">24-hr clock (e.g. 22)</small>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="p-3 border rounded-3 bg-body-tertiary text-center">
+                            <label class="form-label small fw-bold text-secondary mb-1">
+                                <i class="bi bi-alarm text-warning me-1"></i> Late Grace
+                            </label>
+                            <input type="number" class="form-control form-control-sm text-center fw-bold rounded-2" @bind="Settings.LateGraceMinutes" placeholder="15" />
+                            <small class="text-muted d-block mt-1" style="font-size: 0.72rem;">Minutes allowed</small>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="p-3 border rounded-3 bg-body-tertiary text-center">
+                            <label class="form-label small fw-bold text-secondary mb-1">
+                                <i class="bi bi-hourglass-split text-info me-1"></i> Early Grace
+                            </label>
+                            <input type="number" class="form-control form-control-sm text-center fw-bold rounded-2" @bind="Settings.EndTimeGraceMinutes" placeholder="15" />
+                            <small class="text-muted d-block mt-1" style="font-size: 0.72rem;">Minutes allowed</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        @* Card 5: GPS Live Tracking, History & Backup Policies *@
+        <div class="card border rounded-4 shadow-sm h-auto">
+            <div class="card-header bg-transparent border-bottom py-3 px-4 d-flex align-items-center justify-content-between">
+                <div class="d-flex align-items-center gap-2">
+                    <span class="fs-5">🛰️</span>
+                    <h6 class="mb-0 fw-bold text-info">Live Tracking &amp; Playback Policies</h6>
+                </div>
+                <span class="badge bg-info-subtle text-info border border-info-subtle px-2 py-1 rounded-pill small">Telemetry</span>
+            </div>
+            <div class="card-body p-4 d-flex flex-column gap-3">
+                @* GPS Playback *@
+                <div class="p-3 border rounded-3 bg-body-tertiary">
+                    <div class="d-flex align-items-center justify-content-between mb-1">
+                        <label class="form-label small fw-bold text-primary mb-0">
+                            <i class="bi bi-clock-history me-1"></i> GPS Playback Capture Interval
+                        </label>
+                        <span class="badge bg-primary text-white rounded-pill px-2 py-1 small">History</span>
+                    </div>
+                    <select class="form-select form-select-sm rounded-3 mt-1" value="@TrackingIntervalSeconds" @onchange="OnTrackingIntervalChanged">
+                        <option value="30">⚡ 30 seconds (High Precision)</option>
+                        <option value="60">⏱️ 1 minute (Recommended)</option>
+                        <option value="120">🔋 2 minutes (Battery Friendly)</option>
+                        <option value="300">🌿 5 minutes (Low Power)</option>
+                    </select>
+                    <small class="text-muted d-block mt-1" style="font-size: 0.75rem;">Controls recorded GPS playback trail frequency. Live map pins stream in real-time independently.</small>
+                </div>
+
+                @* Map Marker Style *@
+                <div class="p-3 border rounded-3 bg-body-tertiary">
+                    <div class="d-flex align-items-center justify-content-between mb-1">
+                        <label class="form-label small fw-bold text-primary mb-0">
+                            <i class="bi bi-geo me-1"></i> Live Map Marker Style
+                        </label>
+                        <span class="badge bg-primary-subtle text-primary border rounded-pill px-2 py-1 small">Visual</span>
+                    </div>
+                    <select class="form-select form-select-sm rounded-3 mt-1" 
+                            value="@(Settings.UseSpeedBasedMarkers ? "true" : "false")" 
+                            @onchange="OnMarkerStyleChanged">
+                        <option value="false">👤 Default Avatar Markers (Initial avatar + status dot)</option>
+                        <option value="true">🏎️ Speed-Based Movement Markers (🚶 Walking 🛵 Bike 🚗 Car 🏎️ Fast)</option>
+                    </select>
+                    <small class="text-muted d-block mt-1" style="font-size: 0.75rem;">Controls whether live pins show employee initials or dynamic movement vehicle icons matching their speed.</small>
+                </div>
+
+                @* Stay Dwell & Cluster Radius *@
+                <div class="row g-2">
+                    <div class="col-md-6">
+                        <div class="p-3 border rounded-3 bg-body-tertiary h-100">
+                            <label class="form-label small fw-bold text-primary mb-1">
+                                <i class="bi bi-pause-circle me-1"></i> Min Stay Dwell
+                            </label>
+                            <select class="form-select form-select-sm rounded-3" @bind="Settings.StayDwellMinutes">
+                                <option value="2">2 minutes</option>
+                                <option value="5">5 minutes</option>
+                                <option value="10">10 minutes (Default)</option>
+                                <option value="30">30 minutes</option>
+                                <option value="60">1 hour</option>
+                                <option value="120">2 hours</option>
+                            </select>
+                            <small class="text-muted d-block mt-1" style="font-size: 0.72rem;">Min duration halted to record a stay.</small>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="p-3 border rounded-3 bg-body-tertiary h-100">
+                            <label class="form-label small fw-bold text-primary mb-1">
+                                <i class="bi bi-bullseye me-1"></i> Cluster Radius
+                            </label>
+                            <select class="form-select form-select-sm rounded-3" @bind="Settings.StayClusterRadiusMeters">
+                                <option value="10">10 metres</option>
+                                <option value="20">20 metres</option>
+                                <option value="50">50 metres (Default)</option>
+                                <option value="100">100 metres</option>
+                                <option value="200">200 metres</option>
+                            </select>
+                            <small class="text-muted d-block mt-1" style="font-size: 0.72rem;">Distance threshold to cluster stay halt.</small>
+                        </div>
+                    </div>
+                </div>
+
+                @* Auto Backup *@
+                <div class="p-3 border rounded-3 bg-body-tertiary">
+                    <div class="d-flex align-items-center justify-content-between mb-1">
+                        <label class="form-label small fw-bold text-primary mb-0">
+                            <i class="bi bi-cloud-arrow-up me-1"></i> Scheduled Auto-Backup Interval
+                        </label>
+                        <span class="badge bg-secondary-subtle text-secondary border rounded-pill px-2 py-1 small">Safety</span>
+                    </div>
+                    <select class="form-select form-select-sm rounded-3 mt-1" @bind="Settings.AutoBackupIntervalHours">
+                        <option value="0">🚫 No Backup (Disabled)</option>
+                        <option value="1">⚡ Every 1 hour</option>
+                        <option value="24">📅 Every 24 hours (1 Day) - Standard</option>
+                        <option value="168">🗓️ Weekly (Every 7 Days)</option>
+                        <option value="720">📆 Monthly (Every 30 Days)</option>
+                    </select>
+                    <small class="text-muted d-block mt-1" style="font-size: 0.75rem;">Automated snapshot database backups for enterprise disaster recovery.</small>
+                </div>
+
+                @* Screen Navigation Transitions *@
+                <div class="p-3 border rounded-3 bg-body-tertiary mt-3">
+                    <div class="d-flex align-items-center justify-content-between mb-1">
+                        <label class="form-label small fw-bold text-primary mb-0">
+                            <i class="bi bi-magic me-1"></i> Screen Navigation Transition
+                        </label>
+                        <span class="badge bg-primary-subtle text-primary border border-primary-subtle rounded-pill px-2 py-1 small">Visual FX</span>
+                    </div>
+                    <select class="form-select form-select-sm rounded-3 mt-1" @bind="Settings.PageTransitionEffect">
+                        <option value="Fade">🌊 Smooth Fade (Default)</option>
+                        <option value="SlideLeft">🚀 Modern Slide Left</option>
+                        <option value="SlideUp">⬆️ Sheet Slide Up</option>
+                        <option value="Zoom">🔍 Zoom Focus Pop</option>
+                        <option value="Flip">🎭 3D Perspective Flip</option>
+                        <option value="None">⚡ None (Instant)</option>
+                    </select>
+                    <small class="text-muted d-block mt-1" style="font-size: 0.75rem;">Eye-catching fluid animations when moving between application screens.</small>
+                </div>
             </div>
         </div>
     </div>
 </div>
 
+@if (_showMapModal)
+{
+    <div class="modal fade show d-block" tabindex="-1" style="background-color: rgba(0,0,0,0.6); z-index: 1060;" role="dialog">
+        <div class="modal-dialog modal-lg modal-dialog-centered" role="document">
+            <div class="modal-content rounded-4 border-0 shadow-lg overflow-hidden">
+                <div class="modal-header bg-body-tertiary border-bottom py-3 px-4 d-flex align-items-center justify-content-between">
+                    <div class="d-flex align-items-center gap-2">
+                        <span class="fs-4">📍</span>
+                        <div>
+                            <h6 class="mb-0 fw-bold text-success">Office Geofence &amp; Location Picker</h6>
+                            <small class="text-muted" style="font-size: 0.78rem;">Search, use GPS, or click anywhere on the map to pinpoint office location &amp; address</small>
+                        </div>
+                    </div>
+                    <button type="button" class="btn-close" @onclick="CloseMapModal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body p-3 p-md-4">
+                    @* Search & Current Location Bar *@
+                    <div class="row g-2 mb-3">
+                        <div class="col-md-8">
+                            <div class="input-group input-group-sm">
+                                <span class="input-group-text bg-body-tertiary">🔍</span>
+                                <input type="text" class="form-control" placeholder="Type area, city, landmark or address to search..." 
+                                       @bind="_searchQuery" @onkeydown="HandleSearchKeyDown" />
+                                <button class="btn btn-primary px-3" type="button" @onclick="SearchLocation" disabled="@_isSearching">
+                                    @if (_isSearching)
+                                    {
+                                        <span class="spinner-border spinner-border-sm me-1" role="status"></span>
+                                        <span>Searching...</span>
+                                    }
+                                    else
+                                    {
+                                        <i class="bi bi-search me-1"></i>
+                                        <span>Search</span>
+                                    }
+                                </button>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <button type="button" class="btn btn-sm btn-outline-success w-100 rounded-3 d-flex align-items-center justify-content-center gap-1 py-1" @onclick="UseCurrentLocation">
+                                <i class="bi bi-crosshair me-1"></i> Use Current GPS
+                            </button>
+                        </div>
+                    </div>
+
+                    @* Leaflet Interactive Map Container *@
+                    <div class="position-relative mb-3">
+                        <div id="office-geofence-picker-map" style="height: 380px; width: 100%; border-radius: 12px; border: 1px solid rgba(0,0,0,0.15); z-index: 1;"></div>
+                        <div class="position-absolute bottom-0 start-0 m-2 px-2 py-1 rounded-pill bg-dark bg-opacity-75 text-white small" style="font-size: 0.72rem; z-index: 1000; pointer-events: none;">
+                            <i class="bi bi-hand-index-thumb me-1"></i> Drag pin or click map to pinpoint location
+                        </div>
+                    </div>
+
+                    @* Realtime Auto-fetched Address & Coordinates Card *@
+                    <div class="p-3 border rounded-3 bg-body-tertiary">
+                        <div class="d-flex align-items-center justify-content-between mb-2">
+                            <span class="fw-bold small text-primary d-flex align-items-center gap-1">
+                                <i class="bi bi-geo-alt-fill text-danger"></i> Auto-Detected Location &amp; Address
+                            </span>
+                            <div class="d-flex gap-2 font-monospace small">
+                                <span class="badge bg-secondary-subtle text-secondary border">Lat: @(_tempLat.ToString("F6"))</span>
+                                <span class="badge bg-secondary-subtle text-secondary border">Lng: @(_tempLng.ToString("F6"))</span>
+                            </div>
+                        </div>
+                        <div class="row g-2">
+                            <div class="col-md-6">
+                                <label class="form-label small text-secondary mb-1">Office Address Line 1</label>
+                                <input type="text" class="form-control form-control-sm rounded-3" @bind="_tempAddressLine1" placeholder="Detected street or building address..." />
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small text-secondary mb-1">City, State, Pincode</label>
+                                <input type="text" class="form-control form-control-sm rounded-3" @bind="_tempCityStatePincode" placeholder="Detected city, state - pincode..." />
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer bg-body-tertiary border-top py-2 px-4 d-flex justify-content-between">
+                    <button type="button" class="btn btn-sm btn-outline-secondary rounded-pill px-3" @onclick="CloseMapModal">Cancel</button>
+                    <button type="button" class="btn btn-sm btn-success rounded-pill px-4 fw-bold shadow-sm" @onclick="ApplyPickedLocation">
+                        <i class="bi bi-check2-circle me-1"></i> Apply to Office Settings
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
 @code {
     [Parameter] public CompanySetting Settings { get; set; } = new();
+    [Parameter] public int TrackingIntervalSeconds { get; set; } = 30;
+    [Parameter] public EventCallback<int> TrackingIntervalSecondsChanged { get; set; }
+
+    private bool _showMapModal = false;
+    private bool _isSearching = false;
+    private string _searchQuery = "";
+    private double _tempLat;
+    private double _tempLng;
+    private string _tempAddressLine1 = "";
+    private string _tempCityStatePincode = "";
+    private DotNetObjectReference<GeneralTab>? _dotNetRef;
+
+    private async Task OnTrackingIntervalChanged(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), out var seconds))
+            await TrackingIntervalSecondsChanged.InvokeAsync(seconds);
+    }
+
+    private void OnMarkerStyleChanged(ChangeEventArgs e)
+    {
+        Settings.UseSpeedBasedMarkers = string.Equals(e.Value?.ToString(), "true", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task OpenMapModal()
+    {
+        _tempLat = Settings.OfficeLatitude;
+        _tempLng = Settings.OfficeLongitude;
+        _tempAddressLine1 = Settings.AddressLine1 ?? "";
+        _tempCityStatePincode = Settings.CityStatePincode ?? "";
+        _searchQuery = "";
+        _showMapModal = true;
+        StateHasChanged();
+
+        _dotNetRef?.Dispose();
+        _dotNetRef = DotNetObjectReference.Create(this);
+
+        await Task.Delay(100);
+        await JS.InvokeVoidAsync("payrollGeofencePicker.init",
+            "office-geofence-picker-map",
+            _tempLat,
+            _tempLng,
+            Settings.GeoRadiusMeters > 0 ? Settings.GeoRadiusMeters : 100,
+            _dotNetRef);
+    }
+
+    private async Task CloseMapModal()
+    {
+        _showMapModal = false;
+        try
+        {
+            await JS.InvokeVoidAsync("payrollGeofencePicker.destroy");
+        }
+        catch { }
+    }
+
+    private async Task SearchLocation()
+    {
+        if (string.IsNullOrWhiteSpace(_searchQuery)) return;
+        _isSearching = true;
+        try
+        {
+            await JS.InvokeVoidAsync("payrollGeofencePicker.searchLocation", _searchQuery);
+        }
+        finally
+        {
+            _isSearching = false;
+        }
+    }
+
+    private async Task HandleSearchKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            await SearchLocation();
+        }
+    }
+
+    private async Task UseCurrentLocation()
+    {
+        await JS.InvokeVoidAsync("payrollGeofencePicker.useCurrentLocation");
+    }
+
+    [JSInvokable]
+    public void OnLocationPinned(double lat, double lng, string addressLine1, string cityStatePincode)
+    {
+        _tempLat = lat;
+        _tempLng = lng;
+        if (!string.IsNullOrWhiteSpace(addressLine1))
+        {
+            _tempAddressLine1 = addressLine1;
+        }
+        if (!string.IsNullOrWhiteSpace(cityStatePincode))
+        {
+            _tempCityStatePincode = cityStatePincode;
+        }
+        StateHasChanged();
+    }
+
+    private async Task ApplyPickedLocation()
+    {
+        Settings.OfficeLatitude = _tempLat;
+        Settings.OfficeLongitude = _tempLng;
+        if (!string.IsNullOrWhiteSpace(_tempAddressLine1))
+        {
+            Settings.AddressLine1 = _tempAddressLine1;
+        }
+        if (!string.IsNullOrWhiteSpace(_tempCityStatePincode))
+        {
+            Settings.CityStatePincode = _tempCityStatePincode;
+        }
+        await CloseMapModal();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            _dotNetRef?.Dispose();
+            await JS.InvokeVoidAsync("payrollGeofencePicker.destroy");
+        }
+        catch { }
+    }
 }

@@ -10,7 +10,13 @@ window.attendanceRefresh = (function () {
     let viewerRefreshInFlight = false;
     let viewerRefreshPending = false;
     let listeners = [];
+    // Each application listener may optionally subscribe to one entity.
+    // Keeping the filter in the browser avoids unnecessary Blazor reloads
+    // when unrelated domains publish application events.
     let applicationListeners = [];
+
+    let applicationRefreshTimer = null;
+    let applicationRefreshPending = new Map();
 
     // Firebase is an independent realtime transport. SignalR remains the
     // existing compatibility path, but Firebase keeps live GPS and CRUD
@@ -58,7 +64,7 @@ window.attendanceRefresh = (function () {
 
             if (!firebase.apps.length) {
                 firebase.initializeApp({
-                    apiKey: 'AIzaSyDxIsBW8bq31gG7LqOm8-lwhmRFMsRu5CE',
+                    apiKey: authResult.apiKey || 'AIzaSyDE6qAFRWzKkZiH2G2Hr6a6GC98wjEzucg',
                     authDomain: 'biometricpayroll.firebaseapp.com',
                     databaseURL: 'https://biometricpayroll-default-rtdb.asia-southeast1.firebasedatabase.app',
                     projectId: 'biometricpayroll',
@@ -75,27 +81,32 @@ window.attendanceRefresh = (function () {
                 'Firebase realtime transport authenticated. Live GPS listener is active.'
             );
 
-            const liveRef = firebaseDatabase.ref('tracking/live');
-            liveRef.on('child_added', onFirebaseLiveLocation);
-            liveRef.on('child_changed', onFirebaseLiveLocation);
-
+            // Use the same owner-scoped live-location branch consumed by the
+            // Android Admin app. The legacy tracking/live branch is only a
+            // fallback for installations that do not return an owner UID.
             const ownerUid = authResult.ownerUid || authResult.ownerUID || null;
             const realtimeOwnerUid = ownerUid || 'biometricpayroll';
+            const liveRef = ownerUid
+                ? firebaseDatabase.ref('owners/' + ownerUid + '/tracking/live')
+                : firebaseDatabase.ref('tracking/live');
+            liveRef.on('child_added', onFirebaseLiveLocation);
+            liveRef.on('child_changed', onFirebaseLiveLocation);
+            liveRef.on('child_removed', onFirebaseLiveLocationRemoved);
             if (ownerUid) {
-                const ownerEventsRef = firebaseDatabase.ref('owner_events/' + ownerUid);
+                const ownerEventsRef = firebaseDatabase.ref('owner_events/' + ownerUid).limitToLast(50);
                 ownerEventsRef.on('child_added', onFirebaseApplicationEvent);
 
                 // Mobile-originated changes use a per-employee channel so an
                 // employee cannot write to the shared admin event stream.
                 // Admin/SuperAdmin Firebase rules allow the web dashboard to
                 // receive these events without changing the existing UI.
-                const clientEventsRef = firebaseDatabase.ref('client_events');
+                const clientEventsRef = firebaseDatabase.ref('client_events').limitToLast(50);
                 clientEventsRef.on('child_added', onFirebaseClientEventEmployee);
 
             } else {
                 // Backward compatibility for installations that have not yet
                 // configured a shared Firebase owner UID.
-                const eventsRef = firebaseDatabase.ref('application_events');
+                const eventsRef = firebaseDatabase.ref('application_events').limitToLast(50);
                 eventsRef.on('child_added', onFirebaseApplicationEvent);
             }
 
@@ -107,6 +118,12 @@ window.attendanceRefresh = (function () {
             );
             firebaseGeoPunchAuditRef.on('child_added', onFirebaseGeoPunchAudit);
             firebaseGeoPunchAuditRef.on('child_changed', onFirebaseGeoPunchAudit);
+
+            // Listen to company_settings for real-time geofence & radar updates
+            const companySettingsRef = firebaseDatabase.ref(
+                'owners/' + realtimeOwnerUid + '/company_settings/1'
+            );
+            companySettingsRef.on('value', onFirebaseCompanySettings);
 
             console.log('Firebase realtime transport connected.');
         } catch (error) {
@@ -120,10 +137,41 @@ window.attendanceRefresh = (function () {
         }
     }
 
+    async function onFirebaseLiveLocationRemoved(snapshot) {
+        try {
+            const data = snapshot.val() || {};
+            const employeeId = Number(data.EmployeeId ?? data.employeeId ?? snapshot.key ?? 0);
+            if (!Number.isFinite(employeeId) || employeeId <= 0) return;
+
+            const ended = {
+                EmployeeId: employeeId,
+                SessionId: data.SessionId ?? data.sessionId ?? '',
+                EndedAtUtc: new Date().toISOString(),
+                EndReason: data.EndReason ?? data.endReason ?? 'FIREBASE_LIVE_REMOVED'
+            };
+
+            window.dispatchEvent(new CustomEvent('location-data-removed', { detail: ended }));
+            await notifyListeners('SessionEnded', ended);
+        } catch (error) {
+            console.warn('Firebase live-location removal callback failed.', error);
+        }
+    }
+
     async function onFirebaseLiveLocation(snapshot) {
         try {
             const data = snapshot.val();
-            if (!data || !data.EmployeeId) return;
+            if (!data) return;
+
+            const employeeId = Number(data.EmployeeId ?? data.employeeId ?? snapshot.key ?? 0);
+            if (!Number.isFinite(employeeId) || employeeId <= 0) return;
+
+            // Normalize properties so all consumers (camelCase and PascalCase) receive valid numbers
+            data.EmployeeId = employeeId;
+            data.employeeId = employeeId;
+            if (data.Latitude !== undefined && data.latitude === undefined) data.latitude = data.Latitude;
+            if (data.latitude !== undefined && data.Latitude === undefined) data.Latitude = data.latitude;
+            if (data.Longitude !== undefined && data.longitude === undefined) data.longitude = data.Longitude;
+            if (data.longitude !== undefined && data.Longitude === undefined) data.Longitude = data.longitude;
 
             // Dispatch the browser event first. The Leaflet map can therefore
             // react immediately even if a Blazor circuit is busy reconnecting.
@@ -189,24 +237,329 @@ window.attendanceRefresh = (function () {
             if (Number.isFinite(eventTime) && eventTime + 5000 < firebaseStartTime)
                 return;
 
-            await notifyApplicationListeners('ApplicationDataChanged', data);
-            // Page-level listeners already expose ApplicationDataChanged and
-            // own their existing data loaders. This updates the visible screen
-            // without Navigation.Refresh/browser reload.
-            await notifyListeners('ApplicationDataChanged', data);
-            window.dispatchEvent(new CustomEvent('application-data-changed', { detail: data }));
+            // Coalesce bursts from one Firebase write into a single UI
+            // invalidation. The event itself remains in Firebase as the audit
+            // source; this timer only controls how often Blazor reloads.
+            const changes = Array.isArray(data.changes) ? data.changes : [];
+            const key = changes.map(function (c) {
+                return String(c && (c.Entity || c.entity) || '') + ':' +
+                    String(c && (c.RecordId || c.recordId) || '') + ':' +
+                    String(c && (c.Action || c.action) || '');
+            }).sort().join('|') || snapshot.key || String(Date.now());
+
+            applicationRefreshPending.set(key, data);
+            if (applicationRefreshTimer !== null)
+                clearTimeout(applicationRefreshTimer);
+
+            applicationRefreshTimer = setTimeout(async function () {
+                applicationRefreshTimer = null;
+                const pending = Array.from(applicationRefreshPending.values());
+                applicationRefreshPending.clear();
+
+                for (const eventData of pending) {
+                    await notifyApplicationListeners('ApplicationDataChanged', eventData);
+                    await notifyListeners('ApplicationDataChanged', eventData);
+                    window.dispatchEvent(new CustomEvent('application-data-changed', { detail: eventData }));
+
+                    if (applicationEventContainsEntity(eventData, 'AdvancePayment') || applicationEventContainsEntity(eventData, 'SalaryAdvance')) {
+                        await notifyListeners('AdvanceChanged', eventData);
+                        window.dispatchEvent(new CustomEvent('advance-changed', { detail: eventData }));
+                    }
+                    if (applicationEventContainsEntity(eventData, 'BonusRecord') || applicationEventContainsEntity(eventData, 'Bonus')) {
+                        await notifyListeners('BonusChanged', eventData);
+                        window.dispatchEvent(new CustomEvent('bonus-changed', { detail: eventData }));
+                    }
+                    if (applicationEventContainsEntity(eventData, 'LeaveRequest') || applicationEventContainsEntity(eventData, 'Leave')) {
+                        await notifyListeners('LeaveChanged', eventData);
+                        window.dispatchEvent(new CustomEvent('leave-changed', { detail: eventData }));
+                    }
+
+                    // The Attendance Log Viewer is a route-level consumer.
+                    // Firebase application events are the realtime source for
+                    // Web-side SSOT invalidation, so bridge only attendance-
+                    // relevant entities into the viewer's existing debounced
+                    // RefreshFromNotification path. This preserves the current
+                    // load/recalculation boundary while removing dependence on
+                    // a separate SignalR attendance event for Firebase writes.
+                    if (viewerRef && applicationEventAffectsAttendanceViewer(eventData)) {
+                        await notifyViewer();
+                    }
+                }
+            }, 80);
         } catch (error) {
             console.warn('Firebase application event callback failed.', error);
         }
     }
 
     async function start() {
-        // Firebase is the only realtime transport for the SSOT path.
-        // Once this page has authenticated with Firebase, it does not need
-        // SignalR/Render for subsequent realtime events.
-        if (!firebaseStarted)
-            await startFirebaseRealtime();
+        if (starting) return;
+        starting = true;
+
+        try {
+            /*
+             * ==========================================================
+             * SIGNALR IS OPTIONAL
+             * ==========================================================
+             *
+             * Firebase is the authoritative realtime transport for the
+             * current Firebase-SSOT architecture.
+             *
+             * Some deployments block the external SignalR JavaScript CDN
+             * (or the CDN can be temporarily unavailable). In that case
+             * window.signalR does not exist. The old implementation tried
+             * to execute:
+             *
+             *     new signalR.HubConnectionBuilder()
+             *
+             * which caused:
+             *
+             *     ReferenceError: signalR is not defined
+             *
+             * and prevented Firebase realtime from starting.
+             *
+             * Therefore SignalR is treated as an optional compatibility
+             * channel. Firebase must always be allowed to start independently.
+             */
+            if (!started) {
+                if (typeof window.signalR !== "undefined" &&
+                    window.signalR &&
+                    typeof window.signalR.HubConnectionBuilder === "function") {
+
+                    try {
+                        if (!connection) {
+                            connection = new window.signalR.HubConnectionBuilder()
+                                .withUrl("/hubs/attendance-refresh")
+                                .withAutomaticReconnect()
+                                .build();
+
+                            connection.on("DataChanged", onDataChanged);
+                            connection.on("AttendanceChanged", onAttendanceChanged);
+                            connection.on("PunchChanged", onPunchChanged);
+                            connection.on("LocationChanged", onLocationChanged);
+                            connection.on("SessionStarted", onSessionStarted);
+                            connection.on("SessionEnded", onSessionEnded);
+                            connection.on("GeoSettingsChanged", onGeoSettingsChanged);
+                            connection.on("GeoPunchAuditChanged", onGeoPunchAuditChanged);
+                            connection.on("ApplicationDataChanged", onApplicationDataChanged);
+                            connection.on("RegularizationChanged", onRegularizationChanged);
+                            connection.on("LeaveChanged", onLeaveChanged);
+                            connection.on("AdvanceChanged", onAdvanceChanged);
+                            connection.on("BonusChanged", onBonusChanged);
+                            connection.on("TaxDeclarationChanged", onTaxDeclarationChanged);
+                            connection.on("EmployeeChanged", onEmployeeChanged);
+                            connection.on("ExitChanged", onExitChanged);
+                            connection.on("GlobalRefresh", onGlobalRefresh);
+                            connection.on("SessionInvalidated", onSessionInvalidated);
+
+                            connection.onreconnected(function (connectionId) {
+                                console.log("SignalR realtime reconnected:", connectionId);
+                                notifyListeners('AttendanceChanged', {});
+                                notifyViewer();
+                            });
+                            connection.onclose(function (error) {
+                                console.warn("SignalR connection closed. Scheduling auto-reconnect...", error);
+                                scheduleRetry();
+                            });
+
+                            if (!window.__payrollRealtimeHeartbeatBound) {
+                                window.__payrollRealtimeHeartbeatBound = true;
+                                function checkAndHealConnection() {
+                                    if (!firebaseStarted && !firebaseStarting) {
+                                        startFirebaseRealtime();
+                                    } else if (firebaseStarted && window.firebase && firebase.auth().currentUser) {
+                                        firebase.auth().currentUser.getIdToken(false).catch(function () {
+                                            firebaseStarted = false;
+                                            startFirebaseRealtime();
+                                        });
+                                    }
+                                    if (connection) {
+                                        if (connection.state === window.signalR.HubConnectionState.Disconnected) {
+                                            console.log("Auto-healing disconnected SignalR connection...");
+                                            connection.start().then(function () {
+                                                notifyListeners('AttendanceChanged', {});
+                                                notifyViewer();
+                                            }).catch(scheduleRetry);
+                                        } else if (connection.state === window.signalR.HubConnectionState.Connected) {
+                                            notifyViewer();
+                                        }
+                                    }
+                                }
+                                window.addEventListener("visibilitychange", function () {
+                                    if (document.visibilityState === "visible") checkAndHealConnection();
+                                });
+                                window.addEventListener("focus", checkAndHealConnection);
+                                window.addEventListener("online", checkAndHealConnection);
+                                setInterval(checkAndHealConnection, 60000);
+                            }
+                        }
+
+                        if (connection.state !== window.signalR.HubConnectionState.Connected) {
+                            await connection.start();
+                        }
+
+                        console.log("SignalR compatibility transport connected.");
+                    } catch (signalRError) {
+                        /*
+                         * Do NOT abort realtime startup.
+                         * Firebase below is the primary realtime transport.
+                         */
+                        console.warn(
+                            "SignalR compatibility transport unavailable. Continuing with Firebase realtime.",
+                            signalRError
+                        );
+                    }
+                } else {
+                    /*
+                     * The SignalR CDN is unavailable/not loaded.
+                     * This is expected to be recoverable because Firebase
+                     * provides the realtime SSOT transport.
+                     */
+                    console.info(
+                        "SignalR JavaScript client is not loaded. Continuing with Firebase realtime."
+                    );
+                }
+
+                /*
+                 * Mark the realtime bootstrap as attempted. This prevents
+                 * every Blazor component registration from repeatedly trying
+                 * to construct a missing SignalR client.
+                 */
+                started = true;
+            }
+
+            /*
+             * Firebase must start independently of SignalR.
+             */
+            if (!firebaseStarted) {
+                await startFirebaseRealtime();
+            }
+
+        } catch (err) {
+            /*
+             * Firebase/auth/network failures are retryable. Do not create
+             * a tight retry loop when SignalR alone is unavailable.
+             */
+            console.warn(
+                "Realtime Firebase startup failed. Retrying automatically.",
+                err
+            );
+
+            /*
+             * Allow the next retry to attempt Firebase again.
+             * SignalR remains optional and is not allowed to block startup.
+             */
+            started = true;
+            scheduleRetry();
+        } finally {
+            starting = false;
+        }
     }
+
+    function onFirebaseCompanySettings(snapshot) {
+        try {
+            const val = snapshot.val();
+            if (!val || typeof val !== 'object') return;
+
+            const lat = Number(val.officeLatitude ?? val.OfficeLatitude ?? val.latitude ?? val.Latitude ?? 0);
+            const lng = Number(val.officeLongitude ?? val.OfficeLongitude ?? val.longitude ?? val.Longitude ?? 0);
+            const rad = Number(val.geoRadiusMeters ?? val.GeoRadiusMeters ?? val.radius ?? val.Radius ?? 0);
+            const speed = Boolean(val.useSpeedBasedMarkers ?? val.use_speed_based_markers ?? false);
+
+            const geoData = {
+                OfficeLatitude: lat,
+                OfficeLongitude: lng,
+                GeoRadiusMeters: rad,
+                UseSpeedBasedMarkers: speed,
+                Timestamp: new Date().toISOString()
+            };
+
+            if (window.payrollCompanySettings) {
+                if (lat !== 0 && lng !== 0) {
+                    window.payrollCompanySettings.officeLatitude = lat;
+                    window.payrollCompanySettings.officeLongitude = lng;
+                }
+                if (rad > 0) {
+                    window.payrollCompanySettings.geoRadiusMeters = rad;
+                }
+                window.payrollCompanySettings.useSpeedBasedMarkers = speed;
+            }
+
+            onGeoSettingsChanged(geoData, false);
+        } catch (error) {
+            console.warn('Firebase company settings callback failed:', error);
+        }
+    }
+
+    const payrollBroadcastChannel = typeof window.BroadcastChannel === 'function'
+        ? new BroadcastChannel('payroll_realtime_channel')
+        : null;
+
+    if (payrollBroadcastChannel) {
+        payrollBroadcastChannel.onmessage = function (event) {
+            if (!event || !event.data) return;
+            const msg = event.data;
+            if (msg.type === 'geo-settings-changed') {
+                onGeoSettingsChanged(msg.data, true);
+            }
+        };
+    }
+
+    window.addEventListener('storage', function (e) {
+        if (e.key === 'payroll_geo_settings_sync' && e.newValue) {
+            try {
+                const data = JSON.parse(e.newValue);
+                onGeoSettingsChanged(data, true);
+            } catch { }
+        }
+    });
+
+    window.broadcastGeoSettingsChanged = function (data) {
+        try {
+            if (payrollBroadcastChannel) {
+                payrollBroadcastChannel.postMessage({ type: 'geo-settings-changed', data: data });
+            }
+            localStorage.setItem('payroll_geo_settings_sync', JSON.stringify({ ...data, _ts: Date.now() }));
+        } catch { }
+        onGeoSettingsChanged(data, true);
+    };
+
+    function onGeoSettingsChanged(data, fromLocalBroadcast) {
+        if (!fromLocalBroadcast) {
+            try {
+                if (payrollBroadcastChannel) {
+                    payrollBroadcastChannel.postMessage({ type: 'geo-settings-changed', data: data });
+                }
+                localStorage.setItem('payroll_geo_settings_sync', JSON.stringify({ ...data, _ts: Date.now() }));
+            } catch { }
+        }
+        notifyListeners('GeoSettingsChanged', data);
+        window.dispatchEvent(new CustomEvent('geo-settings-changed', { detail: data }));
+    }
+
+    function onGeoPunchAuditChanged(data) {
+        notifyListeners('GeoPunchAuditChanged', data);
+        window.dispatchEvent(new CustomEvent('geo-punch-audit-changed', { detail: data }));
+    }
+
+    function onSessionInvalidated(employeeId, reason) {
+        window.dispatchEvent(new CustomEvent('session-invalidated', { detail: { employeeId, reason } }));
+    }
+
+    function onDataChanged(data) { notifyListeners('AttendanceChanged', data); }
+    function onAttendanceChanged(data) { notifyListeners('AttendanceChanged', data); }
+    function onPunchChanged(data) { notifyListeners('AttendanceChanged', data); }
+    function onLocationChanged(data) { notifyListeners('LocationChanged', data); }
+    function onSessionStarted(data) { notifyListeners('SessionStarted', data); }
+    function onSessionEnded(data) { notifyListeners('SessionEnded', data); }
+    function onApplicationDataChanged(data) { notifyListeners('ApplicationDataChanged', data); }
+    function onRegularizationChanged(data) { notifyListeners('RegularizationChanged', data); }
+    function onLeaveChanged(data) { notifyListeners('LeaveChanged', data); }
+    function onAdvanceChanged(data) { notifyListeners('AdvanceChanged', data); }
+    function onBonusChanged(data) { notifyListeners('BonusChanged', data); }
+    function onTaxDeclarationChanged(data) { notifyListeners('TaxDeclarationChanged', data); }
+    function onEmployeeChanged(data) { notifyListeners('EmployeeChanged', data); }
+    function onExitChanged(data) { notifyListeners('ExitChanged', data); }
+    function onGlobalRefresh(data) { notifyListeners('AttendanceChanged', data); }
 
     function scheduleRetry() {
 
@@ -234,28 +587,65 @@ window.attendanceRefresh = (function () {
         const currentListeners =
             [...applicationListeners];
 
-        for (const listener of currentListeners) {
+        for (const registration of currentListeners) {
+            const listener = registration.ref;
+
+            // An entity-filtered listener only receives events that actually
+            // contain the requested entity. This prevents an Employee page
+            // from reloading because of an unrelated payroll/attendance event.
+            if (registration.entity && !applicationEventContainsEntity(data, registration.entity))
+                continue;
 
             try {
-                // If only one argument is passed, default to ApplicationDataChanged for backward compatibility
-                const targetMethod = typeof data === "undefined" ? "ApplicationDataChanged" : (typeof methodName === "string" ? methodName : "ApplicationDataChanged");
-                const payload = typeof data === "undefined" ? methodName : data;
+                const targetMethod = typeof methodName === "string"
+                    ? methodName
+                    : "ApplicationDataChanged";
 
-                // Application-wide listeners currently consume the event as an
-                // invalidation signal. Do not marshal the arbitrary SignalR
-                // payload into Blazor JS interop. This also prevents disposed
-                // circuit references from producing parameter-registration
-                // errors in the browser console.
-                await listener.invokeMethodAsync(
-                    targetMethod
-                );
+                await listener.invokeMethodAsync(targetMethod);
             }
             catch (error) {
                 applicationListeners = applicationListeners.filter(function (item) {
-                    return item !== listener;
+                    return item.ref !== listener;
                 });
             }
         }
+    }
+
+    function applicationEventContainsEntity(data, entity) {
+        if (!data || !entity) return false;
+        const changes = Array.isArray(data.changes) ? data.changes : [];
+        const expected = String(entity).trim().toLowerCase();
+        return changes.some(function (change) {
+            const actual = String(change && (change.Entity || change.entity) || '')
+                .trim().toLowerCase();
+            return actual === expected;
+        });
+    }
+
+    // Attendance Log Viewer depends on the finalized attendance projection
+    // plus the inputs that can change the visible result (employee roster,
+    // punches, leave, schedules, holidays, and regularization). Do not wake
+    // the viewer for unrelated payroll/finance/admin events.
+    const attendanceViewerEntities = new Set([
+        'Employee',
+        'AttendanceLog',
+        'DailySummary',
+        'LeaveRequest',
+        'ShiftSchedule',
+        'CompanyHoliday',
+        'AttendanceRegularization'
+    ]);
+
+    function applicationEventAffectsAttendanceViewer(data) {
+        if (!data || !Array.isArray(data.changes)) return false;
+
+        return data.changes.some(function (change) {
+            const entity = String(
+                change && (change.Entity || change.entity) || ''
+            ).trim();
+
+            return attendanceViewerEntities.has(entity);
+        });
     }
 
 
@@ -391,41 +781,34 @@ window.attendanceRefresh = (function () {
 
             }
             catch (error) {
-
                 // A Blazor component can disappear while SignalR is still
                 // delivering an event. In that case the DotNetObjectReference
-                // is stale and every future realtime event would fail again.
+                // is disposed and every future realtime event would fail again.
                 //
-                // Keep the existing callback/fallback behavior, but remove
-                // the reference only when BOTH calls fail. This is lifecycle
-                // cleanup only and does not change any business logic.
+                // IMPORTANT: Only remove the listener when the DotNetObjectReference
+                // is actually disposed. Never remove a healthy listener simply because
+                // that component does not implement an optional event method!
+                const errMsg = String(error?.message || error || '');
+                const isDisposed = errMsg.includes('disposed') || errMsg.includes('has already been disposed');
 
-                let callbackFailed = true;
-
-                if (typeof data !== "undefined") {
-                    try {
-                        await listener.invokeMethodAsync(
-                            methodName
-                        );
-
-                        callbackFailed = false;
-                    }
-                    catch (fallbackError) {
-                        console.debug(
-                            "Attendance refresh listener became unavailable; removing stale listener.",
-                            methodName
-                        );
-                    }
-                }
-
-                if (callbackFailed) {
+                if (isDisposed) {
                     const index = listeners.indexOf(listener);
-
                     if (index >= 0) {
                         listeners.splice(index, 1);
                     }
+                } else if (typeof data !== "undefined") {
+                    try {
+                        await listener.invokeMethodAsync(methodName);
+                    } catch (fallbackError) {
+                        const fallbackMsg = String(fallbackError?.message || fallbackError || '');
+                        if (fallbackMsg.includes('disposed') || fallbackMsg.includes('has already been disposed')) {
+                            const index = listeners.indexOf(listener);
+                            if (index >= 0) {
+                                listeners.splice(index, 1);
+                            }
+                        }
+                    }
                 }
-
             }
         }
     }
@@ -500,11 +883,18 @@ window.attendanceRefresh = (function () {
      * ==============================================================
      */
 
-    function registerApplication(dotNetReference) {
+    function registerApplication(dotNetReference, entityFilter) {
 
-        if (!applicationListeners.includes(dotNetReference)) {
-            applicationListeners.push(dotNetReference);
-        }
+        applicationListeners = applicationListeners.filter(function (item) {
+            return item.ref !== dotNetReference;
+        });
+
+        applicationListeners.push({
+            ref: dotNetReference,
+            entity: typeof entityFilter === "string" && entityFilter.trim()
+                ? entityFilter.trim()
+                : null
+        });
 
         start();
     }
@@ -514,11 +904,15 @@ window.attendanceRefresh = (function () {
         applicationListeners =
             applicationListeners.filter(
                 function (item) {
-                    return item !== dotNetReference;
+                    return item.ref !== dotNetReference;
                 }
             );
 
-        // No application-wide debounce timer is used.
+        if (applicationListeners.length === 0 && applicationRefreshTimer !== null) {
+            clearTimeout(applicationRefreshTimer);
+            applicationRefreshTimer = null;
+            applicationRefreshPending.clear();
+        }
     }
 
 

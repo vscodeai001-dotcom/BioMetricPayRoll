@@ -10,6 +10,7 @@
 @inject IJSRuntime JSRuntime
 @inject ILogger<LeaveManagement> _logger
 @inject LeaveManagementService LeaveService
+@inject Payroll.Web.Services.FirebaseEmployeeManagementService FirebaseEmployees
 @attribute [Authorize(Roles = "Admin, SuperAdmin")]
 
 <PageTitle>Leave Management</PageTitle>
@@ -27,12 +28,27 @@
 }
 else
 {
-    <AttendanceRefreshListener OnAttendanceChanged="HandleAttendanceRefresh" />
+    <AttendanceRefreshListener OnLeaveChanged="HandleLeaveRefresh" />
 
-    <div class="d-flex justify-content-between align-items-center mb-3">
-        <div>
-            <h3 class="mb-0">Leave Management</h3>
-            <p class="text-muted small mb-0">Approve requests and manage employee time-off.</p>
+    <div class="page-header-container">
+        <div class="d-flex align-items-center gap-3">
+            <div class="emoji-icon-badge emoji-icon-badge-warning">
+                🏖️
+            </div>
+            <div>
+                <h2 class="page-header-title">
+                    Leave & Time-Off Management
+                </h2>
+                <p class="page-header-subtitle">
+                    <span>🌴 Review employee leave requests, approve paid/sick off & track department coverage</span>
+                </p>
+            </div>
+        </div>
+
+        <div class="d-flex align-items-center gap-2">
+            <span class="badge bg-primary bg-opacity-10 text-primary rounded-pill px-3 py-2 fw-semibold">
+                <span>🏖️ Paid</span> • <span>🤒 Sick</span> • <span>🟣 Comp Off</span>
+            </span>
         </div>
     </div>
 
@@ -79,10 +95,10 @@ else
 
     protected override async Task OnInitializedAsync()
     {
-        // Default: Current Month
+        // Default: Show all pending requests without cutting off upcoming months
         var today = DateTime.Now.Date;
-        startDate = new DateTime(today.Year, today.Month, 1);
-        endDate = startDate.Value.AddMonths(1).AddDays(-1);
+        startDate = null;
+        endDate = null;
 
         // Init Form Date
         newLeaveRequest.LeaveDate = today;
@@ -107,7 +123,7 @@ else
             }
 
             // 2. Load Data
-            employeeList = await dbContext.Employees.OrderBy(e => e.Name).ToListAsync();
+            employeeList = await FirebaseEmployees.GetEmployeesAsync();
 
             // Pass the context or handle service call carefully
             // Ideally services manage their own context scope, so we just call them here.
@@ -125,29 +141,33 @@ else
         }
     }
 
-    private async Task LoadLeaveAsync()
-    {
-        // Note: LeaveService likely creates its own context, so this is safe to call outside the using block above
-        // IF LeaveService requires an open context passed in, logic needs adjustment.
-        // Assuming LeaveManagementService manages its own DbContext based on standard DI patterns.
+    private Task LoadLeaveAsync() => LoadLeaveAsync(isSilent: false);
 
-        isLoading = true;
-        leaveRequests = null;
-        statusMessage = "Loading...";
-        // StateHasChanged() is automatic in EventHandlers but good to be explicit for async
-        await InvokeAsync(StateHasChanged);
+    private async Task LoadLeaveAsync(bool isSilent = false)
+    {
+        if (!isSilent && leaveRequests == null)
+        {
+            isLoading = true;
+            statusMessage = "Loading...";
+            await InvokeAsync(StateHasChanged);
+        }
 
         try
         {
-            leaveRequests = await LeaveService.LoadLeaveRequestsAsync(
+            var freshRequests = await LeaveService.LoadLeaveRequestsAsync(
                 selectedEmployeeId, filterStatus, startDate, endDate);
+            leaveRequests = freshRequests;
             statusMessage = leaveRequests.Any() ? "" : "No records found.";
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "LoadLeaveAsync failed");
             statusMessage = "Error loading data.";
-            toastService.ShowError("Failed to load data.");
+            if (!isSilent)
+            {
+                toastService.ShowError("Failed to load data.");
+            }
+            if (leaveRequests == null) leaveRequests = new List<LeaveRequest>();
         }
         finally
         {
@@ -156,9 +176,9 @@ else
         }
     }
 
-    private async Task HandleAttendanceRefresh()
+    private async Task HandleLeaveRefresh()
     {
-        await LoadLeaveAsync();
+        await LoadLeaveAsync(isSilent: true);
     }
 
     private async Task SaveLeaveRequest()
@@ -183,7 +203,7 @@ else
                 LeaveType = "Paid Leave",
                 EmployeeID = newLeaveRequest.EmployeeID
             };
-            await LoadLeaveAsync();
+            await LoadLeaveAsync(isSilent: true);
         }
         catch (Exception ex)
         {
@@ -200,29 +220,62 @@ else
     {
         try
         {
+            req.IsApproved = approved;
+            req.Status = approved ? "Approved" : "Pending";
+            if (filterStatus == "Pending" && approved)
+            {
+                leaveRequests?.RemoveAll(r => r.LeaveRequestID == req.LeaveRequestID);
+            }
+            await InvokeAsync(StateHasChanged);
+
             await LeaveService.UpdateLeaveStatusAsync(req.LeaveRequestID, approved);
             toastService.ShowSuccess(approved ? "Approved." : "Approval Revoked.");
-            await LoadLeaveAsync();
+            await LoadLeaveAsync(isSilent: true);
         }
         catch (Exception ex)
         {
             toastService.ShowError($"Error: {ex.Message}");
+            await LoadLeaveAsync(isSilent: true);
         }
     }
 
-    private async Task DenyLeave(LeaveRequest req) => await DeleteLeaveRequest(req);
-    private async Task DeleteLeaveRequest(LeaveRequest req)
+    private async Task DenyLeave(LeaveRequest req)
     {
-        if (!await JSRuntime.InvokeAsync<bool>("confirm", "Are you sure you want to delete/deny this record?")) return;
+        if (!await JSRuntime.InvokeAsync<bool>("confirm", "Are you sure you want to deny (reject) this leave request?")) return;
         try
         {
-            await LeaveService.DeleteLeaveRequestAsync(req.LeaveRequestID);
-            toastService.ShowSuccess("Deleted/Denied.");
-            await LoadLeaveAsync();
+            // Instantly remove from view
+            leaveRequests?.RemoveAll(r => r.LeaveRequestID == req.LeaveRequestID);
+            await InvokeAsync(StateHasChanged);
+
+            await LeaveService.UpdateLeaveStatusAsync(req.LeaveRequestID, false, "Rejected");
+            toastService.ShowSuccess("Leave request denied (rejected).");
+            await LoadLeaveAsync(isSilent: true);
         }
         catch (Exception ex)
         {
             toastService.ShowError($"Error: {ex.Message}");
+            await LoadLeaveAsync(isSilent: true);
+        }
+    }
+
+    private async Task DeleteLeaveRequest(LeaveRequest req)
+    {
+        if (!await JSRuntime.InvokeAsync<bool>("confirm", "Are you sure you want to permanently delete this record?")) return;
+        try
+        {
+            // Instantly remove from view
+            leaveRequests?.RemoveAll(r => r.LeaveRequestID == req.LeaveRequestID);
+            await InvokeAsync(StateHasChanged);
+
+            await LeaveService.DeleteLeaveRequestAsync(req.LeaveRequestID);
+            toastService.ShowSuccess("Deleted.");
+            await LoadLeaveAsync(isSilent: true);
+        }
+        catch (Exception ex)
+        {
+            toastService.ShowError($"Error: {ex.Message}");
+            await LoadLeaveAsync(isSilent: true);
         }
     }
 }

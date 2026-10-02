@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Identity;
 using System.ComponentModel.DataAnnotations;
 
 namespace Payroll.Web.Models
@@ -20,6 +20,7 @@ namespace Payroll.Web.Models
     public class UserRoleViewModel
     {
         public string UserId { get; set; } = string.Empty;
+        public string? FirebaseUid { get; set; }
         public string Email { get; set; } = string.Empty;
         public string UserName { get; set; } = string.Empty;
 
@@ -28,5 +29,6 @@ namespace Payroll.Web.Models
         public string EmployeeName { get; set; } = "N/A (Unlinked)";
         public string CurrentRole { get; set; } = "Employee"; // Admin or Employee
         public bool IsEmployeeActive { get; set; } // Based on TerminationDate
+        public bool IsDisabled { get; set; }
     }
 }

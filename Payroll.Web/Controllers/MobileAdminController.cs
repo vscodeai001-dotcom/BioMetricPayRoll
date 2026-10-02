@@ -70,11 +70,18 @@ public sealed class MobileAdminController : ControllerBase
         else
         {
             // Match the Web FeatureToggleManager: an Admin can only save
-            // employee permissions when the SuperAdmin grants that capability.
-            if (!settings.AdminCanManageEmployeePermissions)
+            // when the SuperAdmin grants that capability.
+            if (!settings.AdminCanManageFeatureToggles && !settings.AdminCanManageEmployeePermissions)
                 return Forbid();
 
-            incoming.ApplyEmployeePermissions(settings);
+            if (settings.AdminCanManageFeatureToggles)
+            {
+                incoming.ApplyModulesAndEmployeePermissions(settings);
+            }
+            else
+            {
+                incoming.ApplyEmployeePermissions(settings);
+            }
         }
 
         await db.SaveChangesAsync(cancellationToken);
@@ -113,6 +120,7 @@ public sealed class MobileFeatureSettingsDto
     public bool EmployeeToolsVisible { get; set; }
     public bool ShowThemeToggle { get; set; }
     public bool AdminCanManageEmployeePermissions { get; set; }
+    public bool AdminCanManageFeatureToggles { get; set; }
     public bool EnableProfessionalTax { get; set; }
     public bool EnableEmailNotifications { get; set; }
     public bool EnableLeaveAccrual { get; set; }
@@ -153,6 +161,7 @@ public sealed class MobileFeatureSettingsDto
         EmployeeCanViewLeave = s.EmployeeCanViewLeave, EmployeeCanViewLeaveHistory = s.EmployeeCanViewLeaveHistory,
         EmployeeToolsVisible = s.EmployeeToolsVisible, ShowThemeToggle = s.ShowThemeToggle,
         AdminCanManageEmployeePermissions = s.AdminCanManageEmployeePermissions,
+        AdminCanManageFeatureToggles = s.AdminCanManageFeatureToggles,
         EnableProfessionalTax = s.EnableProfessionalTax, EnableEmailNotifications = s.EnableEmailNotifications,
         EnableLeaveAccrual = s.EnableLeaveAccrual, EnableSandwichRule = s.EnableSandwichRule,
         EnableShiftAllowance = s.EnableShiftAllowance, EnableAuditLog = s.EnableAuditLog,
@@ -182,6 +191,27 @@ public sealed class MobileFeatureSettingsDto
         s.EmployeeCanViewReports = EmployeeCanViewReports;
     }
 
+    public void ApplyModulesAndEmployeePermissions(FeatureSettings s)
+    {
+        s.EnablePayroll = EnablePayroll; s.EnableSalaryAdvance = EnableSalaryAdvance;
+        s.EnableBonusManagement = EnableBonusManagement; s.EnableSalaryStructuring = EnableSalaryStructuring;
+        s.EnableTdsDeduction = EnableTdsDeduction; s.EnableShiftScheduling = EnableShiftScheduling;
+        s.EnableLeaveManagement = EnableLeaveManagement; s.EnablePunchCorrection = EnablePunchCorrection;
+        s.EnableEmployeeManagement = EnableEmployeeManagement; s.EnableCompanyReports = EnableCompanyReports;
+        s.EnableStatutoryCompliance = EnableStatutoryCompliance; s.EnableProfessionalTax = EnableProfessionalTax;
+        s.EnableEmailNotifications = EnableEmailNotifications; s.EnableLeaveAccrual = EnableLeaveAccrual;
+        s.EnableSandwichRule = EnableSandwichRule; s.EnableShiftAllowance = EnableShiftAllowance;
+        s.EnableAuditLog = EnableAuditLog;
+        s.EnableYearEndSummary = EnableYearEndSummary; s.EnableRecycleBin = EnableRecycleBin;
+        s.EnableTaxDeclarations = EnableTaxDeclarations; s.EnableGeoFencing = EnableGeoFencing;
+        s.EnableDualAttendance = EnableDualAttendance; s.EnableAutomaticGeofencePunching = EnableAutomaticGeofencePunching;
+        s.EnableResignationModule = EnableResignationModule; s.EnableCustomReporting = EnableCustomReporting;
+        s.EnableAutoShiftRotation = EnableAutoShiftRotation; s.EnableFlexibleBenefits = EnableFlexibleBenefits;
+        s.EnableInAppNotifications = EnableInAppNotifications; s.ShowThemeToggle = ShowThemeToggle;
+
+        ApplyEmployeePermissions(s);
+    }
+
     public void ApplyAll(FeatureSettings s)
     {
         s.EnablePayroll = EnablePayroll; s.EnableSalaryAdvance = EnableSalaryAdvance;
@@ -198,7 +228,9 @@ public sealed class MobileFeatureSettingsDto
         s.EmployeeCanViewPayslip = EmployeeCanViewPayslip; s.EmployeeCanViewAttendance = EmployeeCanViewAttendance;
         s.EmployeeCanViewLeave = EmployeeCanViewLeave; s.EmployeeCanViewLeaveHistory = EmployeeCanViewLeaveHistory;
         s.EmployeeToolsVisible = EmployeeToolsVisible; s.ShowThemeToggle = ShowThemeToggle;
-        s.AdminCanManageEmployeePermissions = AdminCanManageEmployeePermissions; s.EnableProfessionalTax = EnableProfessionalTax;
+        s.AdminCanManageEmployeePermissions = AdminCanManageEmployeePermissions;
+        s.AdminCanManageFeatureToggles = AdminCanManageFeatureToggles;
+        s.EnableProfessionalTax = EnableProfessionalTax;
         s.EnableEmailNotifications = EnableEmailNotifications; s.EnableLeaveAccrual = EnableLeaveAccrual;
         s.EnableSandwichRule = EnableSandwichRule; s.EnableShiftAllowance = EnableShiftAllowance;
         s.EnableAuditLog = EnableAuditLog; s.EmployeeCanViewShifts = EmployeeCanViewShifts;

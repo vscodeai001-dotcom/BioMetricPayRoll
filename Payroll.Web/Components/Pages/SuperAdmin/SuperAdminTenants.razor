@@ -1,0 +1,1581 @@
+@page "/superadmin/tenants"
+@rendermode InteractiveServer
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.EntityFrameworkCore
+@using global::Payroll.Shared.Data
+@using global::Payroll.Web.Services
+@using Blazored.Toast.Services
+
+@attribute [Authorize]
+
+@inject ITenantContextService TenantContext
+@inject TenantManagementService TenantManager
+@inject NavigationManager Navigation
+@inject IToastService ToastService
+@inject IJSRuntime JSRuntime
+@inject ILogger<SuperAdminTenants> Logger
+@inject AuthenticationStateProvider AuthStateProvider
+
+<PageTitle>👑 SuperAdmin Multi-Tenant Command Center</PageTitle>
+
+@if (isLoading)
+{
+    <div class="text-center py-5 my-5">
+        <div class="spinner-border text-primary mb-3" style="width: 3rem; height: 3rem;" role="status"></div>
+        <h5 class="text-muted">Loading Enterprise Tenant Management Portal...</h5>
+    </div>
+}
+else if (!isSuperAdmin)
+{
+    <div class="container py-5">
+        <div class="card border-danger shadow-sm mx-auto" style="max-width: 600px;">
+            <div class="card-body text-center p-5">
+                <div class="display-1 text-danger mb-3">🚫</div>
+                <h3 class="card-title text-danger fw-bold">Access Restricted</h3>
+                <p class="card-text text-muted mb-4">
+                    The SuperAdmin Multi-Tenant Management Portal is exclusively reserved for the root system administrator.
+                </p>
+                <a href="/" class="btn btn-primary px-4">
+                    <i class="bi bi-house-door-fill me-2"></i>Return to Application
+                </a>
+            </div>
+        </div>
+    </div>
+}
+else
+{
+    <div class="container-fluid px-3 px-md-4 py-4">
+        @* --- TOP HEADER --- *@
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-3 mb-4">
+            <div>
+                <div class="d-flex align-items-center gap-2">
+                    <h2 class="fw-bold mb-0 text-primary">👑 Multi-Tenant Command Center</h2>
+                    <span class="badge bg-warning text-dark px-2 py-1 fw-bold fs-6">SUPERADMIN</span>
+                </div>
+                <p class="text-muted small mb-0 mt-1">
+                    Provision new client companies, configure isolated feature toggles &amp; permissions, and launch into tenant workspaces.
+                </p>
+            </div>
+            <div class="d-flex align-items-center gap-2">
+                <button class="btn btn-outline-secondary" @onclick="LoadDataAsync">
+                    <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+                </button>
+                <button class="btn btn-success fw-bold shadow-sm" @onclick="OpenCreateModal">
+                    <i class="bi bi-building-add me-1"></i>✨ Register New Company
+                </button>
+            </div>
+        </div>
+
+        @* --- KPI METRICS CARDS --- *@
+        <div class="row g-3 mb-4">
+            <div class="col-12 col-sm-6 col-xl-3">
+                <div class="card border-0 shadow-sm rounded-3 h-100 tenant-kpi-card bg-primary text-white">
+                    <div class="card-body p-3 d-flex align-items-center justify-content-between">
+                        <div>
+                            <div class="text-white-50 small fw-bold text-uppercase">Total Companies</div>
+                            <div class="display-6 fw-bold">@allTenants.Count</div>
+                            <div class="small text-white-50 mt-1">
+                                <span class="badge bg-white text-primary fw-bold">@allTenants.Count(t => t.IsActive) Active</span>
+                                @if (allTenants.Count(t => !t.IsActive) > 0)
+                                {
+                                    <span class="badge bg-danger ms-1">@allTenants.Count(t => !t.IsActive) Inactive</span>
+                                }
+                            </div>
+                        </div>
+                        <div class="fs-1 opacity-75">🏢</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-12 col-sm-6 col-xl-3">
+                <div class="card border-0 shadow-sm rounded-3 h-100 tenant-kpi-card bg-success text-white">
+                    <div class="card-body p-3 d-flex align-items-center justify-content-between">
+                        <div>
+                            <div class="text-white-50 small fw-bold text-uppercase">Spark Optimization</div>
+                            <div class="display-6 fw-bold">@allTenants.Count(t => t.PlanMode == "Spark")</div>
+                            <div class="small text-white-50 mt-1">
+                                <span>⚡ 80% Bandwidth Saver</span>
+                            </div>
+                        </div>
+                        <div class="fs-1 opacity-75">⚡</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-12 col-sm-6 col-xl-3">
+                <div class="card border-0 shadow-sm rounded-3 h-100 tenant-kpi-card bg-danger text-white">
+                    <div class="card-body p-3 d-flex align-items-center justify-content-between">
+                        <div>
+                            <div class="text-white-50 small fw-bold text-uppercase">Blaze Enterprise</div>
+                            <div class="display-6 fw-bold">@allTenants.Count(t => t.PlanMode == "Blaze")</div>
+                            <div class="small text-white-50 mt-1">
+                                <span>🔥 High Throughput</span>
+                            </div>
+                        </div>
+                        <div class="fs-1 opacity-75">🔥</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-12 col-sm-6 col-xl-3">
+                <div class="card border-0 shadow-sm rounded-3 h-100 tenant-kpi-card bg-dark text-white">
+                    <div class="card-body p-3 d-flex align-items-center justify-content-between">
+                        <div>
+                            <div class="text-white-50 small fw-bold text-uppercase">Active Workspace</div>
+                            <div class="h4 fw-bold mb-1 text-truncate" style="max-width: 180px;">
+                                @(activeTenant?.IconEmoji ?? "🏢") @(activeTenant?.CompanyName ?? "None")
+                            </div>
+                            <div class="small text-white-50">
+                                Code: <span class="badge bg-warning text-dark fw-bold">@(activeTenant?.CompanyCode ?? "N/A")</span>
+                            </div>
+                        </div>
+                        <div class="fs-1 opacity-75">🎯</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        @* --- SEARCH & FILTER BAR --- *@
+        <div class="card border-0 shadow-sm rounded-3 mb-4">
+            <div class="card-body p-3">
+                <div class="row g-2 align-items-center">
+                    <div class="col-12 col-md-5">
+                        <div class="input-group">
+                            <span class="input-group-text bg-transparent border-end-0">
+                                <i class="bi bi-search text-muted"></i>
+                            </span>
+                            <input type="text" class="form-control border-start-0" placeholder="Search company by name, code or admin email..."
+                                   @bind="searchQuery" @bind:event="oninput" />
+                        </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                        <select class="form-select" @bind="selectedPlanFilter">
+                            <option value="">All Plans (Spark &amp; Blaze)</option>
+                            <option value="Spark">⚡ Spark Only</option>
+                            <option value="Blaze">🔥 Blaze Only</option>
+                        </select>
+                    </div>
+                    <div class="col-6 col-md-2">
+                        <select class="form-select" @bind="selectedStatusFilter">
+                            <option value="">All Statuses</option>
+                            <option value="Active">🟢 Active Only</option>
+                            <option value="Inactive">🔴 Suspended Only</option>
+                        </select>
+                    </div>
+                    <div class="col-12 col-md-2 text-md-end text-muted small">
+                        Showing <strong>@FilteredTenants.Count</strong> of @allTenants.Count
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        @* --- TENANT CARDS GRID --- *@
+        @if (FilteredTenants.Count == 0)
+        {
+            <div class="card border-0 shadow-sm rounded-3 p-5 text-center text-muted">
+                <div class="display-3 mb-3">🔍</div>
+                <h5>No client companies matched your search criteria</h5>
+                <p class="small mb-3">Try adjusting your filters or register a new company.</p>
+                <div>
+                    <button class="btn btn-outline-primary" @onclick="ResetFilters">Reset Filters</button>
+                    <button class="btn btn-success ms-2" @onclick="OpenCreateModal">✨ Register New Company</button>
+                </div>
+            </div>
+        }
+        else
+        {
+            <div class="row g-3">
+                @foreach (var tenant in FilteredTenants)
+                {
+                    var isCurrentActive = activeTenant?.TenantId == tenant.TenantId;
+                    <div class="col-12 col-md-6 col-xl-4">
+                        <div class="card h-100 tenant-card shadow-sm border-0 rounded-3 position-relative @(isCurrentActive ? "border border-2 border-primary" : "")">
+                            @if (isCurrentActive)
+                            {
+                                <div class="position-absolute top-0 end-0 m-2">
+                                    <span class="badge bg-primary shadow-sm">
+                                        <i class="bi bi-check-circle-fill me-1"></i>Active Workspace
+                                    </span>
+                                </div>
+                            }
+
+                            <div class="card-body p-4 d-flex flex-column">
+                                @* Header *@
+                                <div class="d-flex align-items-start gap-3 mb-3">
+                                    <div class="tenant-emoji-badge fs-2 p-2 rounded-3 bg-light-subtle border">
+                                        @tenant.IconEmoji
+                                    </div>
+                                    <div class="flex-grow-1 overflow-hidden">
+                                        <h5 class="fw-bold mb-1 text-truncate" title="@tenant.CompanyName">@tenant.CompanyName</h5>
+                                        <div class="d-flex align-items-center flex-wrap gap-1">
+                                            <span class="badge bg-secondary-subtle text-secondary-emphasis fw-bold">@tenant.CompanyCode</span>
+                                            <span class="badge @(tenant.PlanMode == "Blaze" ? "bg-danger" : "bg-success")">
+                                                @(tenant.PlanMode == "Blaze" ? "🔥 Blaze" : "⚡ Spark")
+                                            </span>
+                                            @if (tenant.IsActive)
+                                            {
+                                                <span class="badge bg-success-subtle text-success border border-success-subtle">🟢 Active</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="badge bg-danger-subtle text-danger border border-danger-subtle">🔴 Suspended</span>
+                                            }
+                                        </div>
+                                    </div>
+                                </div>
+
+                                @* Admin Info *@
+                                <div class="tenant-info-box p-3 rounded-2 bg-body-tertiary mb-3 small">
+                                    <div class="d-flex align-items-center mb-1 text-truncate">
+                                        <i class="bi bi-person-badge text-primary me-2"></i>
+                                        <strong class="me-1">Admin:</strong>
+                                        <span class="text-truncate">@tenant.AdminName</span>
+                                    </div>
+                                    <div class="d-flex align-items-center mb-1 text-truncate">
+                                        <i class="bi bi-envelope text-primary me-2"></i>
+                                        <span class="text-truncate" title="@tenant.AdminEmail">@tenant.AdminEmail</span>
+                                    </div>
+                                    @if (!string.IsNullOrWhiteSpace(tenant.AdminPhone))
+                                    {
+                                        <div class="d-flex align-items-center mb-1">
+                                            <i class="bi bi-telephone text-primary me-2"></i>
+                                            <span>@tenant.AdminPhone</span>
+                                        </div>
+                                    }
+                                    <div class="d-flex align-items-center text-muted mb-2">
+                                        <i class="bi bi-calendar3 me-2"></i>
+                                        <span>Registered: @tenant.CreatedAtUtc.ToString("dd MMM yyyy")</span>
+                                    </div>
+                                    <div class="pt-2 border-top d-flex justify-content-between align-items-center">
+                                        <span class="text-muted small">Login Access:</span>
+                                        <button class="btn btn-sm btn-outline-primary py-0 px-2 fw-semibold"
+                                                style="font-size: 0.78rem;"
+                                                title="Copy administrator login details to share with company admin"
+                                                @onclick="() => CopyAdminCredentials(tenant)">
+                                            <i class="bi bi-clipboard-check me-1"></i>Copy Login Info
+                                        </button>
+                                    </div>
+                                </div>
+
+                                @* Action Buttons *@
+                                <div class="mt-auto d-flex flex-column gap-2">
+                                    <div class="d-grid gap-2">
+                                        @if (isCurrentActive)
+                                        {
+                                            <a href="/" class="btn btn-primary fw-bold">
+                                                <i class="bi bi-box-arrow-in-right me-1"></i>Go To Dashboard
+                                            </a>
+                                        }
+                                        else
+                                        {
+                                            <button class="btn btn-outline-primary fw-bold" @onclick="() => LaunchTenantWorkspace(tenant.TenantId)">
+                                                <i class="bi bi-rocket-takeoff-fill me-1"></i>🚀 Enter Workspace
+                                            </button>
+                                        }
+                                    </div>
+
+                                    <div class="d-flex gap-1 justify-content-between">
+                                        <button class="btn btn-sm btn-outline-secondary flex-grow-1" title="Configure Feature Toggles &amp; Admin Permissions"
+                                                @onclick="() => OpenFeatureTogglesModal(tenant)">
+                                            <i class="bi bi-sliders me-1"></i>Features
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-secondary flex-grow-1" title="Company Settings &amp; Geofence"
+                                                @onclick="() => OpenCompanySettingsModal(tenant)">
+                                            <i class="bi bi-geo-alt me-1"></i>Office
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-secondary flex-grow-1" title="Edit Tenant Profile"
+                                                @onclick="() => OpenEditTenantModal(tenant)">
+                                            <i class="bi bi-pencil me-1"></i>Edit
+                                        </button>
+                                        <button class="btn btn-sm @(tenant.IsActive ? "btn-outline-warning" : "btn-outline-success")"
+                                                title="@(tenant.IsActive ? "Suspend Tenant" : "Activate Tenant")"
+                                                @onclick="() => ToggleTenantStatus(tenant)">
+                                            <i class="bi @(tenant.IsActive ? "bi-pause-circle" : "bi-play-circle")"></i>
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-danger"
+                                                title="Delete Company Entirely (Local DB + Firebase Cloud)"
+                                                @onclick="() => OpenDeleteCompanyModal(tenant)">
+                                            <i class="bi bi-trash3-fill"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                }
+            </div>
+        }
+    </div>
+
+    @* ========================================================================= *@
+    @* MODAL 1: REGISTER NEW COMPANY & ADMIN *@
+    @* ========================================================================= *@
+    @if (showCreateModal)
+    {
+        <div class="modal fade show d-block" tabindex="-1" style="background-color: rgba(0,0,0,0.65);" aria-modal="true" role="dialog">
+            <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+                <div class="modal-content border-0 shadow-lg rounded-3">
+                    <div class="modal-header bg-primary text-white">
+                        <h5 class="modal-title fw-bold">
+                            <i class="bi bi-building-add me-2"></i>Register New Client Company &amp; Administrator
+                        </h5>
+                        <button type="button" class="btn-close btn-close-white" @onclick="CloseCreateModal"></button>
+                    </div>
+
+                    <div class="modal-body p-4">
+                        @if (!string.IsNullOrWhiteSpace(createErrorMessage))
+                        {
+                            <div class="alert alert-danger d-flex align-items-center mb-3">
+                                <i class="bi bi-exclamation-octagon-fill me-2 fs-5"></i>
+                                <div>@createErrorMessage</div>
+                            </div>
+                        }
+
+                        <div class="mb-4">
+                            <h6 class="fw-bold text-primary border-bottom pb-2 mb-3">
+                                <i class="bi bi-1-circle-fill me-1"></i> Company Profile
+                            </h6>
+                            <div class="row g-3">
+                                <div class="col-12 col-md-6">
+                                    <label class="form-label fw-bold small">Company Name <span class="text-danger">*</span></label>
+                                    <input type="text" class="form-control" placeholder="e.g. Acme Corporation" @bind="newTenant.CompanyName" />
+                                </div>
+                                <div class="col-6 col-md-3">
+                                    <label class="form-label fw-bold small">Company Code</label>
+                                    <input type="text" class="form-control text-uppercase" placeholder="ACME" maxlength="10" @bind="newTenant.CompanyCode" />
+                                    <div class="form-text small">Short unique code</div>
+                                </div>
+                                <div class="col-6 col-md-3">
+                                    <label class="form-label fw-bold small">Icon Emoji</label>
+                                    <select class="form-select" @bind="newTenant.IconEmoji">
+                                        <option value="🏢">🏢 Corporate</option>
+                                        <option value="🏭">🏭 Industrial</option>
+                                        <option value="🏥">🏥 Hospital</option>
+                                        <option value="🏦">🏦 Financial</option>
+                                        <option value="🚀">🚀 Tech Startup</option>
+                                        <option value="💻">💻 IT Software</option>
+                                        <option value="🏪">🏪 Retail</option>
+                                        <option value="🏨">🏨 Hotel</option>
+                                        <option value="🏫">🏫 School/Edu</option>
+                                    </select>
+                                </div>
+                                <div class="col-12 col-md-6">
+                                    <label class="form-label fw-bold small">Firebase Infrastructure Plan</label>
+                                    <select class="form-select" @bind="newTenant.PlanMode">
+                                        <option value="Spark">⚡ Spark (Free / 80% Realtime Bandwidth Optimized)</option>
+                                        <option value="Blaze">🔥 Blaze (Paid / Unthrottled Enterprise Cloud)</option>
+                                    </select>
+                                </div>
+                                <div class="col-12 col-md-6">
+                                    <label class="form-label fw-bold small">Work Day Cutoff Hour (24h)</label>
+                                    <input type="number" class="form-control" min="0" max="23" @bind="newTenant.WorkDayCutoffHour" />
+                                    <div class="form-text small">Hour at which day attendance rolls over (default 22:00)</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="mb-4">
+                            <h6 class="fw-bold text-primary border-bottom pb-2 mb-3">
+                                <i class="bi bi-2-circle-fill me-1"></i> Company Administrator Credentials
+                            </h6>
+                            <div class="row g-3">
+                                <div class="col-12 col-md-6">
+                                    <label class="form-label fw-bold small">Admin Email Address <span class="text-danger">*</span></label>
+                                    <input type="email" class="form-control" placeholder="admin@company.com" @bind="newTenant.AdminEmail" />
+                                    <div class="form-text small">Used for company admin portal login</div>
+                                </div>
+                                <div class="col-12 col-md-6">
+                                    <label class="form-label fw-bold small">Admin Temporary Password <span class="text-danger">*</span></label>
+                                    <input type="password" class="form-control" placeholder="Minimum 6 characters" @bind="newTenant.AdminPassword" />
+                                </div>
+                                <div class="col-12 col-md-6">
+                                    <label class="form-label fw-bold small">Admin Full Name</label>
+                                    <input type="text" class="form-control" placeholder="e.g. John Doe" @bind="newTenant.AdminName" />
+                                </div>
+                                <div class="col-12 col-md-6">
+                                    <label class="form-label fw-bold small">Admin Phone Number</label>
+                                    <input type="tel" class="form-control" placeholder="+91 98765 43210" @bind="newTenant.AdminPhone" />
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="mb-4">
+                            <h6 class="fw-bold text-primary border-bottom pb-2 mb-3">
+                                <i class="bi bi-3-circle-fill me-1"></i> Office Location &amp; Geofencing
+                            </h6>
+                            <div class="row g-3">
+                                <div class="col-12 col-md-4">
+                                    <label class="form-label fw-bold small">Office Latitude</label>
+                                    <input type="number" step="0.000001" class="form-control" @bind="newTenant.OfficeLatitude" />
+                                </div>
+                                <div class="col-12 col-md-4">
+                                    <label class="form-label fw-bold small">Office Longitude</label>
+                                    <input type="number" step="0.000001" class="form-control" @bind="newTenant.OfficeLongitude" />
+                                </div>
+                                <div class="col-12 col-md-4">
+                                    <label class="form-label fw-bold small">Geofence Radius (Meters)</label>
+                                    <input type="number" class="form-control" min="20" max="5000" @bind="newTenant.GeoRadiusMeters" />
+                                </div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <h6 class="fw-bold text-primary border-bottom pb-2 mb-3">
+                                <i class="bi bi-4-circle-fill me-1"></i> Initial Feature Switches &amp; Admin Rights
+                            </h6>
+                            <div class="row g-2">
+                                <div class="col-6 col-md-4">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" id="c_payroll" @bind="newTenant.InitialFeatures.EnablePayroll" />
+                                        <label class="form-check-label small fw-bold" for="c_payroll">💰 Payroll Engine</label>
+                                    </div>
+                                </div>
+                                <div class="col-6 col-md-4">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" id="c_geofence" @bind="newTenant.InitialFeatures.EnableGeoFencing" />
+                                        <label class="form-check-label small fw-bold" for="c_geofence">📍 Geo-Fencing</label>
+                                    </div>
+                                </div>
+                                <div class="col-6 col-md-4">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" id="c_dual" @bind="newTenant.InitialFeatures.EnableDualAttendance" />
+                                        <label class="form-check-label small fw-bold" for="c_dual">🔄 Dual Attendance</label>
+                                    </div>
+                                </div>
+                                <div class="col-6 col-md-4">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" id="c_advance" @bind="newTenant.InitialFeatures.EnableSalaryAdvance" />
+                                        <label class="form-check-label small fw-bold" for="c_advance">💵 Salary Advance</label>
+                                    </div>
+                                </div>
+                                <div class="col-6 col-md-4">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" id="c_bonus" @bind="newTenant.InitialFeatures.EnableBonusManagement" />
+                                        <label class="form-check-label small fw-bold" for="c_bonus">🎁 Bonus System</label>
+                                    </div>
+                                </div>
+                                <div class="col-6 col-md-4">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" id="c_shifts" @bind="newTenant.InitialFeatures.EnableShiftScheduling" />
+                                        <label class="form-check-label small fw-bold" for="c_shifts">📅 Shift Schedules</label>
+                                    </div>
+                                </div>
+                                <div class="col-6 col-md-4">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" id="c_leave" @bind="newTenant.InitialFeatures.EnableLeaveManagement" />
+                                        <label class="form-check-label small fw-bold" for="c_leave">🏖️ Leave Manager</label>
+                                    </div>
+                                </div>
+                                <div class="col-6 col-md-4">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" id="c_admin_dash" @bind="newTenant.InitialFeatures.AdminCanViewDashboard" />
+                                        <label class="form-check-label small fw-bold" for="c_admin_dash">📊 Admin Dashboard</label>
+                                    </div>
+                                </div>
+                                <div class="col-6 col-md-4">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" id="c_admin_emp" @bind="newTenant.InitialFeatures.AdminCanManageEmployees" />
+                                        <label class="form-check-label small fw-bold" for="c_admin_emp">👥 Manage Employees</label>
+                                    </div>
+                                </div>
+                                <div class="col-6 col-md-4">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" id="c_admin_run_payroll" @bind="newTenant.InitialFeatures.AdminCanRunPayroll" />
+                                        <label class="form-check-label small fw-bold" for="c_admin_run_payroll">⚡ Admin Run Payroll</label>
+                                    </div>
+                                </div>
+                                <div class="col-6 col-md-4">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" id="c_admin_settings" @bind="newTenant.InitialFeatures.AdminCanEditSettings" />
+                                        <label class="form-check-label small fw-bold" for="c_admin_settings">⚙️ Admin Edit Settings</label>
+                                    </div>
+                                </div>
+                                <div class="col-6 col-md-4">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" id="c_auto_punch" @bind="newTenant.InitialFeatures.EnableAutomaticGeofencePunching" />
+                                        <label class="form-check-label small fw-bold" for="c_auto_punch">⚡ Auto GPS Punch</label>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="modal-footer bg-light">
+                        <button type="button" class="btn btn-outline-secondary" @onclick="CloseCreateModal" disabled="@isSubmitting">Cancel</button>
+                        <button type="button" class="btn btn-success fw-bold px-4" @onclick="SubmitCreateTenant" disabled="@isSubmitting">
+                            @if (isSubmitting)
+                            {
+                                <span class="spinner-border spinner-border-sm me-2"></span>
+                                <span>Provisioning Tenant...</span>
+                            }
+                            else
+                            {
+                                <i class="bi bi-check-circle-fill me-1"></i>
+                                <span>Create Company &amp; Admin</span>
+                            }
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+
+    @* ========================================================================= *@
+    @* MODAL 2: CONFIGURE FEATURE PERMISSIONS *@
+    @* ========================================================================= *@
+    @if (showFeaturesModal && selectedTenant != null && editingFeatures != null)
+    {
+        <div class="modal fade show d-block" tabindex="-1" style="background-color: rgba(0,0,0,0.65);" aria-modal="true" role="dialog">
+            <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+                <div class="modal-content border-0 shadow-lg rounded-3">
+                    <div class="modal-header bg-dark text-white">
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="fs-4">@selectedTenant.IconEmoji</span>
+                            <div>
+                                <h5 class="modal-title fw-bold mb-0">Feature Toggles &amp; Admin Permissions: @selectedTenant.CompanyName</h5>
+                                <div class="small text-white-50">Tenant ID: <code>@selectedTenant.TenantId</code> | Code: <strong>@selectedTenant.CompanyCode</strong></div>
+                            </div>
+                        </div>
+                        <button type="button" class="btn-close btn-close-white" @onclick="CloseFeaturesModal"></button>
+                    </div>
+
+                    <div class="modal-body p-4">
+                        @* Plan Mode Selection *@
+                        <div class="card border-0 shadow-sm bg-body-tertiary mb-4 p-3 rounded-3">
+                            <div class="row align-items-center">
+                                <div class="col-12 col-md-7">
+                                    <h6 class="fw-bold mb-1">⚡ Firebase Realtime Cloud Plan Mode</h6>
+                                    <p class="text-muted small mb-0">
+                                        Controls whether this tenant operates in bandwidth-optimized Spark mode or high-volume Blaze mode.
+                                    </p>
+                                </div>
+                                <div class="col-12 col-md-5 mt-2 mt-md-0">
+                                    <div class="btn-group w-100" role="group">
+                                        <button type="button" class="btn @(editingFeatures.FirebasePlanMode == "Spark" ? "btn-success fw-bold" : "btn-outline-secondary")"
+                                                @onclick='() => editingFeatures.FirebasePlanMode = "Spark"'>
+                                            ⚡ Spark (Optimized)
+                                        </button>
+                                        <button type="button" class="btn @(editingFeatures.FirebasePlanMode == "Blaze" ? "btn-danger fw-bold" : "btn-outline-secondary")"
+                                                @onclick='() => editingFeatures.FirebasePlanMode = "Blaze"'>
+                                            🔥 Blaze (Full Realtime)
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        @* SECTION 1: CORE MODULES *@
+                        <div class="card border-0 shadow-sm mb-4">
+                            <div class="card-header bg-primary text-white fw-bold py-2">
+                                <i class="bi bi-grid-fill me-2"></i>1. Core Subscription Modules (Client Master Switches)
+                            </div>
+                            <div class="card-body p-3">
+                                <div class="row g-3">
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="m_payroll" @bind="editingFeatures.EnablePayroll" />
+                                            <label class="form-check-label fw-bold" for="m_payroll">💰 Payroll Engine</label>
+                                            <div class="form-text small">Enables salary calculation, pay runs &amp; payslips.</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="m_adv" @bind="editingFeatures.EnableSalaryAdvance" />
+                                            <label class="form-check-label fw-bold" for="m_adv">💵 Salary Advance</label>
+                                            <div class="form-text small">Allows employee advance requests &amp; monthly deductions.</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="m_bonus" @bind="editingFeatures.EnableBonusManagement" />
+                                            <label class="form-check-label fw-bold" for="m_bonus">🎁 Bonus Management</label>
+                                            <div class="form-text small">Enables bonus allocations, festive rewards &amp; incentive payouts.</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="m_leave" @bind="editingFeatures.EnableLeaveManagement" />
+                                            <label class="form-check-label fw-bold" for="m_leave">🏖️ Leave Management</label>
+                                            <div class="form-text small">Casual, Sick &amp; Earned leave requests and approvals.</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="m_shifts" @bind="editingFeatures.EnableShiftScheduling" />
+                                            <label class="form-check-label fw-bold" for="m_shifts">📅 Shift Scheduling</label>
+                                            <div class="form-text small">Multi-shift rotation, shift allowances &amp; rosters.</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="m_statutory" @bind="editingFeatures.EnableStatutoryCompliance" />
+                                            <label class="form-check-label fw-bold" for="m_statutory">🏛️ Statutory Compliance</label>
+                                            <div class="form-text small">PF (12%), ESI (0.75%/3.25%) &amp; Professional Tax.</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="m_tds" @bind="editingFeatures.EnableTdsDeduction" />
+                                            <label class="form-check-label fw-bold" for="m_tds">📑 TDS Deduction</label>
+                                            <div class="form-text small">Income tax deduction and tax declaration module.</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="m_resignation" @bind="editingFeatures.EnableResignationModule" />
+                                            <label class="form-check-label fw-bold" for="m_resignation">🚪 Exit &amp; Resignation</label>
+                                            <div class="form-text small">Employee resignation submissions &amp; exit approvals.</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="m_reports" @bind="editingFeatures.EnableCompanyReports" />
+                                            <label class="form-check-label fw-bold" for="m_reports">📈 Company Reports</label>
+                                            <div class="form-text small">Attendance summaries, muster rolls &amp; export tools.</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        @* SECTION 2: ATTENDANCE & GEOFENCING *@
+                        <div class="card border-0 shadow-sm mb-4">
+                            <div class="card-header bg-success text-white fw-bold py-2">
+                                <i class="bi bi-geo-alt-fill me-2"></i>2. Attendance &amp; Geofencing Rules
+                            </div>
+                            <div class="card-body p-3">
+                                <div class="row g-3">
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="a_geofence" @bind="editingFeatures.EnableGeoFencing" />
+                                            <label class="form-check-label fw-bold" for="a_geofence">📍 Geo-Fencing Enforcement</label>
+                                            <div class="form-text small">Require employees to be within GPS boundary.</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="a_dual" @bind="editingFeatures.EnableDualAttendance" />
+                                            <label class="form-check-label fw-bold" for="a_dual">🔄 Dual Attendance Mode</label>
+                                            <div class="form-text small">Both biometric hardware machine and mobile geofence active.</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="a_auto_punch" @bind="editingFeatures.EnableAutomaticGeofencePunching" />
+                                            <label class="form-check-label fw-bold" for="a_auto_punch">⚡ Automatic GPS Punching</label>
+                                            <div class="form-text small">Auto IN/OUT generated when entering/exiting geofence.</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="a_correction" @bind="editingFeatures.EnablePunchCorrection" />
+                                            <label class="form-check-label fw-bold" for="a_correction">🛠️ Punch Correction Requests</label>
+                                            <div class="form-text small">Allow employees to request missed punch adjustments.</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="a_reg" @bind="editingFeatures.EnableRegularizationRequest" />
+                                            <label class="form-check-label fw-bold" for="a_reg">📋 Attendance Regularization</label>
+                                            <div class="form-text small">Formal attendance dispute &amp; regularization workflow.</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="a_audit" @bind="editingFeatures.EnableAuditLog" />
+                                            <label class="form-check-label fw-bold" for="a_audit">🛡️ Audit Logging</label>
+                                            <div class="form-text small">Comprehensive tracking of punch corrections and changes.</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        @* SECTION 3: ADMIN PERMISSIONS *@
+                        <div class="card border-0 shadow-sm mb-4">
+                            <div class="card-header bg-warning text-dark fw-bold py-2">
+                                <i class="bi bi-shield-lock-fill me-2"></i>3. Company Administrator Rights (Granted to @selectedTenant.AdminEmail)
+                            </div>
+                            <div class="card-body p-3">
+                                <div class="row g-3">
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="p_dash" @bind="editingFeatures.AdminCanViewDashboard" />
+                                            <label class="form-check-label fw-bold" for="p_dash">📊 View Admin Dashboard</label>
+                                            <div class="form-text small">Access to high-level KPIs, attendance charts &amp; stats.</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="p_emp" @bind="editingFeatures.AdminCanManageEmployees" />
+                                            <label class="form-check-label fw-bold" for="p_emp">👥 Manage Employees</label>
+                                            <div class="form-text small">Add, edit, deactivate &amp; manage employee master records.</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="p_att" @bind="editingFeatures.AdminCanViewAttendance" />
+                                            <label class="form-check-label fw-bold" for="p_att">🕒 View Attendance Logs</label>
+                                            <div class="form-text small">Inspect daily punch logs, in/out timestamps &amp; flags.</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="p_payroll" @bind="editingFeatures.AdminCanRunPayroll" />
+                                            <label class="form-check-label fw-bold" for="p_payroll">⚡ Process &amp; Run Payroll</label>
+                                            <div class="form-text small">Allow admin to compute salaries and issue payslips.</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="p_settings" @bind="editingFeatures.AdminCanEditSettings" />
+                                            <label class="form-check-label fw-bold" for="p_settings">⚙️ Edit Company Settings</label>
+                                            <div class="form-text small">Allow admin to change cutoff hours, GPS radius, etc.</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="p_shifts" @bind="editingFeatures.AdminCanManageShifts" />
+                                            <label class="form-check-label fw-bold" for="p_shifts">📅 Manage Shift Rosters</label>
+                                            <div class="form-text small">Create shifts and assign shifts to staff members.</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="p_approvals" @bind="editingFeatures.AdminCanManagePunchApprovals" />
+                                            <label class="form-check-label fw-bold" for="p_approvals">✅ Approve Punch Corrections</label>
+                                            <div class="form-text small">Approve or reject employee manual punch requests.</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="p_reports" @bind="editingFeatures.AdminCanViewReports" />
+                                            <label class="form-check-label fw-bold" for="p_reports">📈 View Executive Reports</label>
+                                            <div class="form-text small">Access to monthly attendance &amp; payroll reports.</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="p_emp_perms" @bind="editingFeatures.AdminCanManageEmployeePermissions" />
+                                            <label class="form-check-label fw-bold" for="p_emp_perms">🔐 Delegate Employee Permissions</label>
+                                            <div class="form-text small">Allow admin to customize what employees can see.</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-12 col-sm-6 col-lg-4">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="p_feat_toggles" @bind="editingFeatures.AdminCanManageFeatureToggles" />
+                                            <label class="form-check-label fw-bold" for="p_feat_toggles">🎛️ Manage Feature Toggles</label>
+                                            <div class="form-text small">Allow admin to access and toggle company features.</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="modal-footer bg-light">
+                        <button type="button" class="btn btn-outline-secondary" @onclick="CloseFeaturesModal" disabled="@isSavingFeatures">Cancel</button>
+                        <button type="button" class="btn btn-primary fw-bold px-4" @onclick="SubmitSaveFeatures" disabled="@isSavingFeatures">
+                            @if (isSavingFeatures)
+                            {
+                                <span class="spinner-border spinner-border-sm me-2"></span>
+                                <span>Saving Configuration...</span>
+                            }
+                            else
+                            {
+                                <i class="bi bi-save me-1"></i>
+                                <span>Save Feature Toggles</span>
+                            }
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+
+    @* ========================================================================= *@
+    @* MODAL 3: OFFICE LOCATION & GEOFENCE SETTINGS *@
+    @* ========================================================================= *@
+    @if (showCompanySettingsModal && selectedTenant != null && editingCompanySetting != null)
+    {
+        <div class="modal fade show d-block" tabindex="-1" style="background-color: rgba(0,0,0,0.65);" aria-modal="true" role="dialog">
+            <div class="modal-dialog modal-lg modal-dialog-centered">
+                <div class="modal-content border-0 shadow-lg rounded-3">
+                    <div class="modal-header bg-success text-white">
+                        <h5 class="modal-title fw-bold">
+                            <i class="bi bi-geo-alt-fill me-2"></i>Office Location &amp; Attendance Rules: @selectedTenant.CompanyName
+                        </h5>
+                        <button type="button" class="btn-close btn-close-white" @onclick="CloseCompanySettingsModal"></button>
+                    </div>
+
+                    <div class="modal-body p-4">
+                        <div class="row g-3 mb-3">
+                            <div class="col-12">
+                                <label class="form-label fw-bold small">Company Name</label>
+                                <input type="text" class="form-control" @bind="editingCompanySetting.CompanyName" />
+                            </div>
+                            <div class="col-12 col-md-6">
+                                <label class="form-label fw-bold small">Office Address Line 1</label>
+                                <input type="text" class="form-control" @bind="editingCompanySetting.AddressLine1" />
+                            </div>
+                            <div class="col-12 col-md-6">
+                                <label class="form-label fw-bold small">City, State, Pincode</label>
+                                <input type="text" class="form-control" @bind="editingCompanySetting.CityStatePincode" />
+                            </div>
+                        </div>
+
+                        <h6 class="fw-bold text-success border-bottom pb-2 mb-3">📍 GPS &amp; Geofencing Boundary</h6>
+                        <div class="row g-3 mb-3">
+                            <div class="col-12 col-md-4">
+                                <label class="form-label fw-bold small">Office Latitude</label>
+                                <input type="number" step="0.000001" class="form-control" @bind="editingCompanySetting.OfficeLatitude" />
+                            </div>
+                            <div class="col-12 col-md-4">
+                                <label class="form-label fw-bold small">Office Longitude</label>
+                                <input type="number" step="0.000001" class="form-control" @bind="editingCompanySetting.OfficeLongitude" />
+                            </div>
+                            <div class="col-12 col-md-4">
+                                <label class="form-label fw-bold small">Geofence Radius (Meters)</label>
+                                <input type="number" class="form-control" min="20" max="5000" @bind="editingCompanySetting.GeoRadiusMeters" />
+                            </div>
+                        </div>
+
+                        <h6 class="fw-bold text-success border-bottom pb-2 mb-3">⏰ Work Day &amp; Grace Rules</h6>
+                        <div class="row g-3 mb-3">
+                            <div class="col-12 col-md-4">
+                                <label class="form-label fw-bold small">Work Day Cutoff Hour (24h)</label>
+                                <input type="number" min="0" max="23" class="form-control" @bind="editingCompanySetting.WorkDayCutoffHour" />
+                            </div>
+                            <div class="col-12 col-md-4">
+                                <label class="form-label fw-bold small">Late Grace Minutes</label>
+                                <input type="number" min="0" max="120" class="form-control" @bind="editingCompanySetting.LateGraceMinutes" />
+                            </div>
+                            <div class="col-12 col-md-4">
+                                <label class="form-label fw-bold small">Early Exit Grace Minutes</label>
+                                <input type="number" min="0" max="120" class="form-control" @bind="editingCompanySetting.EndTimeGraceMinutes" />
+                            </div>
+                        </div>
+
+                        <h6 class="fw-bold text-success border-bottom pb-2 mb-3">📠 Biometric Machine Network Settings (Optional)</h6>
+                        <div class="row g-3">
+                            <div class="col-12 col-md-8">
+                                <label class="form-label fw-bold small">ZKTeco Device IP</label>
+                                <input type="text" class="form-control" placeholder="192.168.1.201" @bind="editingCompanySetting.ZktecoIP" />
+                            </div>
+                            <div class="col-12 col-md-4">
+                                <label class="form-label fw-bold small">ZKTeco Port</label>
+                                <input type="number" class="form-control" @bind="editingCompanySetting.ZktecoPort" />
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="modal-footer bg-light">
+                        <button type="button" class="btn btn-outline-secondary" @onclick="CloseCompanySettingsModal" disabled="@isSavingCompanySetting">Cancel</button>
+                        <button type="button" class="btn btn-success fw-bold px-4" @onclick="SubmitSaveCompanySettings" disabled="@isSavingCompanySetting">
+                            @if (isSavingCompanySetting)
+                            {
+                                <span class="spinner-border spinner-border-sm me-2"></span>
+                                <span>Saving Rules...</span>
+                            }
+                            else
+                            {
+                                <i class="bi bi-save me-1"></i>
+                                <span>Save Office Settings</span>
+                            }
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+
+    @* ========================================================================= *@
+    @* MODAL 4: EDIT TENANT PROFILE *@
+    @* ========================================================================= *@
+    @if (showEditModal && selectedTenant != null && editingTenant != null)
+    {
+        <div class="modal fade show d-block" tabindex="-1" style="background-color: rgba(0,0,0,0.65);" aria-modal="true" role="dialog">
+            <div class="modal-dialog modal-dialog-centered">
+                <div class="modal-content border-0 shadow-lg rounded-3">
+                    <div class="modal-header bg-secondary text-white">
+                        <h5 class="modal-title fw-bold">
+                            <i class="bi bi-pencil me-2"></i>Edit Company Profile: @selectedTenant.CompanyName
+                        </h5>
+                        <button type="button" class="btn-close btn-close-white" @onclick="CloseEditTenantModal"></button>
+                    </div>
+
+                    <div class="modal-body p-4">
+                        @if (!string.IsNullOrWhiteSpace(editErrorMessage))
+                        {
+                            <div class="alert alert-danger d-flex align-items-center mb-3">
+                                <i class="bi bi-exclamation-triangle-fill me-2 fs-5"></i>
+                                <div>@editErrorMessage</div>
+                            </div>
+                        }
+
+                        <div class="row g-3">
+                            <div class="col-12">
+                                <label class="form-label fw-bold small">Company Display Name <span class="text-danger">*</span></label>
+                                <input type="text" class="form-control" @bind="editingTenant.CompanyName" />
+                            </div>
+                            <div class="col-6">
+                                <label class="form-label fw-bold small">Icon Emoji</label>
+                                <select class="form-select" @bind="editingTenant.IconEmoji">
+                                    <option value="🏢">🏢 Corporate</option>
+                                    <option value="🏭">🏭 Industrial</option>
+                                    <option value="🏥">🏥 Hospital</option>
+                                    <option value="🏦">🏦 Financial</option>
+                                    <option value="🚀">🚀 Tech Startup</option>
+                                    <option value="💻">💻 IT Software</option>
+                                    <option value="🏪">🏪 Retail</option>
+                                    <option value="🏨">🏨 Hotel</option>
+                                    <option value="🏫">🏫 School/Edu</option>
+                                </select>
+                            </div>
+                            <div class="col-6">
+                                <label class="form-label fw-bold small">Plan Mode</label>
+                                <select class="form-select" @bind="editingTenant.PlanMode">
+                                    <option value="Spark">⚡ Spark</option>
+                                    <option value="Blaze">🔥 Blaze</option>
+                                </select>
+                            </div>
+                            <div class="col-12">
+                                <label class="form-label fw-bold small">Admin Full Name</label>
+                                <input type="text" class="form-control" @bind="editingTenant.AdminName" />
+                            </div>
+                            <div class="col-12">
+                                <label class="form-label fw-bold small">Admin Phone</label>
+                                <input type="tel" class="form-control" @bind="editingTenant.AdminPhone" />
+                            </div>
+
+                            @* --- CREDENTIALS MANAGEMENT (EMAIL & RESET PASSWORD) --- *@
+                            <div class="col-12">
+                                <div class="card border border-primary-subtle bg-primary-subtle bg-opacity-10 p-3 rounded-3 shadow-none">
+                                    <div class="d-flex align-items-center gap-2 mb-2 text-primary fw-bold">
+                                        <i class="bi bi-shield-lock-fill"></i>
+                                        <span>🔑 Company Administrator Credentials (Login &amp; Password)</span>
+                                    </div>
+                                    <div class="text-muted small mb-3">
+                                        Saved credentials immediately synchronize with ASP.NET Identity &amp; Firebase Auth so the administrator can log in directly without separate setup.
+                                    </div>
+
+                                    <div class="mb-3">
+                                        <label class="form-label fw-bold small">Administrator Email / Username <span class="text-danger">*</span></label>
+                                        <div class="input-group">
+                                            <span class="input-group-text bg-white"><i class="bi bi-envelope-at-fill text-primary"></i></span>
+                                            <input type="email" class="form-control" @bind="editAdminEmail" placeholder="admin@company.com" />
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <label class="form-label fw-bold small">New / Reset Password</label>
+                                        <div class="input-group">
+                                            <span class="input-group-text bg-white"><i class="bi bi-key-fill text-primary"></i></span>
+                                            <input type="@(showEditPassword ? "text" : "password")"
+                                                   class="form-control"
+                                                   @bind="editAdminPassword"
+                                                   placeholder="Leave blank to retain current password (min 6 chars)" />
+                                            <button class="btn btn-outline-secondary" type="button" @onclick="() => showEditPassword = !showEditPassword" title="Toggle password visibility">
+                                                <i class="bi @(showEditPassword ? "bi-eye-slash-fill" : "bi-eye-fill")"></i>
+                                            </button>
+                                        </div>
+                                        <div class="form-text small text-muted">
+                                            Enter a password to update or reset this administrator's login access.
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="col-12">
+                                <div class="form-check form-switch mt-2">
+                                    <input class="form-check-input" type="checkbox" id="edit_active" @bind="editingTenant.IsActive" />
+                                    <label class="form-check-label fw-bold" for="edit_active">Company Is Active</label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="modal-footer bg-light">
+                        <button type="button" class="btn btn-outline-secondary" @onclick="CloseEditTenantModal" disabled="@isSavingEdit">Cancel</button>
+                        <button type="button" class="btn btn-primary fw-bold px-4" @onclick="SubmitSaveEditTenant" disabled="@isSavingEdit">
+                            @if (isSavingEdit)
+                            {
+                                <span class="spinner-border spinner-border-sm me-2"></span>
+                                <span>Updating...</span>
+                            }
+                            else
+                            {
+                                <i class="bi bi-save me-1"></i>
+                                <span>Save Changes</span>
+                            }
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+
+    @* ========================================================================= *@
+    @* MODAL 5: DELETE COMPANY (CLOUD + LOCAL WIPE)                             *@
+    @* ========================================================================= *@
+    @if (showDeleteModal && tenantToDelete != null)
+    {
+        <div class="modal fade show d-block" tabindex="-1" style="background-color: rgba(0,0,0,0.75);" aria-modal="true" role="dialog">
+            <div class="modal-dialog modal-dialog-centered">
+                <div class="modal-content border-0 shadow-lg rounded-3 border-top border-4 border-danger">
+                    <div class="modal-header bg-danger text-white">
+                        <h5 class="modal-title fw-bold">
+                            <i class="bi bi-exclamation-triangle-fill me-2"></i>Permanently Delete Company
+                        </h5>
+                        <button type="button" class="btn-close btn-close-white" @onclick="CloseDeleteCompanyModal" disabled="@isDeletingCompany"></button>
+                    </div>
+                    <div class="modal-body p-4">
+                        <div class="alert alert-danger d-flex align-items-start gap-2 mb-3">
+                            <i class="bi bi-shield-slash-fill fs-3 flex-shrink-0 text-danger"></i>
+                            <div>
+                                <strong class="fs-6">PERMANENT &amp; IRREVERSIBLE WIPE</strong>
+                                <div class="small mt-1">
+                                    You are about to completely delete <strong>@tenantToDelete.CompanyName (@tenantToDelete.CompanyCode)</strong>:
+                                </div>
+                                <ul class="mb-0 mt-2 small ps-3">
+                                    <li>All employee master records &amp; biometric IDs</li>
+                                    <li>All attendance logs, punches &amp; GPS history</li>
+                                    <li>All salary snapshots, advances &amp; payslips</li>
+                                    <li>All Firebase Cloud Realtime DB nodes under <code>owners/@tenantToDelete.TenantId</code></li>
+                                </ul>
+                            </div>
+                        </div>
+
+                        <div class="p-3 bg-body-tertiary rounded-2 mb-3 border small">
+                            <div class="d-flex justify-content-between mb-1">
+                                <span class="text-muted">Company:</span>
+                                <strong>@tenantToDelete.CompanyName</strong>
+                            </div>
+                            <div class="d-flex justify-content-between mb-1">
+                                <span class="text-muted">Tenant ID:</span>
+                                <code>@tenantToDelete.TenantId</code>
+                            </div>
+                            <div class="d-flex justify-content-between">
+                                <span class="text-muted">Company Admin:</span>
+                                <span>@tenantToDelete.AdminEmail</span>
+                            </div>
+                        </div>
+
+                        <div class="text-muted small mb-0">
+                            <i class="bi bi-lock-fill text-warning me-1"></i>
+                            Authorized exclusively for SuperAdmin <code>prakashshiva368@gmail.com</code>.
+                        </div>
+
+                        @if (!string.IsNullOrWhiteSpace(deleteErrorMessage))
+                        {
+                            <div class="alert alert-danger py-2 small mt-3 mb-0">@deleteErrorMessage</div>
+                        }
+                    </div>
+                    <div class="modal-footer bg-light-subtle">
+                        <button type="button" class="btn btn-secondary" @onclick="CloseDeleteCompanyModal" disabled="@isDeletingCompany">Cancel</button>
+                        <button type="button" class="btn btn-danger fw-bold" @onclick="ConfirmDeleteCompanyAsync" disabled="@isDeletingCompany">
+                            @if (isDeletingCompany)
+                            {
+                                <span class="spinner-border spinner-border-sm me-1" role="status"></span>
+                                <span>Deleting Cloud &amp; Local DB...</span>
+                            }
+                            else
+                            {
+                                <i class="bi bi-trash3-fill me-1"></i>
+                                <span>Yes, Delete Company Entirely</span>
+                            }
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+}
+
+@code {
+    private bool isLoading = true;
+    private bool isSuperAdmin = false;
+    private string currentUserEmail = string.Empty;
+    private CompanyTenant? activeTenant;
+    private List<CompanyTenant> allTenants = new();
+
+    // Filters
+    private string searchQuery = string.Empty;
+    private string selectedPlanFilter = string.Empty;
+    private string selectedStatusFilter = string.Empty;
+
+    // Modals state
+    private bool showCreateModal = false;
+    private bool isSubmitting = false;
+    private string? createErrorMessage;
+    private CreateTenantRequest newTenant = new();
+
+    private bool showFeaturesModal = false;
+    private bool isSavingFeatures = false;
+    private CompanyTenant? selectedTenant;
+    private FeatureSettings? editingFeatures;
+
+    private bool showCompanySettingsModal = false;
+    private bool isSavingCompanySetting = false;
+    private CompanySetting? editingCompanySetting;
+
+    private bool showEditModal = false;
+    private bool isSavingEdit = false;
+    private CompanyTenant? editingTenant;
+    private string editAdminEmail = string.Empty;
+    private string editAdminPassword = string.Empty;
+    private bool showEditPassword = false;
+    private string? editErrorMessage;
+
+    // Delete Company Modal state
+    private bool showDeleteModal = false;
+    private bool isDeletingCompany = false;
+    private string? deleteErrorMessage;
+    private CompanyTenant? tenantToDelete;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadDataAsync();
+    }
+
+    private async Task LoadDataAsync()
+    {
+        isLoading = true;
+        try
+        {
+            var authState = await AuthStateProvider.GetAuthenticationStateAsync();
+            currentUserEmail = authState.User.Identity?.Name ?? FirebaseAuthSecurityConstants.CanonicalSuperAdminEmail;
+
+            isSuperAdmin = await TenantContext.IsSuperAdminAsync();
+            if (isSuperAdmin)
+            {
+                await TenantManager.EnsureDefaultTenantSeededAsync();
+                allTenants = await TenantManager.GetAllTenantsAsync();
+                activeTenant = await TenantContext.GetActiveTenantAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to load multi-tenant management data.");
+            ToastService.ShowError("Could not load tenants: " + ex.Message);
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private List<CompanyTenant> FilteredTenants
+    {
+        get
+        {
+            var query = allTenants.AsEnumerable();
+
+            if (!string.IsNullOrWhiteSpace(searchQuery))
+            {
+                var q = searchQuery.Trim().ToLowerInvariant();
+                query = query.Where(t => t.CompanyName.ToLowerInvariant().Contains(q) ||
+                                         t.CompanyCode.ToLowerInvariant().Contains(q) ||
+                                         t.AdminEmail.ToLowerInvariant().Contains(q) ||
+                                         t.AdminName.ToLowerInvariant().Contains(q));
+            }
+
+            if (!string.IsNullOrWhiteSpace(selectedPlanFilter))
+            {
+                query = query.Where(t => t.PlanMode.Equals(selectedPlanFilter, StringComparison.OrdinalIgnoreCase));
+            }
+
+            if (!string.IsNullOrWhiteSpace(selectedStatusFilter))
+            {
+                if (selectedStatusFilter == "Active")
+                    query = query.Where(t => t.IsActive);
+                else if (selectedStatusFilter == "Inactive")
+                    query = query.Where(t => !t.IsActive);
+            }
+
+            return query.ToList();
+        }
+    }
+
+    private void ResetFilters()
+    {
+        searchQuery = string.Empty;
+        selectedPlanFilter = string.Empty;
+        selectedStatusFilter = string.Empty;
+    }
+
+    private async Task LaunchTenantWorkspace(string tenantId)
+    {
+        try
+        {
+            await TenantContext.SetActiveTenantIdAsync(tenantId);
+            try
+            {
+                await JSRuntime.InvokeVoidAsync("setTenantCookie", tenantId);
+            }
+            catch { }
+            ToastService.ShowSuccess($"Workspace switched to tenant: {tenantId} 🚀");
+            Navigation.NavigateTo("/", true);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to switch tenant workspace to {TenantId}", tenantId);
+            ToastService.ShowError("Could not switch workspace: " + ex.Message);
+        }
+    }
+
+    private async Task ToggleTenantStatus(CompanyTenant tenant)
+    {
+        try
+        {
+            var success = await TenantManager.ToggleTenantActiveAsync(tenant.Id);
+            if (success)
+            {
+                tenant.IsActive = !tenant.IsActive;
+                ToastService.ShowSuccess($"Status of {tenant.CompanyName} updated to {(tenant.IsActive ? "Active" : "Suspended")}");
+            }
+            else
+            {
+                ToastService.ShowError("Could not toggle tenant status.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error toggling tenant status for {TenantId}", tenant.TenantId);
+            ToastService.ShowError("Status update failed.");
+        }
+    }
+
+    // --- CREATE MODAL ---
+    private void OpenCreateModal()
+    {
+        newTenant = new CreateTenantRequest
+        {
+            CompanyName = "",
+            CompanyCode = "",
+            IconEmoji = "🏢",
+            PlanMode = "Spark",
+            AdminEmail = "",
+            AdminPassword = "",
+            AdminName = "",
+            AdminPhone = "",
+            OfficeLatitude = 11.9416,
+            OfficeLongitude = 79.8083,
+            GeoRadiusMeters = 100,
+            WorkDayCutoffHour = 22,
+            InitialFeatures = new FeatureSettings
+            {
+                EnablePayroll = true,
+                EnableSalaryAdvance = true,
+                EnableBonusManagement = true,
+                EnableGeoFencing = true,
+                EnableDualAttendance = false,
+                EnableShiftScheduling = true,
+                EnableLeaveManagement = true,
+                AdminCanViewDashboard = true,
+                AdminCanManageEmployees = true,
+                AdminCanViewAttendance = true,
+                AdminCanRunPayroll = true,
+                AdminCanEditSettings = true
+            }
+        };
+        createErrorMessage = null;
+        showCreateModal = true;
+    }
+
+    private void CloseCreateModal()
+    {
+        showCreateModal = false;
+        createErrorMessage = null;
+    }
+
+    private async Task SubmitCreateTenant()
+    {
+        if (string.IsNullOrWhiteSpace(newTenant.CompanyName))
+        {
+            createErrorMessage = "Please enter a Company Name.";
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(newTenant.AdminEmail))
+        {
+            createErrorMessage = "Please enter the Admin Email.";
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(newTenant.AdminPassword) || newTenant.AdminPassword.Length < 6)
+        {
+            createErrorMessage = "Admin Password must be at least 6 characters.";
+            return;
+        }
+
+        isSubmitting = true;
+        createErrorMessage = null;
+
+        try
+        {
+            var result = await TenantManager.CreateTenantAsync(newTenant);
+            if (result.Success && result.Tenant != null)
+            {
+                ToastService.ShowSuccess($"Company '{result.Tenant.CompanyName}' created successfully! 🎉");
+                CloseCreateModal();
+                await LoadDataAsync();
+            }
+            else
+            {
+                createErrorMessage = result.ErrorMessage ?? "Failed to create company tenant.";
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error creating tenant company.");
+            createErrorMessage = "An unexpected error occurred: " + ex.Message;
+        }
+        finally
+        {
+            isSubmitting = false;
+        }
+    }
+
+    // --- FEATURES MODAL ---
+    private async Task OpenFeatureTogglesModal(CompanyTenant tenant)
+    {
+        selectedTenant = tenant;
+        editingFeatures = await TenantManager.GetTenantFeaturesAsync(tenant.Id);
+        if (editingFeatures == null)
+        {
+            editingFeatures = new FeatureSettings { Id = tenant.FeatureSettingsId };
+        }
+        showFeaturesModal = true;
+    }
+
+    private void CloseFeaturesModal()
+    {
+        showFeaturesModal = false;
+        selectedTenant = null;
+        editingFeatures = null;
+    }
+
+    private async Task SubmitSaveFeatures()
+    {
+        if (selectedTenant == null || editingFeatures == null) return;
+
+        isSavingFeatures = true;
+        try
+        {
+            var success = await TenantManager.SaveTenantFeaturesAsync(selectedTenant.Id, editingFeatures);
+            if (success)
+            {
+                ToastService.ShowSuccess($"Features and admin permissions saved for {selectedTenant.CompanyName}! 🎛️");
+                CloseFeaturesModal();
+            }
+            else
+            {
+                ToastService.ShowError("Could not save tenant feature toggles.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error saving tenant features.");
+            ToastService.ShowError("Failed to save feature toggles: " + ex.Message);
+        }
+        finally
+        {
+            isSavingFeatures = false;
+        }
+    }
+
+    // --- COMPANY SETTINGS MODAL ---
+    private async Task OpenCompanySettingsModal(CompanyTenant tenant)
+    {
+        selectedTenant = tenant;
+        editingCompanySetting = await TenantManager.GetTenantCompanySettingAsync(tenant.Id);
+        if (editingCompanySetting == null)
+        {
+            editingCompanySetting = new CompanySetting { CompanyName = tenant.CompanyName };
+        }
+        showCompanySettingsModal = true;
+    }
+
+    private void CloseCompanySettingsModal()
+    {
+        showCompanySettingsModal = false;
+        selectedTenant = null;
+        editingCompanySetting = null;
+    }
+
+    private async Task SubmitSaveCompanySettings()
+    {
+        if (selectedTenant == null || editingCompanySetting == null) return;
+
+        isSavingCompanySetting = true;
+        try
+        {
+            var success = await TenantManager.UpdateTenantCompanySettingAsync(selectedTenant.Id, editingCompanySetting);
+            if (success)
+            {
+                ToastService.ShowSuccess($"Office & attendance settings updated for {selectedTenant.CompanyName}! 🏢");
+                CloseCompanySettingsModal();
+                await LoadDataAsync();
+            }
+            else
+            {
+                ToastService.ShowError("Could not save company office settings.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error saving tenant company settings.");
+            ToastService.ShowError("Failed to save office settings: " + ex.Message);
+        }
+        finally
+        {
+            isSavingCompanySetting = false;
+        }
+    }
+
+    // --- EDIT TENANT MODAL ---
+    private void OpenEditTenantModal(CompanyTenant tenant)
+    {
+        selectedTenant = tenant;
+        editingTenant = new CompanyTenant
+        {
+            Id = tenant.Id,
+            TenantId = tenant.TenantId,
+            CompanyName = tenant.CompanyName,
+            CompanyCode = tenant.CompanyCode,
+            AdminUserId = tenant.AdminUserId,
+            AdminEmail = tenant.AdminEmail,
+            AdminName = tenant.AdminName,
+            AdminPhone = tenant.AdminPhone,
+            IconEmoji = tenant.IconEmoji,
+            PlanMode = tenant.PlanMode,
+            IsActive = tenant.IsActive,
+            CompanySettingId = tenant.CompanySettingId,
+            FeatureSettingsId = tenant.FeatureSettingsId
+        };
+        editAdminEmail = tenant.AdminEmail;
+        editAdminPassword = string.Empty;
+        showEditPassword = false;
+        editErrorMessage = null;
+        showEditModal = true;
+    }
+
+    private void CloseEditTenantModal()
+    {
+        showEditModal = false;
+        selectedTenant = null;
+        editingTenant = null;
+        editErrorMessage = null;
+    }
+
+    private async Task SubmitSaveEditTenant()
+    {
+        if (editingTenant == null) return;
+
+        editErrorMessage = null;
+        isSavingEdit = true;
+        try
+        {
+            var result = await TenantManager.UpdateTenantProfileAndCredentialsAsync(
+                editingTenant,
+                editAdminEmail,
+                string.IsNullOrWhiteSpace(editAdminPassword) ? null : editAdminPassword);
+
+            if (result.Success)
+            {
+                ToastService.ShowSuccess($"Tenant profile & credentials saved for {editingTenant.CompanyName}!");
+                CloseEditTenantModal();
+                await LoadDataAsync();
+            }
+            else
+            {
+                editErrorMessage = result.ErrorMessage ?? "Failed to update tenant profile.";
+                ToastService.ShowError(editErrorMessage);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error updating tenant.");
+            editErrorMessage = ex.Message;
+            ToastService.ShowError("Failed to update tenant: " + ex.Message);
+        }
+        finally
+        {
+            isSavingEdit = false;
+        }
+    }
+
+    private async Task CopyAdminCredentials(CompanyTenant tenant)
+    {
+        try
+        {
+            var loginUrl = Navigation.BaseUri + "Identity/Account/Login";
+            var text = $"🏢 Company: {tenant.CompanyName}\n🔑 Admin Email: {tenant.AdminEmail}\n🌐 Login URL: {loginUrl}";
+            await JSRuntime.InvokeVoidAsync("navigator.clipboard.writeText", text);
+            ToastService.ShowSuccess($"Copied administrator credentials for {tenant.CompanyName} to clipboard!");
+        }
+        catch
+        {
+            ToastService.ShowInfo($"Admin Email: {tenant.AdminEmail}");
+        }
+    }
+
+    // --- DELETE COMPANY MODAL ---
+    private void OpenDeleteCompanyModal(CompanyTenant tenant)
+    {
+        tenantToDelete = tenant;
+        deleteErrorMessage = null;
+        isDeletingCompany = false;
+        showDeleteModal = true;
+    }
+
+    private void CloseDeleteCompanyModal()
+    {
+        if (isDeletingCompany) return;
+        showDeleteModal = false;
+        tenantToDelete = null;
+        deleteErrorMessage = null;
+    }
+
+    private async Task ConfirmDeleteCompanyAsync()
+    {
+        if (tenantToDelete == null) return;
+
+        isDeletingCompany = true;
+        deleteErrorMessage = null;
+
+        try
+        {
+            var userEmail = string.IsNullOrWhiteSpace(currentUserEmail)
+                ? FirebaseAuthSecurityConstants.CanonicalSuperAdminEmail
+                : currentUserEmail;
+
+            var result = await TenantManager.DeleteEntireCompanyAsync(tenantToDelete.TenantId, userEmail);
+
+            if (result.Success)
+            {
+                ToastService.ShowSuccess($"Company '{tenantToDelete.CompanyName}' ({tenantToDelete.CompanyCode}) deleted successfully from Cloud and Local DB! 🗑️");
+                showDeleteModal = false;
+                tenantToDelete = null;
+                await LoadDataAsync();
+            }
+            else
+            {
+                deleteErrorMessage = result.ErrorMessage ?? "Failed to delete company.";
+                ToastService.ShowError(deleteErrorMessage);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error deleting company tenant.");
+            deleteErrorMessage = "An unexpected error occurred: " + ex.Message;
+            ToastService.ShowError(deleteErrorMessage);
+        }
+        finally
+        {
+            isDeletingCompany = false;
+        }
+    }
+}

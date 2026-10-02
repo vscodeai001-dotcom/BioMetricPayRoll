@@ -1,4 +1,4 @@
-﻿using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 
 namespace Payroll.Shared
@@ -25,12 +25,25 @@ namespace Payroll.Shared
         // --- END NEW ---
 
         [Column("isapproved")]
-        public bool IsApproved { get; set; } = true;
+        public bool IsApproved { get; set; } = false;
 
-       
+        [Column("Status")]
+        public string? Status { get; set; } = "Pending";
 
         [Column("notes")]
         public string? Notes { get; set; } // Nullable string
+
+        [Column("AdminNotes")]
+        public string? AdminNotes { get; set; }
+
+        /// <summary>
+        /// The UUID key used in Firebase RTDB (owners/{uid}/leave_requests/{FirebaseLeaveId}).
+        /// Stored here so the sync service can detect and deduplicate Android-submitted leave requests
+        /// without creating duplicate SQLite rows on every SSE event or server restart.
+        /// Null for legacy rows created before this column was added (admin web entries use SQLite auto-ID).
+        /// </summary>
+        [Column("firebase_leave_id")]
+        public string? FirebaseLeaveId { get; set; }
 
         // --- NEW: Non-Database bound properties for Multi-Day UX ---
         [NotMapped]

@@ -20,6 +20,7 @@ using Microsoft.AspNetCore.Mvc.Infrastructure;
 using Microsoft.AspNetCore.SignalR;
 
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Data.Sqlite;
 
 using Microsoft.Extensions.Hosting.WindowsServices;
 
@@ -65,6 +66,7 @@ Environment.SetEnvironmentVariable(
 // Use the platform-provided port through ASPNETCORE_URLS and clear the
 // base image default so Kestrel does not report a conflicting port source.
 var platformPort = Environment.GetEnvironmentVariable("PORT");
+var existingUrls = Environment.GetEnvironmentVariable("ASPNETCORE_URLS");
 
 if (!string.IsNullOrWhiteSpace(platformPort))
 {
@@ -73,12 +75,12 @@ if (!string.IsNullOrWhiteSpace(platformPort))
         "ASPNETCORE_URLS",
         $"http://0.0.0.0:{platformPort}");
 }
-else
+else if (string.IsNullOrWhiteSpace(existingUrls))
 {
     // Local Windows Service deployment
     Environment.SetEnvironmentVariable(
         "ASPNETCORE_URLS",
-        "http://localhost:5050");
+        "http://0.0.0.0:5050");
 }
 
 Environment.SetEnvironmentVariable(
@@ -87,6 +89,32 @@ Environment.SetEnvironmentVariable(
 
 var builder =
     WebApplication.CreateBuilder(options);
+builder.Logging.AddFilter(
+    "Microsoft.EntityFrameworkCore.Model.Validation",
+    LogLevel.Error);
+
+var pfxCertPath = Path.Combine(AppContext.BaseDirectory, "certs", "biometric.pfx");
+if (!File.Exists(pfxCertPath))
+    pfxCertPath = Path.Combine(builder.Environment.ContentRootPath, "certs", "biometric.pfx");
+
+if (File.Exists(pfxCertPath))
+{
+    builder.WebHost.ConfigureKestrel(kestrel =>
+    {
+        kestrel.ListenAnyIP(5050);
+        try
+        {
+            kestrel.ListenAnyIP(5051, listenOptions =>
+            {
+                listenOptions.UseHttps(pfxCertPath, "BioMetricHttps2026!");
+            });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"HTTPS endpoint warning: {ex.Message}");
+        }
+    });
+}
 
 
 // ============================================================
@@ -147,6 +175,50 @@ builder.Host.UseWindowsService();
 
 
 // ============================================================
+// DATA PROTECTION (Must precede Authentication, Identity & Antiforgery)
+// ============================================================
+
+// Configure Data Protection key storage. Prefer an application-local folder
+// inside the content root so keys persist across restarts in typical
+// hosting environments. Allow overriding via DATA_PROTECTION_PATH env var
+// for distributed setups (shared volume, etc.).
+var dataProtectionPath =
+    Environment.GetEnvironmentVariable("DATA_PROTECTION_PATH");
+
+if (string.IsNullOrWhiteSpace(dataProtectionPath))
+{
+    // container deployments commonly mount their persistent disk at
+    // /data. Prefer it when available so authentication/DataProtection keys
+    // survive an application process/container restart. Local development
+    // continues to use the project-local directory.
+    dataProtectionPath =
+        builder.Environment.IsProduction() && Directory.Exists("/data")
+            ? "/data/dataprotection"
+            : Path.Combine(builder.Environment.ContentRootPath, "dataprotection");
+}
+
+try
+{
+    // Ensure the directory exists and is writable
+    if (!Directory.Exists(dataProtectionPath))
+    {
+        Directory.CreateDirectory(dataProtectionPath);
+    }
+
+    builder.Services.AddDataProtection()
+        .SetApplicationName("BioMetricPayroll")
+        .SetDefaultKeyLifetime(TimeSpan.FromDays(365))
+        .PersistKeysToFileSystem(new DirectoryInfo(dataProtectionPath));
+}
+catch (Exception dpEx)
+{
+    // If persisting to file system fails fall back to default in-memory keys
+    // but log the error so operators can fix permissions or volume mounts.
+    Console.WriteLine($"Data Protection key storage configuration failed. Using default in-memory storage. Path: {dataProtectionPath}. Error: {dpEx.Message}");
+}
+
+
+// ============================================================
 // SIGNALR
 // ============================================================
 
@@ -166,9 +238,38 @@ builder.Services.AddAuthentication()
     .AddScheme<AuthenticationSchemeOptions, MobileTokenAuthenticationHandler>(
         "MobileBearer", _ => { });
 
-builder.Services.AddHttpClient("FirebaseRealtime");
+builder.Services.AddHttpClient(
+    "FirebaseRealtime",
+    client =>
+    {
+        client.Timeout = TimeSpan.FromSeconds(30);
+    })
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+    {
+        PooledConnectionLifetime = TimeSpan.FromMinutes(15),
+        PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
+        KeepAlivePingDelay = TimeSpan.FromSeconds(30),
+        KeepAlivePingTimeout = TimeSpan.FromSeconds(15),
+        EnableMultipleHttp2Connections = true
+    });
 builder.Services.AddSingleton<FirebaseRealtimeService>();
+builder.Services.AddSingleton<FirebaseAttendanceCalendarMutationService>();
+builder.Services.AddSingleton<FirebaseEmployeeManagementService>();
+builder.Services.AddSingleton<FirebaseEmployeePresenceService>();
+builder.Services.AddSingleton<FirebaseEmployeeHistoryService>();
+builder.Services.AddSingleton<FirebaseAttendanceService>();
+builder.Services.AddSingleton<FirebaseAttendanceMutationService>();
+builder.Services.AddSingleton<FirebaseEmployeeDeletionService>();
+builder.Services.AddSingleton<FirebaseShiftScheduleService>();
+builder.Services.AddSingleton<FirebaseAdvanceService>();
+builder.Services.AddSingleton<FirebaseBonusService>();
+builder.Services.AddSingleton<FirebaseRegularizationService>();
+builder.Services.AddSingleton<FirebaseYearEndSummaryService>();
+builder.Services.AddSingleton<FirebaseAdminDashboardService>();
+builder.Services.AddScoped<FirebaseUserManagementService>();
+builder.Services.AddSingleton<PayrollFinalizationService>();
 builder.Services.AddSingleton<FirebaseSyncWriteScope>();
+builder.Services.AddSingleton<AttendanceProcessingCoordinator>();
 builder.Services.AddHostedService<FirebaseInitialDataMigrationService>();
 builder.Services.AddHostedService<FirebaseSqliteSyncService>();
 builder.Services.AddHostedService<FirebaseSuperAdminProvisioningService>();
@@ -183,8 +284,9 @@ builder.Services.AddSingleton<
 builder.Services.AddSingleton<
     ApplicationDataChangeInterceptor>();
 
-// Background service broadcasting location health for admin dashboards
 builder.Services.AddHostedService<LocationHealthService>();
+builder.Services.AddHostedService<GpsSessionCleanupHostedService>();
+builder.Services.AddHostedService<HourlyAutoBackupHostedService>();
 
 
 // ============================================================
@@ -201,10 +303,31 @@ var sqliteDirectory = Path.GetDirectoryName(sqlitePath);
 if (!string.IsNullOrWhiteSpace(sqliteDirectory))
     Directory.CreateDirectory(sqliteDirectory);
 
+// SQLite is a local compatibility projection shared by the Web process and
+// Attendance worker. WAL + a bounded busy timeout lets readers continue while
+// short writes are committed and prevents transient SQLITE_BUSY/LOCKED errors
+// from immediately surfacing during GPS/attendance bursts.
+try
+{
+    using var sqliteBootstrap = new SqliteConnection(
+        $"Data Source={sqlitePath};Cache=Shared;Default Timeout=30");
+    sqliteBootstrap.Open();
+    using var sqliteCommand = sqliteBootstrap.CreateCommand();
+    sqliteCommand.CommandText = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=10000;";
+    sqliteCommand.ExecuteNonQuery();
+}
+catch (Exception ex)
+{
+    Console.WriteLine($"SQLite concurrency bootstrap warning: {ex.Message}");
+}
+
 builder.Services.AddDbContextFactory<AppDbContext>((sp, options) =>
 {
-    options.AddInterceptors(sp.GetRequiredService<ApplicationDataChangeInterceptor>());
-    options.UseSqlite($"Data Source={sqlitePath}");
+    options.AddInterceptors(
+        sp.GetRequiredService<ApplicationDataChangeInterceptor>());
+
+    options.UseSqlite(
+        $"Data Source={sqlitePath};Cache=Shared;Default Timeout=30");
 });
 
 
@@ -214,6 +337,12 @@ builder.Services.AddDbContextFactory<AppDbContext>((sp, options) =>
 
 builder.Services.AddScoped<
     AttendanceCalculatorService>();
+
+builder.Services.AddScoped<
+    AttendanceCalendarImpactService>();
+
+builder.Services.AddScoped<
+    ShiftScheduleAttendanceImpactService>();
 
 builder.Services.AddScoped<
     AttendanceBoundsService>();
@@ -304,8 +433,10 @@ builder.Services.AddScoped<
     NotificationService>();
 
 builder.Services.AddScoped<
-    IEmailSender,
     EmailSender>();
+
+builder.Services.AddScoped<
+    IEmailSender>(sp => sp.GetRequiredService<EmailSender>());
 
 builder.Services.AddScoped<
     CsvExportService>();
@@ -329,8 +460,16 @@ builder.Services.AddScoped<
     FeatureCleanUpService>();
 
 builder.Services.AddScoped<
+    DatabaseBackupRestoreService>();
+
+builder.Services.AddScoped<
     EmployeeDeletionService>();
 
+builder.Services.AddScoped<ITenantContextService, TenantContextService>();
+builder.Services.AddScoped<TenantContextService>();
+builder.Services.AddScoped<TenantManagementService>();
+builder.Services.AddScoped<IAppModeService, AppModeService>();
+builder.Services.AddScoped<AppModeService>();
 
 builder.Services.AddHttpContextAccessor();
 
@@ -479,12 +618,11 @@ builder.Services.Configure<
 builder.Services.ConfigureApplicationCookie(
     options =>
     {
-        // Session cookie lifetime: very long to avoid prompting users to
-        // reload / re-authenticate during normal usage. Adjust per policy.
-        options.ExpireTimeSpan = TimeSpan.FromDays(3650); // ~10 years
-
-        // Sliding expiration: refresh the cookie timeout
-        // on every request (including API calls from GPS watcher)
+        // Automatic inactivity lifecycle: keep active users signed in while
+        // they are using the application, but do not leave an abandoned admin,
+        // employee, or SuperAdmin browser session alive for years.
+        // Sliding expiration extends an actively used session.
+        options.ExpireTimeSpan = TimeSpan.FromHours(12);
         options.SlidingExpiration = true;
 
         // Cookie security settings
@@ -521,67 +659,12 @@ builder.Services.AddScoped<
     EmployeeSingleSessionSignInManager>();
 
 
-// ============================================================
-// DATA PROTECTION
-// ============================================================
-//
-// IMPORTANT FOR PRODUCTION / CONTAINERS:
-//
-// ASP.NET Core Data Protection is used for:
-// - Authentication cookies
-// - Protected claims
-// - CSRF tokens
-// - Session data
-//
-// On container restart, ephemeral keys cause authentication failures.
-//
-// CONFIGURATION:
-// 1. Key storage: Persistent file system (e.g., /data volume)
-// 2. Key encryption: Environment variable (optional)
-//
-// For Docker/hosting platform:
-// - Mount a persistent volume at /data/dataprotection
-// - Container automatically uses this for keys
-// - Keys survive container restarts
-//
 
-// Configure Data Protection key storage. Prefer an application-local folder
-// inside the content root so keys persist across restarts in typical
-// hosting environments. Allow overriding via DATA_PROTECTION_PATH env var
-// for distributed setups (shared volume, etc.).
-var dataProtectionPath =
-    Environment.GetEnvironmentVariable("DATA_PROTECTION_PATH");
 
-if (string.IsNullOrWhiteSpace(dataProtectionPath))
-{
-    // container deployments commonly mount their persistent disk at
-    // /data. Prefer it when available so authentication/DataProtection keys
-    // survive an application process/container restart. Local development
-    // continues to use the project-local directory.
-    dataProtectionPath =
-        builder.Environment.IsProduction() && Directory.Exists("/data")
-            ? "/data/dataprotection"
-            : Path.Combine(builder.Environment.ContentRootPath, "dataprotection");
-}
 
-try
-{
-    // Ensure the directory exists and is writable
-    if (!Directory.Exists(dataProtectionPath))
-    {
-        Directory.CreateDirectory(dataProtectionPath);
-    }
 
-    builder.Services.AddDataProtection()
-        .SetApplicationName("BioMetricPayroll")
-        .PersistKeysToFileSystem(new DirectoryInfo(dataProtectionPath));
-}
-catch (Exception dpEx)
-{
-    // If persisting to file system fails fall back to default in-memory keys
-    // but log the error so operators can fix permissions or volume mounts.
-    Console.WriteLine($"Data Protection key storage configuration failed. Using default in-memory storage. Path: {dataProtectionPath}. Error: {dpEx.Message}");
-}
+
+
 
 
 // ============================================================
@@ -752,18 +835,138 @@ app.MapHub<AttendanceRefreshHub>(
 // ============================================================
 // LOCAL DATABASE INITIALIZATION
 // ============================================================
-// Never connect to Neon/PostgreSQL during startup. Create the local SQLite
-// compatibility schema once, then hydrate it from Firebase.
+// Firebase is the durable SSOT. SQLite is only a local compatibility/cache
+// projection for the existing EF attendance/business engine.
+//
+// If the cache file is physically corrupted, do not let one malformed SQLite
+// page take down GPS session processing. Quarantine the bad file and recreate
+// an empty compatibility database. Firebase realtime hydration will repopulate
+// the local projection after startup.
 try
 {
+    var sqliteIntegrity = await VerifyAndRepairSqliteCacheAsync(
+        sqlitePath,
+        app.Logger);
+
     using var scope = app.Services.CreateScope();
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     await db.Database.EnsureCreatedAsync();
+    await AppDbContext.EnsureSqliteSchemaUpdatedAsync(db);
+
+    try
+    {
+        var tenantManager = scope.ServiceProvider.GetRequiredService<TenantManagementService>();
+        await tenantManager.EnsureDefaultTenantSeededAsync();
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogWarning(ex, "Failed to seed default tenant on startup.");
+    }
+
+    if (sqliteIntegrity.Recreated)
+    {
+        app.Logger.LogWarning(
+            "SQLite compatibility cache was recreated after corruption. " +
+            "Firebase remains the authoritative SSOT and will rehydrate local data.");
+    }
 }
 catch (Exception ex)
 {
     app.Logger.LogError(ex, "Local SQLite compatibility database initialization failed.");
     throw;
+}
+
+static async Task<(bool Recreated, string? BackupPath)> VerifyAndRepairSqliteCacheAsync(
+    string sqlitePath,
+    ILogger logger)
+{
+    if (string.IsNullOrWhiteSpace(sqlitePath))
+        return (false, null);
+
+    if (!File.Exists(sqlitePath))
+        return (false, null);
+
+    try
+    {
+        await using var connection = new SqliteConnection(
+            new SqliteConnectionStringBuilder
+            {
+                DataSource = sqlitePath,
+                Mode = SqliteOpenMode.ReadWrite,
+                Cache = SqliteCacheMode.Shared
+            }.ToString());
+
+        await connection.OpenAsync();
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA integrity_check;";
+        command.CommandTimeout = 10;
+
+        var result = Convert.ToString(
+            await command.ExecuteScalarAsync(),
+            CultureInfo.InvariantCulture);
+
+        if (string.Equals(result, "ok", StringComparison.OrdinalIgnoreCase))
+            return (false, null);
+
+        throw new SqliteException(
+            $"SQLite integrity_check returned '{result ?? "null"}'.",
+            11);
+    }
+    catch (Exception ex) when (
+        ex is SqliteException ||
+        ex is IOException ||
+        ex is UnauthorizedAccessException)
+    {
+        var backupPath =
+            $"{sqlitePath}.corrupt-{DateTime.UtcNow:yyyyMMdd-HHmmssfff}.bak";
+
+        try
+        {
+            File.Move(sqlitePath, backupPath);
+            logger.LogError(
+                ex,
+                "SQLite compatibility cache is corrupted. " +
+                "Quarantined {DatabasePath} as {BackupPath}.",
+                sqlitePath,
+                backupPath);
+
+            // SQLite may have sidecar files while WAL mode is active.
+            TryMoveSqliteSidecar($"{sqlitePath}-wal", $"{backupPath}-wal", logger);
+            TryMoveSqliteSidecar($"{sqlitePath}-shm", $"{backupPath}-shm", logger);
+
+            return (true, backupPath);
+        }
+        catch (Exception quarantineEx)
+        {
+            logger.LogCritical(
+                quarantineEx,
+                "SQLite compatibility cache is corrupted but could not be quarantined. " +
+                "Stop other Payroll Web/AttendanceService instances using {DatabasePath} " +
+                "and repair the file before restarting.",
+                sqlitePath);
+            throw;
+        }
+    }
+}
+
+static void TryMoveSqliteSidecar(
+    string source,
+    string destination,
+    ILogger logger)
+{
+    try
+    {
+        if (File.Exists(source))
+            File.Move(source, destination);
+    }
+    catch (Exception ex)
+    {
+        logger.LogWarning(
+            ex,
+            "Could not quarantine SQLite sidecar file {Source}.",
+            source);
+    }
 }
 
 

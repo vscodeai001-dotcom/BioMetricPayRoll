@@ -248,6 +248,29 @@ namespace Payroll.Web.Services
 
         /*
          * ==========================================================
+         * BONUS CHANGES
+         * ==========================================================
+         *
+         * Notify when bonus records are created or deleted.
+         */
+
+        public async Task NotifyBonusChangedAsync(
+            int? employeeId = null,
+            string? action = null)
+        {
+            await _hub.Clients.All.SendAsync(
+                "BonusChanged",
+                new
+                {
+                    EmployeeId = employeeId,
+                    Action = action ?? "MODIFIED",
+                    Timestamp = DateTime.UtcNow
+                });
+        }
+
+
+        /*
+         * ==========================================================
          * PUNCH CHANGES (Manual/Correction)
          * ==========================================================
          *
@@ -328,7 +351,8 @@ namespace Payroll.Web.Services
         public async Task NotifyGeoSettingsChangedAsync(
             double officeLatitude,
             double officeLongitude,
-            int geoRadiusMeters)
+            int geoRadiusMeters,
+            bool useSpeedBasedMarkers = false)
         {
             await _hub.Clients.All.SendAsync(
                 "GeoSettingsChanged",
@@ -337,6 +361,21 @@ namespace Payroll.Web.Services
                     OfficeLatitude = officeLatitude,
                     OfficeLongitude = officeLongitude,
                     GeoRadiusMeters = geoRadiusMeters,
+                    UseSpeedBasedMarkers = useSpeedBasedMarkers,
+                    Timestamp = DateTime.UtcNow
+                });
+        }
+
+        public async Task NotifyGeoPunchAuditAsync(
+            int employeeId,
+            object? audit = null)
+        {
+            await _hub.Clients.All.SendAsync(
+                "GeoPunchAuditChanged",
+                new
+                {
+                    EmployeeId = employeeId,
+                    Audit = audit,
                     Timestamp = DateTime.UtcNow
                 });
         }

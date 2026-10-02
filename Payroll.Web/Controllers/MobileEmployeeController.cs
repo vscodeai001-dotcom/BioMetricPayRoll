@@ -35,6 +35,7 @@ public sealed class MobileEmployeeController : ControllerBase
     private readonly RegularizationService _regularizationService;
     private readonly AttendanceEventMonitorService _attendanceMonitor;
     private readonly FirebaseRealtimeService _firebase;
+    private readonly FirebaseShiftScheduleService _firebaseShiftSchedules;
 
     public MobileEmployeeController(
         UserManager<IdentityUser> userManager,
@@ -46,7 +47,8 @@ public sealed class MobileEmployeeController : ControllerBase
         ILogger<MobileEmployeeController> logger,
         RegularizationService regularizationService,
         AttendanceEventMonitorService attendanceMonitor,
-        FirebaseRealtimeService firebase)
+        FirebaseRealtimeService firebase,
+        FirebaseShiftScheduleService firebaseShiftSchedules)
     {
         _userManager = userManager;
         _signInManager = signInManager;
@@ -58,6 +60,7 @@ public sealed class MobileEmployeeController : ControllerBase
         _regularizationService = regularizationService;
         _attendanceMonitor = attendanceMonitor;
         _firebase = firebase;
+        _firebaseShiftSchedules = firebaseShiftSchedules;
     }
 
     [HttpPost("login")]
@@ -477,6 +480,10 @@ public sealed class MobileEmployeeController : ControllerBase
         await _attendanceMonitor.RecordAsync(
             "LOGOUT_REQUESTED", userId, User.FindFirstValue(ClaimTypes.Email), deviceId, "Android", "REQUESTED", "MANUAL_LOGOUT");
 
+        // REQUIREMENT: If the employee is currently "IN", create an automatic
+        // "OUT" punch upon manual logout to close their attendance session.
+        await _geo.ProcessManualLogoutPunchAsync(employeeId);
+
         // Logout is authoritative: end every active GPS session before the
         // device lock is released. This also cleans up legacy duplicate
         // sessions without changing the database design.
@@ -536,7 +543,8 @@ public sealed class MobileEmployeeController : ControllerBase
         if (!Guid.TryParse(request.SessionId, out var sessionId) || sessionId == Guid.Empty)
             return BadRequest(new { success = false, message = "A valid GPS session ID is required." });
         if (!double.IsFinite(request.Latitude) || !double.IsFinite(request.Longitude) ||
-            request.Latitude is < -90 or > 90 || request.Longitude is < -180 or > 180)
+            request.Latitude is < -90 or > 90 || request.Longitude is < -180 or > 180 ||
+            (request.Latitude == 0.0 && request.Longitude == 0.0))
             return BadRequest(new { success = false, message = "Invalid GPS coordinates." });
 
         var distance = await _geo.GetDistanceFromOfficeAsync(request.Latitude, request.Longitude);
@@ -733,6 +741,7 @@ public sealed class MobileEmployeeController : ControllerBase
             hireDate = employee.HireDate?.ToString("yyyy-MM-dd"),
             shiftStartTime = employee.ShiftStartTime?.ToString("HH:mm"),
             shiftEndTime = employee.ShiftEndTime?.ToString("HH:mm"),
+            shiftMode = employee.ShiftMode ?? "SINGLE_DAY",
             uan = employee.UAN,
             esiNumber = employee.ESINumber,
             bankName = employee.BankName,
@@ -942,9 +951,26 @@ public sealed class MobileEmployeeController : ControllerBase
     public async Task<IActionResult> Shifts([FromQuery] string month)
     {
         if (!DateTime.TryParse($"{month}-01", out var parsed)) return BadRequest(new { success = false, message = "Month must be YYYY-MM." });
-        var start = DateOnly.FromDateTime(parsed); var end = start.AddMonths(1).AddDays(-1); var employeeId = GetEmployeeId();
-        await using var db = await _dbFactory.CreateDbContextAsync(); var rows = await db.ShiftSchedules.AsNoTracking().Where(x => x.EmployeeID == employeeId && x.ShiftDate >= start && x.ShiftDate <= end).OrderBy(x => x.ShiftDate).ToListAsync();
-        return Ok(rows.Select(x => new { date = x.ShiftDate.ToString("yyyy-MM-dd"), day = x.ShiftDate.DayOfWeek.ToString(), startTime = x.StartTime.ToString("HH:mm"), endTime = x.EndTime.ToString("HH:mm"), status = "Scheduled" }));
+        var start = DateOnly.FromDateTime(parsed);
+        var end = start.AddMonths(1).AddDays(-1);
+        var employeeId = GetEmployeeId();
+
+        var rows = await _firebaseShiftSchedules.GetSchedulesAsync(
+            employeeId,
+            start,
+            end,
+            HttpContext.RequestAborted);
+
+        return Ok(rows
+            .Where(x => !x.IsRecurringPattern)
+            .Select(x => new
+            {
+                date = x.ShiftDate.ToString("yyyy-MM-dd"),
+                day = x.ShiftDate.DayOfWeek.ToString(),
+                startTime = x.StartTime.ToString("HH:mm"),
+                endTime = x.EndTime.ToString("HH:mm"),
+                status = "Scheduled"
+            }));
     }
 
     private static object ToPayslip(Payroll.Shared.PayrollHistory x) => new { payrollId = x.PayrollID, month = x.PayMonth, year = x.PayYear, baseSalary = x.BaseSalary ?? 0m, overtimePay = x.OvertimePay ?? 0m, bonus = x.Bonus ?? 0m, advanceDeduction = x.Deductions_Advance ?? 0m, pfDeduction = x.PfDeduction, esiDeduction = x.EsiDeduction, ptDeduction = x.PtDeduction, tdsDeduction = x.TdsDeduction, netSalary = x.NetSalary, hourlyRate = x.HourlyRate, totalHoursWorked = x.TotalHoursWorked ?? 0m };

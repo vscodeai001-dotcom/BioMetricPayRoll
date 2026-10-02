@@ -2,40 +2,45 @@
 @using Microsoft.AspNetCore.Authorization
 @using global::Payroll.Shared
 @using global::Payroll.Shared.Data
-@using Microsoft.EntityFrameworkCore
 @using global::Payroll.Web.Components.UI.Scheduling @* NEW FOLDER REFERENCE *@
-@inject IDbContextFactory<AppDbContext> DbFactory
 @inject IToastService toastService
 @inject IJSRuntime JSRuntime
-@inject Payroll.Web.Services.RosteringService RosteringService
+@inject Payroll.Web.Services.FirebaseShiftScheduleService FirebaseShiftSchedules
 @inject ILogger<ShiftScheduler> _logger
 @inject NavigationManager Navigation
 @attribute [Authorize(Roles = "Admin, SuperAdmin")]
 
 <PageTitle>Shift Scheduler</PageTitle>
 
-<div class="d-flex justify-content-between align-items-center mb-3">
-    <h3>Shift Scheduler</h3>
-    <p class="text-muted small mb-0">Scheduled shifts override the employee's default profile shift.</p>
-</div>
+<div class="page-header-container">
+    <div class="d-flex align-items-center gap-3">
+        <div class="emoji-icon-badge emoji-icon-badge-info">
+            ⏰
+        </div>
+        <div>
+            <h2 class="page-header-title">
+                Shift Scheduler & Rostering
+            </h2>
+            <p class="page-header-subtitle">
+                <span>🔄 Assign custom shift hours & rotation patterns to override profile defaults</span>
+            </p>
+        </div>
+    </div>
 
-
-@* --- 1. ADD/EDIT FORM COMPONENT --- *@
-<ShiftEntryForm NewSchedule="newSchedule"
-                Employees="employeeList"
-                OnSaved="LoadSchedules" />
-
-<div class="mb-4 text-end">
-    <button class="btn btn-info text-white" @onclick="GenerateShiftsFromPatterns" disabled="@isLoading">
-        @if (isLoading)
-        {
-            <span class="spinner-border spinner-border-sm"></span>
-        }
-        else
-        {
-            <i class="bi bi-calendar-check me-2">Generate Shifts(Patterns)</i>
-        }
-    </button>
+    <div>
+        <button class="btn btn-info text-white action-pill-btn" @onclick="GenerateShiftsFromPatterns" disabled="@isLoading">
+            @if (isLoading)
+            {
+                <span class="spinner-border spinner-border-sm"></span>
+                <span>Generating...</span>
+            }
+            else
+            {
+                <span>🔄</span> <i class="bi bi-calendar-check-fill"></i>
+                <span>Generate Shifts from Patterns</span>
+            }
+        </button>
+    </div>
 </div>
 
 
@@ -122,15 +127,14 @@
         {
             try
             {
-                await using var dbContext = await DbFactory.CreateDbContextAsync();
-                // FILTER FIX: Exclude soft-deleted employees
-                employeeList = await dbContext.Employees
-                    .Where(e => !e.IsDeleted)
-                    .OrderBy(e => e.Name).ToListAsync();
+                // Firebase is the SSOT for this module. Do not fall back to the
+                // legacy Web database here, otherwise the employee selector can
+                // silently point at a different dataset than Android.
+                employeeList = await FirebaseShiftSchedules.GetActiveEmployeesAsync();
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error loading employees.");
+                _logger.LogError(ex, "Error loading employees from Firebase.");
                 toastService.ShowError($"Error loading employees: {ex.Message}");
                 employeeList = new List<Employee>();
             }
@@ -143,33 +147,19 @@
         await InvokeAsync(StateHasChanged);
         try
         {
-            await using var dbContext = await DbFactory.CreateDbContextAsync();
-            var query = dbContext.ShiftSchedules.AsQueryable();
+            var startDateOnly = filterStartDate.HasValue
+                ? DateOnly.FromDateTime(filterStartDate.Value)
+                : (DateOnly?)null;
+            var endDateOnly = filterEndDate.HasValue
+                ? DateOnly.FromDateTime(filterEndDate.Value)
+                : (DateOnly?)null;
 
-            if (filterEmployeeId > 0)
-                query = query.Where(s => s.EmployeeID == filterEmployeeId);
-
-
-            // --- DYNAMIC ROSTERING FILTER LOGIC ---
-            if (filterStartDate.HasValue && filterEndDate.HasValue)
-            {
-                var startDateOnly = DateOnly.FromDateTime(filterStartDate.Value);
-                var endDateOnly = DateOnly.FromDateTime(filterEndDate.Value);
-
-                // CRITICAL FILTER: Selects records that are:
-                // 1. One-time overrides within the date range. OR
-                // 2. Recurring patterns whose DayOfWeek falls within the range and are active.
-                query = query.Where(s =>
-                    (s.IsRecurringPattern) || // Include all recurring patterns for context/editing
-                    (s.ShiftDate >= startDateOnly && s.ShiftDate <= endDateOnly)); // Include single-day overrides
-            }
-            // --- END DYNAMIC ROSTERING FILTER LOGIC ---
-
-            scheduleList = await query
-                                .OrderBy(s => s.ShiftDate)
-                                .ThenBy(s => s.EmployeeID)
-                                .ThenBy(s => s.StartTime)
-                                .ToListAsync();
+            // Firebase is the SSOT for this module. Recurring patterns are
+            // retained as context while concrete schedules are date-filtered.
+            scheduleList = await FirebaseShiftSchedules.GetSchedulesAsync(
+                filterEmployeeId,
+                startDateOnly,
+                endDateOnly);
         }
         catch (Exception ex)
         {
@@ -211,7 +201,7 @@
 
         try
         {
-            int count = await RosteringService.GenerateScheduleFromPatternsAsync(start, end);
+            int count = await FirebaseShiftSchedules.GenerateScheduleFromPatternsAsync(start, end);
 
             toastService.ShowSuccess($"{count} daily shifts were successfully generated from patterns.");
         }
@@ -234,10 +224,9 @@
         isSaving = true;
         try
         {
-            await using var dbContext = await DbFactory.CreateDbContextAsync();
-            // Since scheduleToDeleteConfirm came from DB, we can remove it directly
-            dbContext.ShiftSchedules.Remove(scheduleToDeleteConfirm);
-            await dbContext.SaveChangesAsync();
+            var deletedId = scheduleToDeleteConfirm.ScheduleID;
+            var ok = await FirebaseShiftSchedules.DeleteAsync(deletedId);
+            if (!ok) throw new InvalidOperationException("Firebase is unavailable or the schedule could not be deleted.");
             toastService.ShowSuccess("Schedule deleted successfully!");
             CancelDelete();
             await LoadSchedules();

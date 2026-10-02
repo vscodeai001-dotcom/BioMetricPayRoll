@@ -11,23 +11,37 @@
 
     .attendance-log-table {
         width: 100%;
-        min-width: 980px;
+        min-width: 100%;
         table-layout: auto;
     }
 
+    .attendance-log-table th,
+    .attendance-log-table td {
+        padding: 0.3rem 0.25rem !important;
+        font-size: 0.75rem;
+        vertical-align: middle;
+        white-space: nowrap;
+    }
+
+    .attendance-log-table th {
+        font-size: 0.71rem;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+        text-align: center;
+        background-color: #1e293b !important;
+        border-color: #334155 !important;
+    }
+
     .attendance-log-table .raw-punches-cell {
-        min-width: 20rem;
-        max-width: 30rem;
+        min-width: 6.5rem;
+        max-width: 11rem;
         white-space: pre-line !important;
         overflow-wrap: anywhere;
         word-break: break-word;
-        line-height: 1.35;
+        line-height: 1.15;
+        font-size: 0.68rem !important;
+        font-family: var(--bs-font-monospace, monospace);
         vertical-align: top;
-    }
-
-    .attendance-log-table td,
-    .attendance-log-table th {
-        vertical-align: middle;
     }
 
     @@media (max-width: 768px) {
@@ -124,66 +138,70 @@ else if (Logs == null || !Logs.Any())
 else
 {
     <div class="attendance-log-table-wrap table-responsive">
-        <table class="table table-sm table-striped table-bordered mt-3 attendance-log-table"
-               style="font-size: 0.85em; white-space: nowrap;">
-
+        <table class="table table-sm table-striped table-bordered mt-2 attendance-log-table">
             <thead class="table-dark">
                 <tr>
-                    <th>Employee</th>
-                    <th>Date</th>
-                    <th>Status</th>
+                    <th class="text-start" title="Employee Name">👤 Employee</th>
+                    <th class="text-center" title="Attendance Date">📅 Date</th>
+                    <th class="text-center" title="Attendance Status">📌 Status</th>
 
-                    <th class="text-center d-none-mobile">
-                        Scheduled (HH:MM)
+                    <th class="text-center d-none-mobile" title="Scheduled Shift (HH:MM)">
+                        ⏰ Sched
                     </th>
 
-                    @* NEW: actual worked time INSIDE scheduled shift *@
                     <th class="text-center d-none-mobile"
-                        title="Actual worked time inside the scheduled shift">
-                        Shift Worked
+                        title="Actual worked time inside scheduled shift">
+                        💼 Shift Wk
                     </th>
 
                     <th class="text-center d-none-mobile"
                         title="Lunch Out-In">
-                        Lunch
+                        🍱 Lunch
                     </th>
 
-                    <th class="text-center d-none-mobile">
-                        Gross Brk
+                    <th class="text-center d-none-mobile"
+                        title="Gross Break Time">
+                        ☕ Break
                     </th>
 
-                    @* Existing Gaps column - unchanged *@
-                    <th class="text-center d-none-mobile">
-                        Gaps
+                    <th class="text-center d-none-mobile"
+                        title="Break Gaps Count">
+                        ⚠️ Gaps
                     </th>
 
-                    <th class="text-center d-none-mobile">
-                        Late
+                    <th class="text-center d-none-mobile"
+                        title="Late Arrival Penalty">
+                        ⏳ Late
                     </th>
 
-                    <th class="text-center d-none-mobile">
-                        Early
+                    <th class="text-center d-none-mobile"
+                        title="Early Departure Penalty">
+                        🚪 Early
                     </th>
 
-                    <th class="text-center text-danger">
-                        Penalty
+                    <th class="text-center text-danger"
+                        title="Total Penalties">
+                        📉 Penalty
                     </th>
 
-                    <th class="text-center d-none-mobile">
-                        OT
+                    <th class="text-center d-none-mobile"
+                        title="Approved Overtime Duration">
+                        ⚡ OT
                     </th>
 
-                    @* Renamed from Worked to Gross Worked *@
-                    <th class="text-center">
-                        Gross Worked
+                    <th class="text-center"
+                        title="Gross Worked (Shift + Overtime)">
+                        ✅ Gross
                     </th>
 
-                    <th>
-                        Raw Punches
+                    <th class="text-center"
+                        title="Raw Biometric & Mobile Punches">
+                        📱 Punches
                     </th>
 
-                    <th class="text-center">
-                        Action
+                    <th class="text-center"
+                        title="Actions">
+                        ⚙️
                     </th>
                 </tr>
             </thead>
@@ -192,67 +210,50 @@ else
                 @foreach (var record in Logs)
                 {
                     <tr>
-                        <td data-label="Employee">
+                        <td class="text-start text-truncate" style="max-width: 120px;" data-label="Employee" title="@record.EmployeeName">
                             @record.EmployeeName
                         </td>
 
-                        <td data-label="Date">
-                            @record.Date.ToString("dd-MMM (ddd)")
+                        <td class="text-center" data-label="Date">
+                            @record.Date.ToString("dd-MMM")
+                            <span class="text-muted" style="font-size: 0.67rem;">@record.Date.ToString("ddd")</span>
                         </td>
 
-                        <td data-label="Status">
-                            <span class="badge @GetStatusColor(record.Status)">
+                        <td class="text-center" data-label="Status">
+                            <span class="badge @GetStatusColor(record.Status)" style="font-size: 0.70rem; padding: 0.2rem 0.35rem;">
                                 @record.Status
                             </span>
                         </td>
 
-                        @* ------------------------------------------------
-                           SCHEDULED
-                           ------------------------------------------------ *@
-                        <td class="text-center d-none-mobile" data-label="Scheduled">
-                            @if (record.ShiftStart.HasValue &&
-                                                record.ShiftEnd.HasValue)
+                        @* SCHEDULED *@
+                        <td class="text-center d-none-mobile" data-label="Sched">
+                            @if (record.ShiftStart.HasValue && record.ShiftEnd.HasValue)
                             {
-                                <div class="small">
-                                    @($"{record.ShiftStart:HH:mm} - {record.ShiftEnd:HH:mm}")
+                                <div style="font-size: 0.72rem; line-height: 1.1;">
+                                    @($"{record.ShiftStart:HH:mm}-{record.ShiftEnd:HH:mm}")
                                 </div>
-
-                                <div class="fw-bold text-muted"
-                                     style="font-size: 0.85em;">
-                                    (@FormatTimeSpan(
-                                                            record.ScheduledShiftDuration))
-                    </div>
-                                        }
+                                <div class="text-muted" style="font-size: 0.67rem; line-height: 1.1;">
+                                    (@FormatTimeSpan(record.ScheduledShiftDuration))
+                                </div>
+                            }
+                            else if (record.ScheduledShiftDuration > TimeSpan.Zero)
+                            {
+                                <span>@FormatTimeSpan(record.ScheduledShiftDuration)</span>
+                            }
                             else
                             {
-                                @if (record.ScheduledShiftDuration > TimeSpan.Zero)
-                                {
-                                    <span>@FormatTimeSpan(record.ScheduledShiftDuration)</span>
-                                }
-                                else
-                                {
-                                    <span>-</span>
-                                }
+                                <span>-</span>
                             }
                         </td>
 
-                        @* ------------------------------------------------
-                           SHIFT WORKED
-                           
-                           Actual worked time INSIDE scheduled shift.
-                           Does NOT include OT.
-                           ------------------------------------------------ *@
-                        <td class="text-center d-none-mobile fw-bold text-success" data-label="Shift Worked">
-                            @FormatTimeSpan(
-                            record.ShiftWorkedDuration)
-                </td>
+                        @* SHIFT WORKED *@
+                        <td class="text-center d-none-mobile fw-bold text-success" data-label="Shift Wk">
+                            @FormatTimeSpan(record.ShiftWorkedDuration)
+                        </td>
 
-                @* ------------------------------------------------
-                           LUNCH
-                           ------------------------------------------------ *@
-                <td class="text-center d-none-mobile small text-muted" data-label="Lunch">
-                    @if (record.LunchOut.HasValue &&
-                                        record.LunchIn.HasValue)
+                        @* LUNCH *@
+                        <td class="text-center d-none-mobile small text-muted" data-label="Lunch">
+                            @if (record.LunchOut.HasValue && record.LunchIn.HasValue)
                             {
                                 @($"{record.LunchOut:HH:mm}-{record.LunchIn:HH:mm}")
                             }
@@ -262,81 +263,54 @@ else
                             }
                         </td>
 
-                        @* ------------------------------------------------
-                           GROSS BREAK
-                           ------------------------------------------------ *@
-                        <td class="text-center d-none-mobile" data-label="Gross Brk">
-                            @FormatTimeSpan(
-                            record.TotalBreakTime)
-                </td>
+                        @* GROSS BREAK *@
+                        <td class="text-center d-none-mobile" data-label="Break">
+                            @FormatTimeSpan(record.TotalBreakTime)
+                        </td>
 
-                @* ------------------------------------------------
-                           EXISTING GAPS
-                           ------------------------------------------------ *@
-                <td class="text-center d-none-mobile" data-label="Gaps">
-                    @(record.GapsCount > 0
-                                        ? record.GapsCount.ToString()
-                                        : "-")
-                </td>
+                        @* GAPS *@
+                        <td class="text-center d-none-mobile" data-label="Gaps">
+                            @(record.GapsCount > 0 ? record.GapsCount.ToString() : "-")
+                        </td>
 
-                        @* ------------------------------------------------
-                           LATE
-                           ------------------------------------------------ *@
+                        @* LATE *@
                         <td class="text-center d-none-mobile" data-label="Late">
-                            @FormatTimeSpan(
-                                        record.LatenessDuration)
-                </td>
+                            @FormatTimeSpan(record.LatenessDuration)
+                        </td>
 
-                @* ------------------------------------------------
-                           EARLY
-                           ------------------------------------------------ *@
-                <td class="text-center d-none-mobile" data-label="Early">
-                    @FormatTimeSpan(
-                                        record.EarlyLeavePenalty)
-                </td>
+                        @* EARLY *@
+                        <td class="text-center d-none-mobile" data-label="Early">
+                            @FormatTimeSpan(record.EarlyLeavePenalty)
+                        </td>
 
-                @* ------------------------------------------------
-                           PENALTY
-                           ------------------------------------------------ *@
-                <td class="text-center text-danger fw-bold" data-label="Penalty">
-                    @FormatTimeSpan(
-                                        record.TotalPenalty)
-                </td>
+                        @* PENALTY *@
+                        <td class="text-center text-danger fw-bold" data-label="Penalty">
+                            @FormatTimeSpan(record.TotalPenalty)
+                        </td>
 
-                @* ------------------------------------------------
-                           OT
-                           ------------------------------------------------ *@
-                <td class="text-center d-none-mobile" data-label="OT">
-                    @FormatTimeSpan(
-                                        record.OvertimeDuration)
-                </td>
+                        @* OT *@
+                        <td class="text-center d-none-mobile" data-label="OT">
+                            @FormatTimeSpan(record.OvertimeDuration)
+                        </td>
 
-                @* ------------------------------------------------
-                           GROSS WORKED
-                           
-                           Shift Worked + OT.
-                           This replaces the old "Worked" label.
-                           ------------------------------------------------ *@
-                <td class="text-center fw-bold" data-label="Gross Worked">
-                    @FormatDecimal(
-                                        record.FinalWorkedHours)
-                </td>
+                        @* GROSS WORKED *@
+                        <td class="text-center fw-bold text-primary" data-label="Gross">
+                            @FormatDecimal(record.FinalWorkedHours)
+                        </td>
 
-                @* ------------------------------------------------
-                           RAW PUNCHES
-                           ------------------------------------------------ *@
-                <td class="small text-muted raw-punches-cell" data-label="Raw Punches"
-                    title="@record.Punches">
-                    @record.Punches
-                </td>
+                        @* RAW PUNCHES *@
+                        <td class="raw-punches-cell" data-label="Punches"
+                            title="@record.Punches">
+                            @record.Punches
+                        </td>
 
-                @* ------------------------------------------------
-                           ACTION
-                           ------------------------------------------------ *@
-                <td class="text-center" data-label="Action">
-                    @if (CanCorrect(record.Status))
+                        @* ACTION *@
+                        <td class="text-center" data-label="Action">
+                            @if (CanCorrect(record.Status))
                             {
                                 <button class="btn btn-sm btn-outline-warning py-0 px-1"
+                                        style="font-size: 0.70rem; line-height: 1;"
+                                        title="Correct Attendance"
                                         @onclick="() => OnCorrect.InvokeAsync(record)">
                                     <i class="bi bi-pencil-square"></i>
                                 </button>

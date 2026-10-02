@@ -13,7 +13,7 @@ namespace Payroll.Shared.Data
     {
         [Key]
         [Column("id")]
-        public int Id { get; set; } = 1;
+        public int Id { get; set; } = 0;
 
         // --- 1. Core Module Toggles (Formerly ClientFeatureToggle) ---
         // These are the "master switches" for the company subscription
@@ -124,6 +124,9 @@ namespace Payroll.Shared.Data
         [Column("admin_can_manage_employee_permissions")]
         public bool AdminCanManageEmployeePermissions { get; set; } = false; // Default to false
 
+        [Column("admin_can_manage_feature_toggles")]
+        public bool AdminCanManageFeatureToggles { get; set; } = false; // Default to false
+
         [Column("enable_professional_tax")]
         public bool EnableProfessionalTax { get; set; } = false;
 
@@ -198,5 +201,17 @@ namespace Payroll.Shared.Data
         [Column("enable_in_app_notifications")]
         public bool EnableInAppNotifications { get; set; } = true;
 
+        // --- FIREBASE PLAN MODE (Spark = Free/Optimized 80% bandwidth reduction, Blaze = Full) ---
+        [Column("firebase_plan_mode")]
+        public string FirebasePlanMode { get; set; } = "Spark";
+
+        // --- OPERATION / DEPLOYMENT MODE ---
+        // Online = Firebase Cloud based real-time sync
+        // Offline = 100% standalone built-in local SQLite database, zero internet required
+        [Column("is_offline_mode")]
+        public bool IsOfflineMode { get; set; } = false;
+
+        [Column("deployment_mode")]
+        public string DeploymentMode { get; set; } = "Online"; // "Online" or "Offline"
     }
 }

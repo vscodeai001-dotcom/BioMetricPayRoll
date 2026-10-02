@@ -1,100 +1,173 @@
-﻿@using global::Payroll.Shared.Data
+@using global::Payroll.Shared.Data
 @using Microsoft.EntityFrameworkCore
 @inject IDbContextFactory<AppDbContext> DbFactory
 @inject IToastService toastService
 
 @if (IsSuperAdmin || Features?.EnableStatutoryCompliance == true || Features?.EnableProfessionalTax == true)
 {
-    <div class="row">
-
+    <div class="row g-4">
         @* --- PF & ESI --- *@
-        <div class="col-md-6">
+        <div class="col-lg-6">
             @if (IsSuperAdmin || Features?.EnableStatutoryCompliance == true)
             {
-                <div class="d-flex justify-content-between align-items-center mb-2">
-                    <h5 class="text-warning mb-0">Provident Fund & ESI</h5>
-                    <div class="form-check form-switch">
-                        <input class="form-check-input" type="checkbox" role="switch" @bind="Settings.EnablePfEsiSystem">
+                <div class="card border rounded-4 shadow-sm h-100">
+                    <div class="card-header bg-transparent border-bottom py-3 px-4 d-flex align-items-center justify-content-between">
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="fs-5">🏛️</span>
+                            <h6 class="mb-0 fw-bold text-primary">Provident Fund (PF) &amp; ESI</h6>
+                        </div>
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="badge @(Settings.EnablePfEsiSystem ? "bg-success-subtle text-success border border-success-subtle" : "bg-secondary-subtle text-secondary border") px-2 py-1 rounded-pill small">
+                                @(Settings.EnablePfEsiSystem ? "✓ Active" : "Disabled")
+                            </span>
+                            <div class="form-check form-switch mb-0">
+                                <input class="form-check-input" type="checkbox" role="switch" @bind="Settings.EnablePfEsiSystem">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-body p-4">
+                        @if (Settings.EnablePfEsiSystem)
+                        {
+                            <div class="row g-3">
+                                <div class="col-md-6">
+                                    <label class="form-label small fw-bold text-secondary">
+                                        <i class="bi bi-currency-rupee text-success"></i> ESI Wage Limit (₹)
+                                    </label>
+                                    <input type="number" class="form-control rounded-3" @bind="Settings.EsiWageLimit" placeholder="21000" />
+                                    <div class="form-text small text-muted">Statutory monthly ceiling (₹21,000).</div>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small fw-bold text-secondary">
+                                        <i class="bi bi-percent text-primary"></i> Basic Salary %
+                                    </label>
+                                    <input type="number" class="form-control rounded-3" @bind="Settings.BasicSalaryPercentage" placeholder="40" />
+                                    <div class="form-text small text-muted">% of Gross allocated to Basic.</div>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small fw-bold text-secondary">
+                                        <i class="bi bi-person-fill text-primary"></i> Employee PF %
+                                    </label>
+                                    <input type="number" class="form-control rounded-3" @bind="Settings.EmployerPfPercentage" placeholder="12" />
+                                    <div class="form-text small text-muted">Deducted from employee (12%).</div>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small fw-bold text-secondary">
+                                        <i class="bi bi-heart-pulse-fill text-danger"></i> Employee ESI %
+                                    </label>
+                                    <input type="number" class="form-control rounded-3" @bind="Settings.EmployerEsiPercentage" placeholder="0.75" />
+                                    <div class="form-text small text-muted">Medical contribution (0.75%).</div>
+                                </div>
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="p-4 text-center text-muted bg-body-tertiary rounded-3 border">
+                                <i class="bi bi-slash-circle fs-3 text-secondary d-block mb-2"></i>
+                                <span class="fw-semibold">PF &amp; ESI System is currently disabled</span>
+                                <div class="small text-muted mt-1">Toggle the switch above to enable statutory deductions on payroll runs.</div>
+                            </div>
+                        }
                     </div>
                 </div>
-                @if (Settings.EnablePfEsiSystem)
-                {
-                    <div class="statutory-card p-3 border rounded">
-                        <div class="row g-3 align-items-end mb-3">
-                            <div class="col-6">
-                                <label class="small fw-bold">ESI Wage Limit (₹)</label>
-                                <input type="number" class="form-control form-control-sm" @bind="Settings.EsiWageLimit" />
-                            </div>
-                            <div class="col-6">
-                                <label class="small fw-bold">Basic Salary %</label>
-                                <input type="number" class="form-control form-control-sm" @bind="Settings.BasicSalaryPercentage" />
-                            </div>
-                        </div>
-                        <div class="row g-2">
-                            <div class="col-6"><label class="small fw-bold">Employee PF %</label><input type="number" class="form-control form-control-sm" @bind="Settings.EmployerPfPercentage" /></div>
-                            <div class="col-6"><label class="small fw-bold">Employee ESI %</label><input type="number" class="form-control form-control-sm" @bind="Settings.EmployerEsiPercentage" /></div>
-                        </div>
-                    </div>
-                }
-                else
-                {
-
-                    <div class="statutory-status alert alert-light small">Disabled.</div>
-                }
             }
         </div>
 
         @* --- PROFESSIONAL TAX --- *@
-        <div class="col-md-6 border-start">
+        <div class="col-lg-6">
             @if (IsSuperAdmin || Features?.EnableProfessionalTax == true)
             {
-                <div class="d-flex justify-content-between align-items-center mb-2">
-                    <h5 class="text-secondary mb-0">Professional Tax (PT)</h5>
-                    <div class="form-check form-switch">
-                        <input class="form-check-input" type="checkbox" role="switch" @bind="Settings.EnableProfessionalTax">
+                <div class="card border rounded-4 shadow-sm h-100">
+                    <div class="card-header bg-transparent border-bottom py-3 px-4 d-flex align-items-center justify-content-between">
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="fs-5">📑</span>
+                            <h6 class="mb-0 fw-bold text-info">Professional Tax (PT)</h6>
+                        </div>
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="badge @(Settings.EnableProfessionalTax ? "bg-success-subtle text-success border border-success-subtle" : "bg-secondary-subtle text-secondary border") px-2 py-1 rounded-pill small">
+                                @(Settings.EnableProfessionalTax ? "✓ Active" : "Disabled")
+                            </span>
+                            <div class="form-check form-switch mb-0">
+                                <input class="form-check-input" type="checkbox" role="switch" @bind="Settings.EnableProfessionalTax">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-body p-4 d-flex flex-column justify-content-between">
+                        @if (Settings.EnableProfessionalTax)
+                        {
+                            <div>
+                                <p class="small text-muted mb-3">
+                                    State-mandated monthly deductions based on gross earnings. Slabs define exact tax amounts per salary bracket.
+                                </p>
+                                <div class="p-3 border rounded-3 bg-body-tertiary mb-3 d-flex align-items-center justify-content-between">
+                                    <div class="d-flex align-items-center gap-2">
+                                        <i class="bi bi-layers-fill text-info fs-4"></i>
+                                        <div>
+                                            <div class="fw-bold small">Configured Slabs</div>
+                                            <div class="text-muted small">State taxation rules</div>
+                                        </div>
+                                    </div>
+                                    <span class="badge bg-info-subtle text-info border border-info-subtle px-3 py-2 rounded-pill fw-bold">
+                                        @(ptSlabs?.Count ?? 0) Active Slabs
+                                    </span>
+                                </div>
+                            </div>
+                            <button class="btn btn-outline-primary rounded-pill px-4 py-2 w-100 mt-2" @onclick="OpenSlabModal">
+                                <i class="bi bi-table me-2"></i> Manage PT Slabs &amp; Brackets
+                            </button>
+                        }
+                        else
+                        {
+                            <div class="p-4 text-center text-muted bg-body-tertiary rounded-3 border">
+                                <i class="bi bi-slash-circle fs-3 text-secondary d-block mb-2"></i>
+                                <span class="fw-semibold">Professional Tax is currently disabled</span>
+                                <div class="small text-muted mt-1">Toggle the switch above to activate PT deduction brackets.</div>
+                            </div>
+                        }
                     </div>
                 </div>
-                @if (Settings.EnableProfessionalTax)
-                {
-                    <div class="statutory-card p-3 border rounded">
-                        <p class="small text-muted mb-2">Manage tax slabs based on Gross Salary range.</p>
-                        <button class="btn btn-sm btn-outline-primary" @onclick="OpenSlabModal"><i class="bi bi-table"></i> Manage Slabs</button>
-                        <span class="ms-2 small fw-bold">@(ptSlabs?.Count ?? 0) Slabs Active</span>
-                    </div>
-                }
-                else
-                {
-
-                    <div class="statutory-status alert alert-light small">Disabled.</div>
-                }
             }
         </div>
+
         @* --- SHIFT ALLOWANCE --- *@
         @if (IsSuperAdmin || Features?.EnableShiftAllowance == true)
         {
-            <div class="col-12 mt-3 border-top pt-3">
-                <div class="d-flex justify-content-between align-items-center mb-2">
-                    <h5 class="text-info mb-0">Shift Allowances</h5>
-                    <div class="form-check form-switch">
-                        <input class="form-check-input" type="checkbox" role="switch" @bind="Settings.EnableShiftAllowance">
-                        <label class="form-check-label small">Enable Night Shift Allowance</label>
+            <div class="col-12">
+                <div class="card border rounded-4 shadow-sm">
+                    <div class="card-header bg-transparent border-bottom py-3 px-4 d-flex align-items-center justify-content-between">
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="fs-5">🌙</span>
+                            <h6 class="mb-0 fw-bold text-warning">Night Shift Allowance Policy</h6>
+                        </div>
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="badge @(Settings.EnableShiftAllowance ? "bg-success-subtle text-success border border-success-subtle" : "bg-secondary-subtle text-secondary border") px-2 py-1 rounded-pill small">
+                                @(Settings.EnableShiftAllowance ? "✓ Active" : "Disabled")
+                            </span>
+                            <div class="form-check form-switch mb-0">
+                                <input class="form-check-input" type="checkbox" role="switch" @bind="Settings.EnableShiftAllowance">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-body p-4">
+                        @if (Settings.EnableShiftAllowance)
+                        {
+                            <div class="d-flex align-items-start gap-3 p-3 bg-warning-subtle bg-opacity-25 border border-warning-subtle rounded-3">
+                                <i class="bi bi-moon-stars-fill text-warning fs-3 mt-1"></i>
+                                <div>
+                                    <h6 class="fw-bold mb-1 text-warning">Midnight Shift Benefit Active</h6>
+                                    <p class="small text-muted mb-0">
+                                        Employees assigned a "Night Shift Allowance" in their staff profile will automatically receive this allowance on any shift that crosses midnight (e.g. 22:00 to 06:00).
+                                    </p>
+                                </div>
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="p-3 text-muted bg-body-tertiary rounded-3 border small">
+                                <i class="bi bi-info-circle me-1"></i> Shift allowance system is disabled. Night shifts will be calculated purely on regular hourly/monthly rates.
+                            </div>
+                        }
                     </div>
                 </div>
-
-                @if (Settings.EnableShiftAllowance)
-                {
-                    <div class="statutory-card p-3 border rounded">
-                        <p class="small text-muted mb-0">
-                            If enabled, employees can be assigned a "Night Shift Allowance" rate in their profile.
-                            This amount (e.g. ₹200) will be automatically added to their daily pay if they work a shift that crosses midnight.
-                        </p>
-                    </div>
-                }
-                else
-                {
-
-                    <div class="statutory-status alert alert-light small">Allowance system disabled.</div>
-                }
             </div>
         }
     </div>

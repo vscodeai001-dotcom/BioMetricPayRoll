@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 
@@ -65,6 +65,14 @@ namespace Payroll.Shared.Data
         [Column("shiftendtime")]
         public TimeOnly? ShiftEndTime { get; set; }
 
+        [Column("shift_mode")]
+        [StringLength(30)]
+        public string ShiftMode { get; set; } = "SINGLE_DAY"; // "SINGLE_DAY" or "CONTINUOUS"
+
+        [Column("tracking_mode")]
+        [StringLength(30)]
+        public string TrackingMode { get; set; } = "24/7"; // "24/7" or "SHIFT"
+
         [Column("HireDate")]
         public DateOnly? HireDate { get; set; }
 
@@ -93,6 +101,11 @@ namespace Payroll.Shared.Data
         [Column("AspNetUserId")]
         [StringLength(450)] // Standard size for IdentityUser ID
         public string? AspNetUserId { get; set; } // Nullable
+
+        [Column("tenant_id")]
+        [StringLength(100)]
+        public string? TenantId { get; set; } // Company tenant identifier (e.g. "biometricpayroll", "tenant_nocompany")
+
 
         [Column("enable_pf")]
         public bool EnablePF { get; set; } = false;
@@ -123,6 +136,29 @@ namespace Payroll.Shared.Data
 
         [Column("is_deleted")]
         public bool IsDeleted { get; set; } = false;
+
+        // --- NEW: ANDROID SYNCHRONIZATION FIELDS ---
+        [NotMapped]
+        public string? PhoneNumber { get; set; }
+
+        [NotMapped]
+        public string SalaryType { get; set; } = "MONTHLY_FIXED";
+
+        [NotMapped]
+        public decimal DailyAllowance { get; set; } = 0;
+
+        [NotMapped]
+        public bool IsBonusEligible { get; set; } = true;
+
+        [NotMapped]
+        public bool IsPaidLeaveEligible { get; set; } = true;
+
+        [NotMapped]
+        public bool PaidLeaveOnWeekdays { get; set; } = true;
+
+        [NotMapped]
+        public bool PaidLeaveOnWeekends { get; set; } = false;
+        // ------------------------------------------
 
         // --- BANKING DETAILS ---
         [StringLength(50)]

@@ -1,8 +1,8 @@
+using System.Globalization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Identity.UI.Services;
 using Microsoft.EntityFrameworkCore;
 using Payroll.Shared.Data;
-
 
 namespace Payroll.Web.Services
 {
@@ -13,15 +13,15 @@ namespace Payroll.Web.Services
         private readonly IEmailSender _emailSender;
         private readonly UserManager<IdentityUser> _userManager;
         private readonly NotificationService _noteService;
-
-
+        private readonly FirebaseRealtimeService _firebase;
 
         public ResignationService(
             IDbContextFactory<AppDbContext> dbFactory,
             ILogger<ResignationService> logger,
             IEmailSender emailSender,
             UserManager<IdentityUser> userManager,
-            NotificationService noteService
+            NotificationService noteService,
+            FirebaseRealtimeService firebase
             )
         {
             _dbFactory = dbFactory;
@@ -29,6 +29,41 @@ namespace Payroll.Web.Services
             _emailSender = emailSender;
             _userManager = userManager;
             _noteService = noteService;
+            _firebase = firebase;
+        }
+
+        private async Task UpsertFirebaseResignationAsync(ResignationRequest req)
+        {
+            try
+            {
+                var ownerUid = _firebase.ResolveOwnerUid("resignation-service", "Admin");
+                var key = req.RequestId.ToString(CultureInfo.InvariantCulture);
+                var row = new Dictionary<string, object?>
+                {
+                    ["requestId"] = req.RequestId,
+                    ["id"] = req.RequestId,
+                    ["employeeId"] = req.EmployeeId,
+                    ["staffId"] = req.EmployeeId.ToString(CultureInfo.InvariantCulture),
+                    ["submissionDate"] = new DateTimeOffset(req.SubmissionDate).ToUnixTimeMilliseconds(),
+                    ["desiredLastWorkingDay"] = new DateTimeOffset(req.DesiredLastWorkingDay.ToDateTime(TimeOnly.MinValue)).ToUnixTimeMilliseconds(),
+                    ["reason"] = req.Reason,
+                    ["status"] = req.Status,
+                    ["approvedLastWorkingDay"] = req.ApprovedLastWorkingDay.HasValue
+                        ? (object)new DateTimeOffset(req.ApprovedLastWorkingDay.Value.ToDateTime(TimeOnly.MinValue)).ToUnixTimeMilliseconds()
+                        : null,
+                    ["adminRemarks"] = req.AdminRemarks,
+                    ["isSettled"] = req.IsSettled,
+                    ["_entity"] = "ResignationRequest",
+                    ["_key"] = key,
+                    ["_updatedUtc"] = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture)
+                };
+                await _firebase.SetOwnerRecordAsync(ownerUid, "resignation_requests", key, row);
+                await _firebase.PublishLocalApplicationChangeAsync(ownerUid, "ResignationRequest", "MODIFIED", key);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to project resignation request {RequestId} to Firebase.", req.RequestId);
+            }
         }
 
         // --- 1. SUBMIT REQUEST (Employee) ---
@@ -57,6 +92,7 @@ namespace Payroll.Web.Services
 
             db.ResignationRequests.Add(req);
             await db.SaveChangesAsync();
+            await UpsertFirebaseResignationAsync(req);
 
             // --- NOTIFY ADMINS ---
             var emp = await db.Employees.FindAsync(employeeId);
@@ -93,6 +129,7 @@ namespace Payroll.Web.Services
             }
 
             await db.SaveChangesAsync();
+            await UpsertFirebaseResignationAsync(req);
 
             // --- NOTIFY EMPLOYEE ---
             var emp = await db.Employees.FindAsync(req.EmployeeId);
@@ -227,6 +264,8 @@ namespace Payroll.Web.Services
 
                 await db.SaveChangesAsync();
                 await transaction.CommitAsync();
+
+                if (req != null) await UpsertFirebaseResignationAsync(req);
             }
             catch
             {

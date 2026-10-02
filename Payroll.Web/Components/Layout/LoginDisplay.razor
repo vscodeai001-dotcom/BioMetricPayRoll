@@ -1,9 +1,8 @@
-﻿@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.AspNetCore.Components.Authorization
 @using Microsoft.JSInterop
 
 @inject IJSRuntime JSRuntime
-@inject Microsoft.AspNetCore.Antiforgery.IAntiforgery Antiforgery
-@inject IHttpContextAccessor HttpContextAccessor
+@inject NavigationManager NavigationManager
 
 <AuthorizeView>
 
@@ -15,18 +14,41 @@
                  LOGGED-IN USER
                  ===================================================== -->
 
-            <a class="nav-link login-user-link"
-               href="/Identity/Account/Manage"
+            <a class="nav-link login-user-link d-flex align-items-center gap-1"
+               href="/my-profile"
                title="@context.User.Identity?.Name">
 
-                <span class="hello-text">
+                <span class="user-avatar">
+                    @if (context.User.IsInRole("SuperAdmin"))
+                    {
+                        <span>👑</span>
+                    }
+                    else if (context.User.IsInRole("Admin"))
+                    {
+                        <span>🛡️</span>
+                    }
+                    else
+                    {
+                        <span>👤</span>
+                    }
+                </span>
+
+                <span class="hello-text text-muted small">
                     Hello,
                 </span>
 
-                <span class="user-name">
+                <span class="user-name fw-semibold">
                     @context.User.Identity?.Name
                 </span>
 
+                @if (context.User.IsInRole("SuperAdmin"))
+                {
+                    <span class="badge bg-warning text-dark ms-1" style="font-size: 0.7rem;">Root SA</span>
+                }
+                else if (context.User.IsInRole("Admin"))
+                {
+                    <span class="badge bg-info text-dark ms-1" style="font-size: 0.7rem;">Admin</span>
+                }
             </a>
 
 
@@ -39,16 +61,14 @@
                   method="post"
                   action="/Identity/Account/Logout">
 
-                <input type="hidden"
-                       name="__RequestVerificationToken"
-                       value="@Antiforgery.GetAndStoreTokens(
-                                                  HttpContextAccessor.HttpContext!).RequestToken" />
+                <Microsoft.AspNetCore.Components.Forms.AntiforgeryToken />
 
                 <button type="submit"
                         class="logout-button"
                         title="Logout"
                         aria-label="Logout"
-                        @onclick="PrepareLogout">
+                        @onclick="PrepareLogout"
+                        @onclick:preventDefault>
 
                     <i class="bi bi-box-arrow-right logout-icon"
                        aria-hidden="true">
@@ -93,15 +113,9 @@
          * STOP EMPLOYEE GPS BEFORE REAL LOGOUT
          * ============================================================
          *
-         * This does NOT perform the logout.
-         *
-         * The browser will continue with the normal HTML
-         * form POST to:
-         *
-         * /Identity/Account/Logout
-         *
-         * This avoids the previous JavaScript form-submission
-         * problem.
+         * Logout is an authoritative lifecycle event. Stop the GPS
+         * watcher in the browser before redirecting to the Identity
+         * logout page.
          */
 
         try
@@ -116,11 +130,11 @@
         }
 
         /*
-         * Give the GPS watcher a short moment to stop.
-         *
-         * The form submission itself remains the normal browser
-         * POST handled by ASP.NET Core Identity.
+         * Give the GPS watcher a moment to stop and then redirect
+         * to the standard Identity logout model.
          */
-        await Task.Delay(150);
+        await Task.Delay(100);
+
+        NavigationManager.NavigateTo("/Identity/Account/Logout", forceLoad: true);
     }
 }

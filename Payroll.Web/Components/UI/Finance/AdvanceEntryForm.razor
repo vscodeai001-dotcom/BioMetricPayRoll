@@ -3,7 +3,7 @@
 @using Microsoft.EntityFrameworkCore
 @using System.Globalization
 @inject IToastService toastService
-@inject IDbContextFactory<AppDbContext> DbFactory
+@inject FirebaseAdvanceService FirebaseAdvances
 @inject AttendanceRefreshService AttendanceRefresh
 
 <details class="mb-4 border rounded p-3">
@@ -74,9 +74,15 @@
 
         try
         {
-            await using var dbContext = await DbFactory.CreateDbContextAsync();
-            dbContext.SalaryAdvances.Add(NewAdvance);
-            await dbContext.SaveChangesAsync();
+            // Always ensure new advance gets a fresh ID and unique Firebase key
+            NewAdvance.AdvanceID = 0;
+            NewAdvance.FirebaseKey = null;
+
+            if (!await FirebaseAdvances.SaveAsync(NewAdvance))
+            {
+                toastService.ShowError("Unable to save the advance to Firebase.");
+                return;
+            }
 
             toastService.ShowSuccess("Advance saved successfully.");
             
@@ -98,6 +104,7 @@
             // The parent owns this object, so replacing the reference here would
             // leave the parent holding the already-saved entity/primary key.
             NewAdvance.AdvanceID = 0;
+            NewAdvance.FirebaseKey = null;
             NewAdvance.EmployeeID = 0;
             NewAdvance.AdvanceDate = DateTime.Now.Date;
             NewAdvance.AdvanceType = "General";

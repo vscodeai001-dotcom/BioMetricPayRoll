@@ -2,11 +2,11 @@
 @using Microsoft.AspNetCore.Authorization
 @using global::Payroll.Shared
 @using global::Payroll.Shared.Data
-@using Microsoft.EntityFrameworkCore
 @using global::Payroll.Web.Components.UI.Finance
-@inject IDbContextFactory<AppDbContext> DbFactory
+@inject FirebaseBonusService FirebaseBonuses
 @inject IToastService toastService
 @inject IJSRuntime JSRuntime
+@inject AttendanceRefreshService AttendanceRefresh
 @attribute [Authorize(Roles = "Admin, SuperAdmin")]
 
 <PageTitle>Bonus Management</PageTitle>
@@ -39,7 +39,7 @@ else
                        OnDelete="DeleteBonus" />
 }
 
-<AttendanceRefreshListener OnAttendanceChanged="HandleRealtimeRefresh" />
+<AttendanceRefreshListener OnBonusChanged="HandleRealtimeRefresh" />
 
 @code {
     private List<Employee>? employeeList;
@@ -51,44 +51,73 @@ else
     protected override async Task OnInitializedAsync()
     {
         newBonus.BonusDate = DateTime.Now;
-        await CheckPermissionsAndLoadData();
+        await CheckPermissionsAndLoadData(isSilent: false);
     }
 
-    private async Task CheckPermissionsAndLoadData()
+    private async Task CheckPermissionsAndLoadData(bool isSilent = false)
     {
-        isLoading = true;
+        if (!isSilent && bonusList == null)
+        {
+            isLoading = true;
+            await InvokeAsync(StateHasChanged);
+        }
         try
         {
-            await using var dbContext = await DbFactory.CreateDbContextAsync();
-
-            // 1. GATE CHECK
-            var features = await dbContext.FeatureSettings.AsNoTracking().FirstOrDefaultAsync(f => f.Id == 1);
-            if (features != null && !features.EnableBonusManagement)
+            if (!await FirebaseBonuses.IsEnabledAsync())
             {
                 isAccessDenied = true;
                 return;
             }
 
-            // 2. Load Data
-            employeeList = await dbContext.Employees.OrderBy(e => e.Name).ToListAsync();
-            bonusList = await dbContext.BonusRecords.OrderByDescending(b => b.BonusDate).ToListAsync();
+            if (employeeList == null)
+            {
+                employeeList = await FirebaseBonuses.GetActiveEmployeesAsync();
+            }
+
+            var freshBonuses = await FirebaseBonuses.GetAsync();
+            bonusList = freshBonuses;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Bonus load failed: {ex.Message}");
+            if (bonusList == null) bonusList = new List<BonusRecord>();
         }
         finally
         {
             isLoading = false;
+            await InvokeAsync(StateHasChanged);
         }
     }
 
-    private async Task LoadData() => await CheckPermissionsAndLoadData();
+    private async Task LoadData()
+    {
+        await CheckPermissionsAndLoadData(isSilent: true);
+    }
 
     private async Task DeleteBonus(BonusRecord bonus)
     {
         if (!await JSRuntime.InvokeAsync<bool>("confirm", "Delete this bonus record?")) return;
-
-        await using var dbContext = await DbFactory.CreateDbContextAsync();
-        dbContext.BonusRecords.Remove(bonus);
-        await dbContext.SaveChangesAsync();
+        if (bonus.PayrollID_Paid.HasValue)
+        {
+            toastService.ShowWarning("A payroll-attached bonus cannot be deleted.");
+            return;
+        }
+        if (!await FirebaseBonuses.DeleteAsync(bonus))
+        {
+            toastService.ShowError("Unable to delete the bonus from Firebase.");
+            return;
+        }
         toastService.ShowSuccess("Bonus deleted.");
+
+        try
+        {
+            await AttendanceRefresh.NotifyBonusChangedAsync(bonus.EmployeeID, "DELETED");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Failed to notify bonus deleted: {ex.Message}");
+        }
+
         await LoadData();
     }
 
@@ -96,8 +125,7 @@ else
     {
         try
         {
-            await LoadData();
-            await InvokeAsync(StateHasChanged);
+            await CheckPermissionsAndLoadData(isSilent: true);
         }
         catch (Exception ex)
         {

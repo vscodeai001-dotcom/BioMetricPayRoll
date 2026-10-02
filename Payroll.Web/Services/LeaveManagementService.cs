@@ -22,6 +22,7 @@ namespace Payroll.Web.Services
         private readonly AttendanceCalculatorService _attendanceCalculator;
         private readonly AttendanceRefreshService _refreshService;
         private readonly NotificationService _notificationService;
+        private readonly FirebaseAttendanceCalendarMutationService _firebaseCalendar;
 
         public LeaveManagementService(
             IDbContextFactory<AppDbContext> dbFactory,
@@ -31,7 +32,8 @@ namespace Payroll.Web.Services
             UserManager<IdentityUser> userManager,
             AttendanceCalculatorService attendanceCalculator,
             AttendanceRefreshService refreshService,
-            NotificationService notificationService)
+            NotificationService notificationService,
+            FirebaseAttendanceCalendarMutationService firebaseCalendar)
         {
             _dbFactory = dbFactory;
             _auditService = auditService;
@@ -41,6 +43,7 @@ namespace Payroll.Web.Services
             _attendanceCalculator = attendanceCalculator;
             _refreshService = refreshService;
             _notificationService = notificationService;
+            _firebaseCalendar = firebaseCalendar;
         }
 
         // --- 1. LOAD DATA ---
@@ -48,7 +51,7 @@ namespace Payroll.Web.Services
             int selectedEmployeeId, string filterStatus, DateTime? startDate, DateTime? endDate)
         {
             await using var dbContext = await _dbFactory.CreateDbContextAsync();
-            var query = dbContext.LeaveRequests.AsQueryable();
+            var query = dbContext.LeaveRequests.Where(lr => lr.EmployeeID > 0).AsQueryable();
 
             if (selectedEmployeeId > 0)
                 query = query.Where(lr => lr.EmployeeID == selectedEmployeeId);
@@ -60,14 +63,25 @@ namespace Payroll.Web.Services
                 query = query.Where(lr => lr.LeaveDate < endDate.Value.Date.AddDays(1));
 
             if (filterStatus == "Pending")
-                query = query.Where(lr => !lr.IsApproved && lr.LeaveType != "Loss of Pay (Auto)");
+                query = query.Where(lr => (!lr.IsApproved || lr.Status == "Pending") && lr.Status != "Rejected" && lr.LeaveType != "Loss of Pay (Auto)");
             else if (filterStatus == "Approved")
-                query = query.Where(lr => lr.IsApproved);
+                query = query.Where(lr => lr.IsApproved || lr.Status == "Approved");
+            else if (filterStatus == "Rejected")
+                query = query.Where(lr => lr.Status == "Rejected");
 
-            return await query
+            var list = await query
                 .OrderByDescending(lr => lr.LeaveDate)
                 .ThenBy(lr => lr.EmployeeID)
                 .ToListAsync();
+
+            return list
+                .GroupBy(lr => !string.IsNullOrEmpty(lr.FirebaseLeaveId)
+                    ? lr.FirebaseLeaveId
+                    : lr.LeaveRequestID > 0
+                        ? lr.LeaveRequestID.ToString()
+                        : $"{lr.EmployeeID}_{lr.LeaveDate:yyyyMMdd}_{lr.LeaveType}")
+                .Select(g => g.First())
+                .ToList();
         }
 
         // --- 2. SAVE NEW REQUEST (Admin Entry) ---
@@ -88,10 +102,14 @@ namespace Payroll.Web.Services
 
             // Admin entry is auto-approved, exactly as in the existing flow.
             newRequest.IsApproved = true;
+            newRequest.Status = "Approved";
             newRequest.LeaveDate = requestedDate.Value;
 
             dbContext.LeaveRequests.Add(newRequest);
             await dbContext.SaveChangesAsync();
+
+            var emp = await dbContext.Employees.FindAsync(newRequest.EmployeeID);
+            await _firebaseCalendar.UpsertLeaveAsync(newRequest, emp?.Name);
 
             // IMPORTANT: Keep DailySummary synchronized immediately.
             // This makes an approved admin leave appear in Attendance Log Summary
@@ -124,7 +142,7 @@ namespace Payroll.Web.Services
         }
 
         // --- 3. UPDATE STATUS (Approve/Revoke) ---
-        public async Task UpdateLeaveStatusAsync(int requestId, bool approved)
+        public async Task UpdateLeaveStatusAsync(int requestId, bool approved, string? explicitStatus = null)
         {
             await using var dbContext = await _dbFactory.CreateDbContextAsync();
             var dbReq = await dbContext.LeaveRequests.FindAsync(requestId);
@@ -146,7 +164,13 @@ namespace Payroll.Web.Services
             }
 
             dbReq.IsApproved = approved;
+            dbReq.Status = !string.IsNullOrWhiteSpace(explicitStatus)
+                ? explicitStatus
+                : (approved ? "Approved" : "Pending");
+
             await dbContext.SaveChangesAsync();
+
+            await _firebaseCalendar.UpsertLeaveAsync(dbReq, emp?.Name);
 
             // IMPORTANT: Recalculate the affected attendance day immediately.
             // Approval -> Leave status in DailySummary.
@@ -206,17 +230,22 @@ namespace Payroll.Web.Services
             var affectedDate = req.LeaveDate?.Date;
             var employeeId = req.EmployeeID;
 
+            var firebaseLeaveId = req.FirebaseLeaveId;
+
             var reqCopy = new LeaveRequest
             {
                 EmployeeID = req.EmployeeID,
                 LeaveDate = req.LeaveDate,
                 LeaveType = req.LeaveType,
                 IsHalfDay = req.IsHalfDay,
-                IsApproved = req.IsApproved
+                IsApproved = req.IsApproved,
+                FirebaseLeaveId = req.FirebaseLeaveId
             };
 
             dbContext.LeaveRequests.Remove(req);
             await dbContext.SaveChangesAsync();
+
+            await _firebaseCalendar.DeleteLeaveAsync(requestId, firebaseLeaveId);
 
             // Recalculate after deletion so DailySummary does not keep stale leave status.
             if (affectedDate.HasValue)
@@ -368,6 +397,8 @@ namespace Payroll.Web.Services
             summary.IsManualOverride = false;
 
             await dbContext.SaveChangesAsync();
+
+            await _firebaseCalendar.UpsertDailySummaryAsync(summary);
 
             _logger.LogInformation(
                 "DailySummary synchronized for EmpID {EmployeeId} on {Date}. Status={Status}, Leave={LeaveType}",

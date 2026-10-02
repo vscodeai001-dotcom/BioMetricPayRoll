@@ -1,4 +1,5 @@
 @page "/settings/company"
+@page "/company-setup"
 @using Microsoft.AspNetCore.Authorization
 @using global::Payroll.Web.Components.Pages.Settings
 @using global::Payroll.Shared.Data
@@ -11,57 +12,91 @@
 @inject AuthenticationStateProvider AuthState
 @inject Payroll.Web.Services.AttendanceRefreshService AttendanceRefresh
 @inject Payroll.Web.Services.GeoLocationService GeoService
+@inject Payroll.Web.Services.FirebaseRealtimeService FirebaseRealtime
+@inject Payroll.Web.Services.ITenantContextService TenantContext
+@inject Payroll.Web.Services.TenantManagementService TenantManager
+@inject NavigationManager Navigation
 @attribute [Authorize(Roles = "Admin, SuperAdmin")]
 
 <PageTitle>Company Settings</PageTitle>
 
-<div class="d-flex justify-content-between align-items-center mb-2">
-    <h3 class="mb-0">Company Settings</h3>
-    <button class="btn btn-primary" @onclick="SaveSettings" disabled="@isSaving">
-        @if (isSaving)
-        {
-            <span class="spinner-border spinner-border-sm"></span>
-        
-            <span> Saving...</span>
-        }
-        else
-        {
-            <span class="bi bi-save"></span>
-        
-            <span> Save Settings</span>
-        }
-    </button>
+<div class="page-header-container mb-4">
+    <div class="d-flex align-items-center gap-3">
+        <div class="emoji-icon-badge emoji-icon-badge-primary">
+            🏢
+        </div>
+        <div>
+            <h2 class="page-header-title">
+                Company & Organization Settings
+            </h2>
+            <p class="page-header-subtitle">
+                <span>⚙️ Configure enterprise business rules, work shifts, statutory taxes, and notifications</span>
+            </p>
+        </div>
+    </div>
+
+    <div class="d-flex align-items-center gap-2">
+        <button class="action-pill-btn action-pill-btn-primary" @onclick="SaveSettings" disabled="@isSaving">
+            @if (isSaving)
+            {
+                <span class="spinner-border spinner-border-sm me-2"></span>
+                <span>Saving Policies...</span>
+            }
+            else
+            {
+                <span>💾 Save Company Settings</span>
+            }
+        </button>
+    </div>
 </div>
 
 @if (settings == null)
 {
-    <p><em>Loading settings...</em></p>
+    <div class="text-center p-5">
+        <div class="spinner-border text-primary" role="status"></div>
+        <p class="mt-3 text-muted fw-semibold">Loading settings profile... 🏢</p>
+    </div>
 }
 else
 {
-    <ul class="nav nav-tabs mb-3">
+    <ul class="nav nav-pills mb-3 gap-2">
         <li class="nav-item">
-            <button class="nav-link @(activeTab == "general" ? "active" : "")" @onclick="@(() => activeTab = "general")"><i class="bi bi-building"></i> General & Rules</button>
+            <button class="nav-link rounded-pill @(activeTab == "general" ? "active" : "")" @onclick="@(() => activeTab = "general")">
+                <span>🏢 General & Rules</span>
+            </button>
         </li>
+
+        @if (isSuperAdmin || !string.IsNullOrWhiteSpace(adminEmail))
+        {
+            <li class="nav-item">
+                <button class="nav-link rounded-pill @(activeTab == "admin" ? "active" : "")" @onclick="@(() => activeTab = "admin")">
+                    <span>👑 Admin Credentials</span>
+                </button>
+            </li>
+        }
 
         @if (isSuperAdmin || features?.EnableStatutoryCompliance == true || features?.EnableProfessionalTax == true)
         {
             <li class="nav-item">
-                <button class="nav-link @(activeTab == "statutory" ? "active" : "")" @onclick="@(() => activeTab = "statutory")"><i class="bi bi-bank"></i> Statutory (Tax)</button>
+                <button class="nav-link rounded-pill @(activeTab == "statutory" ? "active" : "")" @onclick="@(() => activeTab = "statutory")">
+                    <span>🏛️ Statutory (Tax)</span>
+                </button>
             </li>
         }
 
         @if (isSuperAdmin || features?.EnableEmailNotifications == true)
         {
             <li class="nav-item">
-                <button class="nav-link @(activeTab == "email" ? "active" : "")" @onclick="@(() => activeTab = "email")"><i class="bi bi-envelope"></i> Email Config</button>
+                <button class="nav-link rounded-pill @(activeTab == "email" ? "active" : "")" @onclick="@(() => activeTab = "email")">
+                    <span>📧 Email Config</span>
+                </button>
             </li>
         }
         @if (isSuperAdmin || features?.EnableLeaveManagement == true)
         {
             <li class="nav-item">
-                <button class="nav-link @(activeTab == "leave" ? "active" : "")" @onclick="@(() => activeTab = "leave")">
-                    <i class="bi bi-calendar-check"></i> Leave Rules
+                <button class="nav-link rounded-pill @(activeTab == "leave" ? "active" : "")" @onclick="@(() => activeTab = "leave")">
+                    <span>🏖️ Leave Rules</span>
                 </button>
             </li>
         }
@@ -71,7 +106,79 @@ else
         <div class="card-body p-3">
 
             <div class="@(activeTab == "general" ? "" : "d-none")">
-                <GeneralTab Settings="settings" />
+                <GeneralTab Settings="settings ?? new()" TrackingIntervalSeconds="trackingIntervalSeconds" TrackingIntervalSecondsChanged="OnTrackingIntervalChanged" />
+            </div>
+
+            <div class="@(activeTab == "admin" ? "" : "d-none")">
+                <div class="row g-4">
+                    <div class="col-lg-6">
+                        <div class="card border rounded-4 shadow-sm h-100">
+                            <div class="card-header bg-transparent border-bottom py-3 px-4 d-flex align-items-center justify-content-between">
+                                <div class="d-flex align-items-center gap-2">
+                                    <span class="fs-5">👤</span>
+                                    <h6 class="mb-0 fw-bold text-primary">Administrator Profile</h6>
+                                </div>
+                                <span class="badge bg-primary-subtle text-primary border border-primary-subtle px-2 py-1 rounded-pill small">Account</span>
+                            </div>
+                            <div class="card-body p-4 d-flex flex-column gap-3">
+                                <div>
+                                    <label class="form-label small fw-bold text-secondary">
+                                        <i class="bi bi-envelope-at me-1 text-primary"></i> Admin Email Address <span class="text-danger">*</span>
+                                    </label>
+                                    <input type="email" class="form-control rounded-3" placeholder="admin@company.com" @bind="adminEmail" />
+                                    <div class="form-text small text-muted">Primary sign-in email for company management.</div>
+                                </div>
+                                <div>
+                                    <label class="form-label small fw-bold text-secondary">
+                                        <i class="bi bi-person me-1 text-primary"></i> Admin Full Name
+                                    </label>
+                                    <input type="text" class="form-control rounded-3" placeholder="e.g. Administrator" @bind="adminName" />
+                                </div>
+                                <div>
+                                    <label class="form-label small fw-bold text-secondary">
+                                        <i class="bi bi-telephone me-1 text-primary"></i> Admin Contact Phone
+                                    </label>
+                                    <input type="tel" class="form-control rounded-3" placeholder="+91 98765 43210" @bind="adminPhone" />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-lg-6">
+                        <div class="card border rounded-4 shadow-sm h-100">
+                            <div class="card-header bg-transparent border-bottom py-3 px-4 d-flex align-items-center justify-content-between">
+                                <div class="d-flex align-items-center gap-2">
+                                    <span class="fs-5">🔐</span>
+                                    <h6 class="mb-0 fw-bold text-warning">Security &amp; Password</h6>
+                                </div>
+                                <span class="badge bg-warning-subtle text-warning border border-warning-subtle px-2 py-1 rounded-pill small">Credentials</span>
+                            </div>
+                            <div class="card-body p-4 d-flex flex-column gap-3">
+                                <div>
+                                    <label class="form-label small fw-bold text-secondary">
+                                        <i class="bi bi-key me-1 text-warning"></i> New Password
+                                    </label>
+                                    <input type="password" class="form-control rounded-3" placeholder="•••••••• (Leave blank to keep existing)" @bind="adminPassword" />
+                                    <div class="form-text small text-muted">Minimum 6 characters if updating.</div>
+                                </div>
+                                <div>
+                                    <label class="form-label small fw-bold text-secondary">
+                                        <i class="bi bi-check2-circle me-1 text-warning"></i> Confirm New Password
+                                    </label>
+                                    <input type="password" class="form-control rounded-3" placeholder="••••••••" @bind="adminPasswordConfirm" />
+                                </div>
+                                <div class="p-3 bg-body-tertiary rounded-3 border mt-auto">
+                                    <div class="d-flex align-items-center gap-2 text-muted small">
+                                        <i class="bi bi-shield-lock-fill text-primary fs-5"></i>
+                                        <div>
+                                            <strong>Security Notice:</strong> The Admin account has root authority to manage staff rosters, run payroll formulas, and adjust attendance policies.
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <div class="@(activeTab == "statutory" ? "" : "d-none")">
@@ -86,6 +193,99 @@ else
                 <LeaveSettingsTab Settings="settings" Features="features" IsSuperAdmin="isSuperAdmin" />
             </div>
 
+        </div>
+    </div>
+
+    @if (isAuthorizedDeleteSuperAdmin)
+    {
+        <div class="card border border-danger shadow-sm mt-4 rounded-4 overflow-hidden">
+            <div class="card-header bg-danger text-white py-3 px-4 d-flex align-items-center justify-content-between">
+                <div class="d-flex align-items-center gap-2">
+                    <i class="bi bi-exclamation-triangle-fill fs-5"></i>
+                    <h5 class="mb-0 fw-bold">Danger Zone: Permanent Company Deletion</h5>
+                </div>
+                <span class="badge bg-white text-danger fw-bold px-3 py-2 rounded-pill">
+                    SuperAdmin Only (@TenantManagementService.AuthorizedSuperAdminDeleteEmail)
+                </span>
+            </div>
+            <div class="card-body p-4 bg-danger-subtle bg-opacity-25">
+                <div class="row align-items-center">
+                    <div class="col-lg-8">
+                        <h6 class="fw-bold text-danger mb-1">
+                            Delete Entire Company &amp; All Associated Data
+                        </h6>
+                        <p class="small text-danger mb-0">
+                            Permanently delete <strong>@(activeTenant?.CompanyName ?? settings?.CompanyName ?? "this company")</strong> from BOTH Local SQLite Database and Firebase Cloud. All employee rosters, attendance history, GPS breadcrumbs, and payroll data will be erased.
+                        </p>
+                        <p class="small text-muted mb-0 mt-1">
+                            Only your SuperAdmin login (<code>@TenantManagementService.AuthorizedSuperAdminDeleteEmail</code>) will be preserved.
+                        </p>
+                    </div>
+                    <div class="col-lg-4 text-lg-end mt-3 mt-lg-0">
+                        <button class="btn btn-danger fw-bold rounded-pill px-4 py-2 shadow-sm" @onclick="OpenDeleteCompanyModal">
+                            <i class="bi bi-trash3-fill me-1"></i> Delete Entire Company
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+}
+
+@if (showDeleteCompanyModal)
+{
+    <div class="modal fade show d-block" tabindex="-1" style="background-color: rgba(0,0,0,0.65); z-index: 1060;" role="dialog">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content border-0 shadow-lg rounded-4 overflow-hidden">
+                <div class="modal-header bg-danger text-white px-4 py-3">
+                    <h5 class="modal-title fw-bold d-flex align-items-center gap-2">
+                        <i class="bi bi-shield-slash-fill"></i> Confirm Permanent Deletion
+                    </h5>
+                    <button type="button" class="btn-close btn-close-white" @onclick="CloseDeleteCompanyModal" disabled="@isDeletingCompany"></button>
+                </div>
+                <div class="modal-body p-4">
+                    <div class="alert alert-danger d-flex align-items-start gap-2 mb-3 rounded-3">
+                        <i class="bi bi-exclamation-octagon-fill fs-5 mt-1 flex-shrink-0"></i>
+                        <div>
+                            <strong>CRITICAL WARNING:</strong> You are about to permanently delete <strong>@(activeTenant?.CompanyName ?? settings?.CompanyName ?? "Company")</strong>.
+                            <ul class="mb-0 mt-2 ps-3 small">
+                                <li>All staff profiles and employee accounts will be deleted.</li>
+                                <li>All punches, GPS tracking history, and daily attendance logs will be erased.</li>
+                                <li>All payroll runs, advances, and bonuses will be erased.</li>
+                                <li>Cloud records in Firebase Realtime Database will be erased.</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <p class="small text-secondary mb-2">
+                        To verify this action, please type <strong>DELETE</strong> in the box below:
+                    </p>
+                    <input type="text" class="form-control rounded-3 mb-3 fw-bold" placeholder="Type DELETE to confirm" @bind="deleteConfirmText" @bind:event="oninput" disabled="@isDeletingCompany" />
+
+                    @if (!string.IsNullOrWhiteSpace(deleteErrorMessage))
+                    {
+                        <div class="alert alert-warning py-2 px-3 small rounded-3 mb-0">
+                            @deleteErrorMessage
+                        </div>
+                    }
+                </div>
+                <div class="modal-footer bg-light px-4 py-3">
+                    <button type="button" class="btn btn-secondary rounded-pill px-4" @onclick="CloseDeleteCompanyModal" disabled="@isDeletingCompany">
+                        Cancel
+                    </button>
+                    <button type="button" class="btn btn-danger rounded-pill px-4 fw-bold" @onclick="ExecuteDeleteCompanyAsync" disabled="@(isDeletingCompany || deleteConfirmText?.Trim().ToUpperInvariant() != "DELETE")">
+                        @if (isDeletingCompany)
+                        {
+                            <span class="spinner-border spinner-border-sm me-2"></span>
+                            <span>Deleting Company...</span>
+                        }
+                        else
+                        {
+                            <span>Permanently Delete</span>
+                        }
+                    </button>
+                </div>
+            </div>
         </div>
     </div>
 }
@@ -123,7 +323,9 @@ else
     }
 </style>
 
-<AttendanceRefreshListener OnAttendanceChanged="HandleRealtimeRefresh" />
+<AttendanceRefreshListener OnAttendanceChanged="HandleRealtimeRefresh"
+                           OnGeoSettingsChanged="HandleRealtimeRefresh"
+                           OnApplicationDataChanged="HandleRealtimeRefresh" />
 
 @code {
     private CompanySetting? settings;
@@ -131,17 +333,52 @@ else
     private bool isSaving = false;
     private bool isSuperAdmin = false;
     private string activeTab = "general";
+    private int trackingIntervalSeconds = 30;
+    private string? firebaseOwnerUid;
+
+    private CompanyTenant? activeTenant;
+
+    // Administrator Credentials
+    private string adminEmail = "";
+    private string adminName = "";
+    private string adminPassword = "";
+    private string adminPasswordConfirm = "";
+    private string adminPhone = "";
+
+    // Delete Company Security
+    private bool isAuthorizedDeleteSuperAdmin = false;
+    private string currentUserEmail = "";
+    private bool showDeleteCompanyModal = false;
+    private bool isDeletingCompany = false;
+    private string deleteConfirmText = "";
+    private string? deleteErrorMessage;
 
     protected override async Task OnInitializedAsync()
     {
         var authState = await AuthState.GetAuthenticationStateAsync();
-        isSuperAdmin = authState.User.IsInRole("SuperAdmin");
+        var user = authState.User;
+        isSuperAdmin = user.IsInRole("SuperAdmin");
+        currentUserEmail = user.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value ?? user.Identity?.Name ?? "";
+        isAuthorizedDeleteSuperAdmin = isSuperAdmin && (
+            string.Equals(currentUserEmail.Trim(), TenantManagementService.AuthorizedSuperAdminDeleteEmail, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(currentUserEmail.Trim(), FirebaseAuthSecurityConstants.CanonicalSuperAdminEmail, StringComparison.OrdinalIgnoreCase));
 
         try
         {
+            activeTenant = await TenantContext.GetActiveTenantAsync();
+            if (activeTenant != null)
+            {
+                adminEmail = activeTenant.AdminEmail;
+                adminName = activeTenant.AdminName;
+                adminPhone = activeTenant.AdminPhone ?? "";
+            }
+
+            var targetSettingId = activeTenant?.CompanySettingId > 0 ? activeTenant.CompanySettingId : 1;
+            var targetFeatureId = activeTenant?.FeatureSettingsId > 0 ? activeTenant.FeatureSettingsId : 1;
+
             await using var dbContext = await DbFactory.CreateDbContextAsync();
-            settings = await dbContext.CompanySettings.AsNoTracking().FirstOrDefaultAsync(s => s.SettingID == 1);
-            features = await dbContext.FeatureSettings.AsNoTracking().FirstOrDefaultAsync(f => f.Id == 1) ?? new FeatureSettings();
+            settings = await dbContext.CompanySettings.AsNoTracking().FirstOrDefaultAsync(s => s.SettingID == targetSettingId);
+            features = await dbContext.FeatureSettings.AsNoTracking().FirstOrDefaultAsync(f => f.Id == targetFeatureId) ?? new FeatureSettings();
         }
         catch (Exception ex)
         {
@@ -149,6 +386,136 @@ else
             toastService.ShowError($"Error loading settings: {ex.Message}");
         }
         if (settings == null) settings = new CompanySetting();
+
+        firebaseOwnerUid = activeTenant?.TenantId ?? FirebaseRealtime.ResolveOwnerUid(
+            authState.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "web-admin",
+            isSuperAdmin ? "SuperAdmin" : "Admin");
+        await LoadTrackingIntervalAsync();
+
+        // Dual SSOT Hydration: Local SQLite already loaded instantaneously (0ms).
+        // Concurrently query Firebase cloud SSOT so that any edits made from Mobile
+        // while Web was closed immediately update SQLite and reactive UI without reload.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var effectiveOwnerUid = firebaseOwnerUid ?? "biometricpayroll";
+                var fbRecord = await FirebaseRealtime.GetOwnerRecordAsync(effectiveOwnerUid, "company_settings", "1");
+                if (fbRecord.HasValue && fbRecord.Value.ValueKind == System.Text.Json.JsonValueKind.Object)
+                {
+                    var val = fbRecord.Value;
+                    var rad = ReadInt(val, "geoRadiusMeters") ?? ReadInt(val, "GeoRadiusMeters") ?? ReadInt(val, "radius") ?? ReadInt(val, "Radius") ?? 0;
+                    var lat = ReadDouble(val, "officeLatitude") ?? ReadDouble(val, "OfficeLatitude") ?? ReadDouble(val, "latitude") ?? ReadDouble(val, "Latitude") ?? 0;
+                    var lon = ReadDouble(val, "officeLongitude") ?? ReadDouble(val, "OfficeLongitude") ?? ReadDouble(val, "longitude") ?? ReadDouble(val, "Longitude") ?? 0;
+                    var speed = ReadBool(val, "useSpeedBasedMarkers") ?? ReadBool(val, "use_speed_based_markers") ?? false;
+                    var compName = ReadString(val, "companyName") ?? ReadString(val, "CompanyName");
+                    var addr = ReadString(val, "addressLine1") ?? ReadString(val, "AddressLine1");
+                    var city = ReadString(val, "cityStatePincode") ?? ReadString(val, "CityStatePincode");
+
+                    bool changed = false;
+                    if (settings != null)
+                    {
+                        if (rad > 0 && settings.GeoRadiusMeters != rad) { settings.GeoRadiusMeters = rad; changed = true; }
+                        if (lat != 0 && settings.OfficeLatitude != lat) { settings.OfficeLatitude = lat; changed = true; }
+                        if (lon != 0 && settings.OfficeLongitude != lon) { settings.OfficeLongitude = lon; changed = true; }
+                        if (settings.UseSpeedBasedMarkers != speed) { settings.UseSpeedBasedMarkers = speed; changed = true; }
+                        if (!string.IsNullOrWhiteSpace(compName) && settings.CompanyName != compName.Trim()) { settings.CompanyName = compName.Trim(); changed = true; }
+                        if (addr != null && settings.AddressLine1 != addr) { settings.AddressLine1 = addr; changed = true; }
+                        if (city != null && settings.CityStatePincode != city) { settings.CityStatePincode = city; changed = true; }
+                    }
+
+                    if (changed)
+                    {
+                        await using var db = await DbFactory.CreateDbContextAsync();
+                        var targetSettingId = activeTenant?.CompanySettingId > 0 ? activeTenant.CompanySettingId : 1;
+                        var existing = await db.CompanySettings.FirstOrDefaultAsync(s => s.SettingID == targetSettingId);
+                        if (existing != null)
+                        {
+                            if (rad > 0) existing.GeoRadiusMeters = rad;
+                            if (lat != 0) existing.OfficeLatitude = lat;
+                            if (lon != 0) existing.OfficeLongitude = lon;
+                            existing.UseSpeedBasedMarkers = speed;
+                            if (!string.IsNullOrWhiteSpace(compName)) existing.CompanyName = compName.Trim();
+                            if (addr != null) existing.AddressLine1 = addr;
+                            if (city != null) existing.CityStatePincode = city;
+                            await db.SaveChangesAsync();
+                        }
+
+                        if (settings != null)
+                        {
+                            await AttendanceRefresh.NotifyGeoSettingsChangedAsync(
+                                settings.OfficeLatitude,
+                                settings.OfficeLongitude,
+                                settings.GeoRadiusMeters,
+                                settings.UseSpeedBasedMarkers);
+                        }
+
+                        await InvokeAsync(StateHasChanged);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Background Firebase hydration for CompanySettings failed.");
+            }
+        });
+    }
+
+    private void OpenDeleteCompanyModal()
+    {
+        deleteConfirmText = "";
+        deleteErrorMessage = null;
+        showDeleteCompanyModal = true;
+    }
+
+    private void CloseDeleteCompanyModal()
+    {
+        if (isDeletingCompany) return;
+        showDeleteCompanyModal = false;
+    }
+
+    private async Task ExecuteDeleteCompanyAsync()
+    {
+        if (deleteConfirmText?.Trim().ToUpperInvariant() != "DELETE")
+        {
+            deleteErrorMessage = "Please type DELETE in capital letters to confirm.";
+            return;
+        }
+
+        isDeletingCompany = true;
+        deleteErrorMessage = null;
+        try
+        {
+            var targetTenantId = activeTenant?.TenantId ?? TenantContextService.DefaultTenantId;
+            var result = await TenantManager.DeleteEntireCompanyAsync(targetTenantId, currentUserEmail);
+            if (!result.Success)
+            {
+                deleteErrorMessage = result.ErrorMessage ?? "Failed to delete company.";
+                return;
+            }
+
+            try
+            {
+                await JSRuntime.InvokeVoidAsync("attendanceCache.clear");
+                await JSRuntime.InvokeVoidAsync("employeeCache.clear");
+            }
+            catch { }
+
+            await TenantContext.ClearActiveTenantAsync();
+
+            toastService.ShowSuccess("✨ Company has been permanently deleted from Cloud and Local Database.");
+            showDeleteCompanyModal = false;
+            Navigation.NavigateTo("/company-setup", forceLoad: true);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error deleting company");
+            deleteErrorMessage = $"Deletion failed: {ex.Message}";
+        }
+        finally
+        {
+            isDeletingCompany = false;
+        }
     }
 
     private async Task SaveSettings()
@@ -157,9 +524,12 @@ else
         isSaving = true;
         try
         {
+            activeTenant ??= await TenantContext.GetActiveTenantAsync();
+            var targetSettingId = activeTenant?.CompanySettingId > 0 ? activeTenant.CompanySettingId : 1;
+
             await using var dbContext = await DbFactory.CreateDbContextAsync();
-            settings.SettingID = 1;
-            var existing = await dbContext.CompanySettings.AsNoTracking().FirstOrDefaultAsync(s => s.SettingID == 1);
+            settings.SettingID = targetSettingId;
+            var existing = await dbContext.CompanySettings.AsNoTracking().FirstOrDefaultAsync(s => s.SettingID == targetSettingId);
             if (existing == null) dbContext.CompanySettings.Add(settings);
             else { dbContext.Entry(existing).State = EntityState.Detached; dbContext.CompanySettings.Update(settings); }
             await dbContext.SaveChangesAsync();
@@ -173,28 +543,208 @@ else
             await AttendanceRefresh.NotifyGeoSettingsChangedAsync(
                 settings.OfficeLatitude,
                 settings.OfficeLongitude,
-                settings.GeoRadiusMeters);
+                settings.GeoRadiusMeters,
+                settings.UseSpeedBasedMarkers);
 
-            toastService.ShowSuccess("Settings saved!");
+            try
+            {
+                await JSRuntime.InvokeVoidAsync(
+                    "broadcastGeoSettingsChanged",
+                    new
+                    {
+                        OfficeLatitude = settings.OfficeLatitude,
+                        OfficeLongitude = settings.OfficeLongitude,
+                        GeoRadiusMeters = settings.GeoRadiusMeters,
+                        UseSpeedBasedMarkers = settings.UseSpeedBasedMarkers
+                    });
+            }
+            catch { }
+
+            await SaveTrackingIntervalAsync();
+
+            // Mirror company settings to Firebase under tenant's owner node
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(firebaseOwnerUid))
+                {
+                    var companyPayload = new Dictionary<string, object?>
+                    {
+                        ["companyName"] = settings.CompanyName,
+                        ["addressLine1"] = settings.AddressLine1,
+                        ["cityStatePincode"] = settings.CityStatePincode,
+                        ["officeLatitude"] = settings.OfficeLatitude,
+                        ["officeLongitude"] = settings.OfficeLongitude,
+                        ["geoRadiusMeters"] = settings.GeoRadiusMeters,
+                        ["workDayCutoffHour"] = settings.WorkDayCutoffHour,
+                        ["lateGraceMinutes"] = settings.LateGraceMinutes,
+                        ["endTimeGraceMinutes"] = settings.EndTimeGraceMinutes,
+                        ["autoBackupIntervalHours"] = settings.AutoBackupIntervalHours,
+                        ["stayDwellMinutes"] = settings.StayDwellMinutes,
+                        ["stayClusterRadiusMeters"] = settings.StayClusterRadiusMeters,
+                        ["useSpeedBasedMarkers"] = settings.UseSpeedBasedMarkers,
+                        ["use_speed_based_markers"] = settings.UseSpeedBasedMarkers,
+                        ["enableEmailNotifications"] = settings.EnableEmailNotifications,
+                        ["smtpHost"] = settings.SmtpHost,
+                        ["smtpPort"] = settings.SmtpPort,
+                        ["smtpFromEmail"] = settings.SmtpFromEmail,
+                        ["smtpUser"] = settings.SmtpUser,
+                        ["smtpPass"] = settings.SmtpPass,
+                        ["pageTransitionEffect"] = settings.PageTransitionEffect
+                    await FirebaseRealtime.SetAsync($"owners/{firebaseOwnerUid}/company_settings/1", companyPayload, default);
+                    await FirebaseRealtime.PublishOwnerApplicationEventAsync(firebaseOwnerUid, "CompanySetting", "MODIFIED", "1", default);
+                }
+
+                if (activeTenant != null && !string.Equals(activeTenant.CompanyName, settings.CompanyName))
+                {
+                    var tenantRow = await dbContext.CompanyTenants.FirstOrDefaultAsync(t => t.Id == activeTenant.Id);
+                    if (tenantRow != null)
+                    {
+                        tenantRow.CompanyName = settings.CompanyName.Trim();
+                        await dbContext.SaveChangesAsync();
+                        activeTenant.CompanyName = settings.CompanyName.Trim();
+                    }
+                }
+            }
+            catch (Exception fbEx)
+            {
+                _logger.LogWarning(fbEx, "Could not mirror company settings to Firebase for {OwnerUid}", firebaseOwnerUid);
+            }
+
+            // Update Administrator Credentials if provided
+            if (!string.IsNullOrWhiteSpace(adminEmail) && activeTenant != null)
+            {
+                if (!string.IsNullOrWhiteSpace(adminPassword) && adminPassword != adminPasswordConfirm)
+                {
+                    toastService.ShowError("Admin passwords do not match.");
+                    return;
+                }
+
+                activeTenant.AdminName = adminName;
+                activeTenant.AdminPhone = adminPhone;
+                var credsResult = await TenantManager.UpdateTenantProfileAndCredentialsAsync(
+                    activeTenant,
+                    adminEmail,
+                    string.IsNullOrWhiteSpace(adminPassword) ? null : adminPassword);
+                if (!credsResult.Success)
+                {
+                    toastService.ShowWarning($"Settings saved, but admin update: {credsResult.ErrorMessage}");
+                }
+            }
+
+            toastService.ShowSuccess("Settings saved successfully!");
         }
         catch (Exception ex) { _logger.LogError(ex, "Error saving."); toastService.ShowError("Save failed."); }
         finally { isSaving = false; }
     }
+    private async Task LoadTrackingIntervalAsync()
+    {
+        if (string.IsNullOrWhiteSpace(firebaseOwnerUid)) return;
+        try
+        {
+            var data = await FirebaseRealtime.GetGlobalRecordAsync(
+                $"owners/{firebaseOwnerUid}/tracking_configuration",
+                CancellationToken.None);
+            trackingIntervalSeconds = ReadIntervalSeconds(data);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Unable to load Firebase tracking interval; keeping {Interval}s", trackingIntervalSeconds);
+        }
+    }
+
+    private async Task SaveTrackingIntervalAsync()
+    {
+        if (string.IsNullOrWhiteSpace(firebaseOwnerUid)) return;
+        trackingIntervalSeconds = NormalizeTrackingInterval(trackingIntervalSeconds);
+        var existing = await FirebaseRealtime.GetGlobalRecordAsync(
+            $"owners/{firebaseOwnerUid}/tracking_configuration",
+            CancellationToken.None);
+        await FirebaseRealtime.SetGlobalRecordAsync(
+            $"owners/{firebaseOwnerUid}/tracking_configuration",
+            new Dictionary<string, object?>
+            {
+                ["mode"] = ReadString(existing, "mode") ?? "24/7",
+                ["customStart"] = ReadString(existing, "customStart") ?? string.Empty,
+                ["customEnd"] = ReadString(existing, "customEnd") ?? string.Empty,
+                ["intervalSeconds"] = trackingIntervalSeconds,
+                ["enabled"] = ReadBool(existing, "enabled") ?? true,
+                ["updatedAt"] = DateTime.UtcNow.ToString("O"),
+                ["updatedBy"] = firebaseOwnerUid
+            });
+    }
+
+    private async Task OnTrackingIntervalChanged(int seconds)
+    {
+        trackingIntervalSeconds = NormalizeTrackingInterval(seconds);
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private static int NormalizeTrackingInterval(int value) =>
+        value switch { 30 or 60 or 120 or 300 => value, _ => 30 };
+
+    private static int ReadIntervalSeconds(System.Text.Json.JsonElement? data)
+    {
+        if (!data.HasValue || data.Value.ValueKind != System.Text.Json.JsonValueKind.Object) return 30;
+        if (data.Value.TryGetProperty("intervalSeconds", out var p))
+        {
+            if (p.ValueKind == System.Text.Json.JsonValueKind.Number && p.TryGetInt32(out var n)) return NormalizeTrackingInterval(n);
+            if (p.ValueKind == System.Text.Json.JsonValueKind.String && int.TryParse(p.GetString(), out n)) return NormalizeTrackingInterval(n);
+        }
+        return 30;
+    }
+
+    private static int? ReadInt(System.Text.Json.JsonElement? data, string name)
+    {
+        if (!data.HasValue || data.Value.ValueKind != System.Text.Json.JsonValueKind.Object) return null;
+        if (data.Value.TryGetProperty(name, out var p))
+        {
+            if (p.ValueKind == System.Text.Json.JsonValueKind.Number && p.TryGetInt32(out var n)) return n;
+            if (p.ValueKind == System.Text.Json.JsonValueKind.String && int.TryParse(p.GetString(), out n)) return n;
+        }
+        return null;
+    }
+
+    private static double? ReadDouble(System.Text.Json.JsonElement? data, string name)
+    {
+        if (!data.HasValue || data.Value.ValueKind != System.Text.Json.JsonValueKind.Object) return null;
+        if (data.Value.TryGetProperty(name, out var p))
+        {
+            if (p.ValueKind == System.Text.Json.JsonValueKind.Number && p.TryGetDouble(out var d)) return d;
+            if (p.ValueKind == System.Text.Json.JsonValueKind.String && double.TryParse(p.GetString(), System.Globalization.CultureInfo.InvariantCulture, out d)) return d;
+        }
+        return null;
+    }
+
+    private static string? ReadString(System.Text.Json.JsonElement? data, string name) =>
+        data.HasValue && data.Value.ValueKind == System.Text.Json.JsonValueKind.Object &&
+        data.Value.TryGetProperty(name, out var p) && p.ValueKind == System.Text.Json.JsonValueKind.String
+            ? p.GetString() : null;
+
+    private static bool? ReadBool(System.Text.Json.JsonElement? data, string name) =>
+        data.HasValue && data.Value.ValueKind == System.Text.Json.JsonValueKind.Object &&
+        data.Value.TryGetProperty(name, out var p)
+            ? p.ValueKind == System.Text.Json.JsonValueKind.True ? true : p.ValueKind == System.Text.Json.JsonValueKind.False ? false : (p.ValueKind == System.Text.Json.JsonValueKind.String && bool.TryParse(p.GetString(), out var b) ? b : null)
+            : null;
+
     private async Task HandleRealtimeRefresh()
     {
         try
         {
-            await using var dbContext = await DbFactory.CreateDbContextAsync();
-            settings = await dbContext.CompanySettings
-                .AsNoTracking()
-                .FirstOrDefaultAsync(s => s.SettingID == 1);
-            features = await dbContext.FeatureSettings
-                .AsNoTracking()
-                .FirstOrDefaultAsync(f => f.Id == 1)
-                ?? new FeatureSettings();
+            var targetSettingId = activeTenant?.CompanySettingId > 0 ? activeTenant.CompanySettingId : 1;
+            var targetFeatureId = activeTenant?.FeatureSettingsId > 0 ? activeTenant.FeatureSettingsId : 1;
 
-            if (settings == null)
-                settings = new CompanySetting();
+            await using var dbContext = await DbFactory.CreateDbContextAsync();
+            var refreshedSettings = await dbContext.CompanySettings
+                .AsNoTracking()
+                .FirstOrDefaultAsync(s => s.SettingID == targetSettingId);
+            var refreshedFeatures = await dbContext.FeatureSettings
+                .AsNoTracking()
+                .FirstOrDefaultAsync(f => f.Id == targetFeatureId);
+
+            if (refreshedSettings != null)
+                settings = refreshedSettings;
+            if (refreshedFeatures != null)
+                features = refreshedFeatures;
 
             await InvokeAsync(StateHasChanged);
         }

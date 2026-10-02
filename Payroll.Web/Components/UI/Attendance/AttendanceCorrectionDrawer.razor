@@ -1,4 +1,4 @@
-﻿@using global::Payroll.Shared.Data
+@using global::Payroll.Shared.Data
 @using global::Payroll.Web.Models
 @using Microsoft.EntityFrameworkCore
 @using global::Payroll.Shared.Services
@@ -6,8 +6,10 @@
 @inject AttendanceLeavePostingService LeaveService
 @inject Payroll.Web.Services.AuditService AuditService
 @inject Payroll.Web.Services.PayrollLockService LockService
+@inject Payroll.Web.Services.FirebaseEmployeeManagementService FirebaseEmployeeManagementService
 @inject AttendanceScheduleService ScheduleService
 @inject IToastService toastService
+@inject AttendanceProcessingCoordinator AttendanceProcessingCoordinator
 
 @if (Show && Record != null)
 {
@@ -88,10 +90,19 @@
         
         try
         {
+            var processingKey =
+                $"{Record.EmployeeID}:{Record.Date:yyyy-MM-dd}";
+
+            // Serialize manual corrections with automatic Firebase/SignalR
+            // attendance processing for this exact employee/date.
+            using var processingLease =
+                await AttendanceProcessingCoordinator.AcquireAsync(processingKey);
+
             await using var dbContext = await DbFactory.CreateDbContextAsync();
 
-            // Fetch necessary external data: Employee, Schedule, Settings
-            var emp = await dbContext.Employees.AsNoTracking().FirstOrDefaultAsync(e => e.EmployeeID == Record.EmployeeID);
+            // Employee profile is read from Firebase SSOT. Schedule, settings and
+            // attendance mutation/calculation remain on their existing SQL boundary.
+            var emp = await FirebaseEmployeeManagementService.GetEmployeeAsync(Record.EmployeeID);
             var scheduleOverride = await dbContext.ShiftSchedules.AsNoTracking().FirstOrDefaultAsync(s => s.EmployeeID == Record.EmployeeID && s.ShiftDate == Record.Date);
             var companySettings = await dbContext.CompanySettings.AsNoTracking().FirstOrDefaultAsync(s => s.SettingID == 1) ?? new CompanySetting();
             
@@ -150,6 +161,12 @@
                 }
 
                 await dbContext.SaveChangesAsync();
+
+                // The summary state has changed, so the previous automatic
+                // punch fingerprint is no longer authoritative for this key.
+                // The next automatic pass will observe the new manual-override
+                // state and protect the summary accordingly.
+                AttendanceProcessingCoordinator.Invalidate(processingKey);
                 
                 // --- AUDIT LOG: CORRECTION ---
                 await AuditService.LogAsync("UPDATE", "DailySummary", summary.SummaryID.ToString(),

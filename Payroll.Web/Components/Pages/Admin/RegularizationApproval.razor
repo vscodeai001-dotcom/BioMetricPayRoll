@@ -5,6 +5,7 @@
 @using global::Payroll.Web.Services
 @inject IDbContextFactory<AppDbContext> DbFactory
 @inject RegularizationService RegularizationService
+@inject FirebaseRegularizationService FirebaseRegularizationService
 @inject IToastService toastService
 @inject IJSRuntime JSRuntime
 @attribute [Authorize(Roles = "Admin, SuperAdmin")]
@@ -90,8 +91,7 @@
 
     private async Task LoadEmployees()
     {
-        await using var db = await DbFactory.CreateDbContextAsync();
-        employees = await db.Employees.AsNoTracking().ToListAsync();
+        employees = await FirebaseRegularizationService.GetActiveEmployeesAsync();
     }
 
     private async Task LoadRequests()
@@ -103,10 +103,12 @@
             var features = await db.FeatureSettings.AsNoTracking().FirstOrDefaultAsync(f => f.Id == 1);
             allowEmployeeResubmissionGlobally = features?.EnablePunchCorrection == true && features.EnableRegularizationRequest;
 
-            pendingRequests = await db.AttendanceRegularizations
-                .Where(r => r.Status == "Pending")
+            // Firebase is the authoritative regularization read path. SQL remains
+            // the compatibility/calculation boundary used by approval injection.
+            pendingRequests = (await FirebaseRegularizationService.GetAsync())
+                .Where(r => string.Equals(r.Status, "Pending", StringComparison.OrdinalIgnoreCase))
                 .OrderBy(r => r.SubmissionDate)
-                .ToListAsync();
+                .ToList();
         }
         finally { isLoading = false; }
     }

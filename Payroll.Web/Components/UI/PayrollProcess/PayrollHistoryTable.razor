@@ -1,4 +1,4 @@
-﻿@using System.Globalization
+@using System.Globalization
 @using global::Payroll.Shared.Data
 @using global::Payroll.Shared.Services
 @using global::Payroll.Web.Models
@@ -15,13 +15,20 @@
     }
     else
     {
-        <div class="mb-3 text-end">
-            <button class="btn btn-outline-success" @onclick="OnExport" disabled="@(IsLoading)">
-                <span class="bi bi-file-earmark-spreadsheet"></span> Export to CSV
-            </button>
-            <button class="btn btn-outline-primary" @onclick="ExportBankFile" disabled="@(IsLoading)">
-                <span class="bi bi-bank me-1"></span> Export Bank File
-            </button>
+        <div class="mb-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <div>
+                <button class="btn btn-outline-danger" @onclick="OnDeleteAll" disabled="@(IsLoading)" title="Delete all saved payroll records for this month and release advances/bonuses">
+                    <span class="bi bi-trash3-fill me-1"></span> Remove All / Reset Saved Payroll
+                </button>
+            </div>
+            <div class="d-flex gap-2">
+                <button class="btn btn-outline-success" @onclick="OnExport" disabled="@(IsLoading)">
+                    <span class="bi bi-file-earmark-spreadsheet"></span> Export to CSV
+                </button>
+                <button class="btn btn-outline-primary" @onclick="ExportBankFile" disabled="@(IsLoading)">
+                    <span class="bi bi-bank me-1"></span> Export Bank File
+                </button>
+            </div>
         </div>
         <div class="table-responsive">
             <table class="table table-striped table-hover table-sm" style="font-size: 0.9em;">
@@ -126,6 +133,7 @@
     [Parameter] public EventCallback OnExport { get; set; }
     [Parameter] public EventCallback<int> OnView { get; set; }
     [Parameter] public EventCallback<global::Payroll.Shared.PayrollHistory> OnDelete { get; set; }
+    [Parameter] public EventCallback OnDeleteAll { get; set; }
 
     private async Task ExportBankFile()
     {

@@ -8,6 +8,10 @@
 @inject GeoLocationService GeoService
 @inject GeoFeatureAccessService GeoAccess
 @inject IHubContext<AttendanceRefreshHub> AttendanceHub
+@inject AuthenticationStateProvider AuthState
+@inject FirebaseRealtimeService FirebaseRealtime
+@inject FirebaseEmployeeManagementService FirebaseEmployees
+@inject NavigationManager Navigation
 
 @*
     Persistent employee GPS tracker.
@@ -39,15 +43,21 @@
     private bool starting;
     private bool trackingEnabled;
     private bool sessionStarted;
+    private bool sessionInvalidatedByOtherDevice;
 
     private DotNetObjectReference<EmployeeGpsTracker>? dotNetReference;
 
     private Guid liveLocationSessionId;
+    private string? firebaseUid;
+    private string? browserDeviceId;
+    private CancellationTokenSource? sessionMonitorCts;
+    private CancellationTokenSource? trackingConfigCts;
 
     private DateTime lastHistorySavedUtc =
         DateTime.MinValue;
 
-    private const int LocationHistoryIntervalSeconds = 10;
+    private int locationHistoryIntervalSeconds = 60;
+    
 
     /*
      * TRACKER FOR CIRCUIT RECONNECT DETECTION
@@ -93,10 +103,33 @@
             trackingEnabled =
                 await GeoAccess.IsEnabledAsync();
 
+            var authState = await AuthState.GetAuthenticationStateAsync();
+            firebaseUid = authState.User.FindFirst("FirebaseUid")?.Value;
+            browserDeviceId = authState.User.FindFirst("BioMetric-Employee-Device")?.Value;
+
+            if (string.IsNullOrWhiteSpace(firebaseUid) && EmployeeId > 0)
+            {
+                var userEmail = authState.User.Identity?.Name ?? authState.User.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value;
+                if (!string.IsNullOrWhiteSpace(userEmail))
+                {
+                    firebaseUid = await FirebaseEmployees.GetFirebaseAuthUidByEmailAsync(userEmail);
+                }
+            }
+
             if (!trackingEnabled)
             {
                 Console.WriteLine(
                     $"Employee GPS disabled. EmployeeId={EmployeeId}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(firebaseUid))
+            {
+                sessionMonitorCts = new CancellationTokenSource();
+                _ = MonitorSessionAsync(sessionMonitorCts.Token);
+
+                trackingConfigCts = new CancellationTokenSource();
+                await LoadTrackingConfigurationAsync();
+                _ = MonitorTrackingConfigurationAsync(trackingConfigCts.Token);
             }
         }
         catch (Exception ex)
@@ -107,6 +140,79 @@
                 $"Employee GPS feature check failed. " +
                 $"EmployeeId={EmployeeId}. Error={ex}");
         }
+    }
+
+    private async Task MonitorSessionAsync(CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(firebaseUid)) return;
+
+        try
+        {
+            await FirebaseRealtime.StreamGlobalChangesAsync(
+                $"employee_sessions/{firebaseUid}",
+                async (path, data, token) =>
+                {
+                    if (disposed || token.IsCancellationRequested) return;
+
+                    if (data == null || data.Value.ValueKind == System.Text.Json.JsonValueKind.Null)
+                    {
+                        // Session was explicitly deleted
+                        await ForceLogoutAsync("Your session was ended by the administrator.");
+                        return;
+                    }
+
+                    string? activeDevice = null;
+                    var normalizedPath = (path ?? "/").Trim('/');
+
+                    if (normalizedPath == "" || normalizedPath == "/")
+                    {
+                        // Full object snapshot
+                        if (data.Value.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                            data.Value.TryGetProperty("deviceId", out var deviceProp))
+                        {
+                            activeDevice = deviceProp.GetString();
+                        }
+                    }
+                    else if (normalizedPath.Equals("deviceId", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Direct property update
+                        if (data.Value.ValueKind == System.Text.Json.JsonValueKind.String)
+                        {
+                            activeDevice = data.Value.GetString();
+                        }
+                    }
+
+                    if (activeDevice != null)
+                    {
+                        // If the active device is not a WEB_BROWSER starting with our ID prefix,
+                        // it means another device (Android or another Web session) logged in.
+                        if (!string.IsNullOrWhiteSpace(browserDeviceId) &&
+                            !activeDevice.StartsWith("WEB_BROWSER_" + browserDeviceId.Substring(0, Math.Min(8, browserDeviceId.Length))))
+                        {
+                            await ForceLogoutAsync("This account is now active on another device.");
+                        }
+                    }
+                },
+                ct);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Employee session monitor failed: {ex.Message}");
+        }
+    }
+
+    private async Task ForceLogoutAsync(string reason)
+    {
+        if (disposed) return;
+        sessionInvalidatedByOtherDevice = true;
+
+        await InvokeAsync(async () => {
+            // SignalR notification for the UI to show a toast
+            await AttendanceHub.Clients.All.SendAsync("SessionInvalidated", EmployeeId, reason);
+
+            // Perform explicit logout redirect
+            Navigation.NavigateTo("/Identity/Account/Logout?force=true", true);
+        });
     }
 
     protected override async Task OnAfterRenderAsync(
@@ -143,7 +249,8 @@
             started ||
             starting ||
             !trackingEnabled ||
-            EmployeeId <= 0)
+            EmployeeId <= 0 ||
+            sessionInvalidatedByOtherDevice)
         {
             return;
         }
@@ -176,77 +283,10 @@
                 return;
             }
 
-            /*
-             * Establish the authoritative database GPS session BEFORE binding
-             * the browser watcher to it. The watcher sends its SessionId on
-             * every HTTP fallback request. Starting the watcher first could
-             * leave it sending an old localStorage SessionId while the server
-             * has already created a replacement session, producing repeated
-             * HTTP 409 responses and preventing the live map from updating.
-             */
-            /*
-             * Try to reuse the existing database session.
-             * 
-             * CIRCUIT RECONNECT SCENARIO:
-             * If we reconnected, the database still has the active session.
-             * We verify it exists and is still valid (not timed out).
-             */
-            sessionStarted =
-                await GeoService.StartGpsSessionAsync(
-                    EmployeeId,
-                    liveLocationSessionId);
-
-            /*
-             * If the stored SessionId already ended/timed out,
-             * create a completely new SessionId.
-             * 
-             * This happens when:
-             * 1. GPS session naturally timed out (2 min no update)
-             * 2. Browser was closed and reopened after timeout
-             * 3. Explicit logout occurred
-             */
-            if (!sessionStarted)
-            {
-                Console.WriteLine(
-                    $"Stored GPS session has ended or timed out. " +
-                    $"Creating a new session. " +
-                    $"EmployeeId={EmployeeId}, " +
-                    $"OldSessionId={liveLocationSessionId}, " +
-                    $"ReconnectAttempt={reconnectAttempts}");
-
-                var newSessionIdText =
-                    await JSRuntime.InvokeAsync<string>(
-                        "createNewEmployeeGpsSessionId",
-                        BrowserSessionStorageKey,
-                        EmployeeId);
-
-                if (!Guid.TryParse(
-                        newSessionIdText,
-                        out liveLocationSessionId) ||
-                    liveLocationSessionId == Guid.Empty)
-                {
-                    Console.Error.WriteLine(
-                        $"Unable to create new GPS session ID. " +
-                        $"EmployeeId={EmployeeId}");
-
-                    return;
-                }
-
-                sessionStarted =
-                    await GeoService.StartGpsSessionAsync(
-                        EmployeeId,
-                        liveLocationSessionId);
-            }
-
-            if (!sessionStarted)
-            {
-                Console.Error.WriteLine(
-                    $"GPS database session could not start. " +
-                    $"EmployeeId={EmployeeId}, " +
-                    $"SessionId={liveLocationSessionId}");
-
-                return;
-            }
+            // Ensure the database GPS session is created/active and bound in Firebase
+            sessionStarted = await GeoService.StartGpsSessionAsync(
+                EmployeeId,
+                liveLocationSessionId);
 
             dotNetReference ??=
                 DotNetObjectReference.Create(this);
@@ -355,6 +395,34 @@
                     coords.Latitude,
                     coords.Longitude);
 
+            if (coords.IsOfflineCapture)
+            {
+                await GeoService.SaveLocationHistoryAsync(
+                    EmployeeId,
+                    liveLocationSessionId,
+                    coords.Latitude,
+                    coords.Longitude,
+                    0,
+                    0,
+                    false,
+                    accuracy,
+                    coords.Timestamp,
+                    "OfflineSync",
+                    Guid.NewGuid());
+
+                await GeoService.ReconcileHistoricalGeofencePointAsync(
+                    EmployeeId,
+                    liveLocationSessionId,
+                    coords.Latitude,
+                    coords.Longitude,
+                    accuracy,
+                    0,
+                    0,
+                    false,
+                    coords.Timestamp);
+                return;
+            }
+
             /*
              * Temporary GPS/network/database problems do NOT
              * terminate the GPS session.
@@ -430,7 +498,7 @@
                 DateTime.UtcNow;
 
             if ((nowUtc - lastHistorySavedUtc).TotalSeconds >=
-                LocationHistoryIntervalSeconds)
+                locationHistoryIntervalSeconds)
             {
                 lastHistorySavedUtc =
                     nowUtc;
@@ -611,6 +679,62 @@
      *
      * Therefore NEVER call EndGpsSessionAsync() here.
      */
+    private async Task LoadTrackingConfigurationAsync()
+    {
+        if (string.IsNullOrWhiteSpace(firebaseUid)) return;
+        var ownerUid = FirebaseRealtime.ResolveOwnerUid(firebaseUid, "Employee");
+        var data = await FirebaseRealtime.GetGlobalRecordAsync(
+            $"owners/{ownerUid}/tracking_configuration", CancellationToken.None);
+        ApplyTrackingConfiguration(data);
+    }
+
+    private async Task MonitorTrackingConfigurationAsync(CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(firebaseUid)) return;
+        try
+        {
+            var ownerUid = FirebaseRealtime.ResolveOwnerUid(firebaseUid, "Employee");
+            await FirebaseRealtime.StreamGlobalChangesAsync(
+                $"owners/{ownerUid}/tracking_configuration",
+                async (_, data, token) =>
+                {
+                    if (disposed || token.IsCancellationRequested) return;
+                    ApplyTrackingConfiguration(data);
+                    await InvokeAsync(StateHasChanged);
+                }, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception ex) { Console.Error.WriteLine($"Employee GPS tracking config monitor failed: {ex.Message}"); }
+    }
+
+    private void ApplyTrackingConfiguration(System.Text.Json.JsonElement? data)
+    {
+        var next = 30;
+        if (data.HasValue && data.Value.ValueKind == System.Text.Json.JsonValueKind.Object &&
+            data.Value.TryGetProperty("intervalSeconds", out var p))
+        {
+            if (p.ValueKind == System.Text.Json.JsonValueKind.Number && p.TryGetInt32(out var n)) next = n;
+            else if (p.ValueKind == System.Text.Json.JsonValueKind.String && int.TryParse(p.GetString(), out n)) next = n;
+        }
+        next = next switch { 30 or 60 or 120 or 300 => next, _ => 30 };
+        if (next != locationHistoryIntervalSeconds)
+        {
+            locationHistoryIntervalSeconds = next;
+            lastHistorySavedUtc = DateTime.MinValue;
+        }
+    }
+
+    [JSInvokable]
+    public Task UpdateEmployeeGpsSessionId(string sessionId)
+    {
+        if (disposed || !Guid.TryParse(sessionId, out var parsed) || parsed == Guid.Empty)
+            return Task.CompletedTask;
+
+        liveLocationSessionId = parsed;
+        sessionStarted = true;
+        return Task.CompletedTask;
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (disposed)
@@ -634,6 +758,10 @@
          * StartTracking() rebinds the new DotNet reference without
          * creating another watcher.
          */
+        trackingConfigCts?.Cancel();
+        trackingConfigCts?.Dispose();
+        trackingConfigCts = null;
+
         try
         {
             await JSRuntime.InvokeVoidAsync(
@@ -689,5 +817,9 @@
         public double Longitude { get; set; }
 
         public double Accuracy { get; set; }
+
+        public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+
+        public bool IsOfflineCapture { get; set; }
     }
 }

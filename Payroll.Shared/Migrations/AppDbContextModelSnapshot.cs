@@ -586,6 +586,11 @@ namespace Payroll.Shared.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("work_day_cutoff_hour");
 
+                    b.Property<bool>("UseSpeedBasedMarkers")
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("use_speed_based_markers");
+
                     b.Property<string>("ZktecoIP")
                         .HasMaxLength(50)
                         .HasColumnType("character varying(50)");

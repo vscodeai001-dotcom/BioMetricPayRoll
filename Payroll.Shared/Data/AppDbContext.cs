@@ -109,6 +109,8 @@ public class AppDbContext
         get; set;
     }
 
+    public DbSet<CompanyTenant> CompanyTenants { get; set; }
+
 
     // ============================================================
     // MODEL CONFIGURATION
@@ -118,6 +120,21 @@ public class AppDbContext
         ModelBuilder builder)
     {
         base.OnModelCreating(builder);
+
+
+        // ========================================================
+        // COMPANY TENANT CONFIGURATION
+        // ========================================================
+
+        builder.Entity<CompanyTenant>(entity =>
+        {
+            entity.ToTable("CompanyTenants");
+            entity.HasKey(x => x.Id);
+            entity.HasIndex(x => x.TenantId).IsUnique();
+            entity.HasIndex(x => x.CompanyCode).IsUnique();
+            entity.HasIndex(x => x.AdminEmail);
+            entity.HasIndex(x => x.AdminUserId);
+        });
 
 
         // ========================================================
@@ -410,6 +427,128 @@ public class AppDbContext
                 x.EndedAtUtc
             });
         });
+    }
+
+    public static async Task EnsureSqliteSchemaUpdatedAsync(DbContext dbContext, CancellationToken ct = default)
+    {
+        try
+        {
+            var connection = dbContext.Database.GetDbConnection();
+            if (connection.State != System.Data.ConnectionState.Open)
+            {
+                await connection.OpenAsync(ct);
+            }
+
+            // 1. Ensure newly added columns on feature_settings
+            await EnsureColumnExistsAsync(connection, "feature_settings", "firebase_plan_mode", "TEXT DEFAULT 'Spark'", ct);
+            await EnsureColumnExistsAsync(connection, "feature_settings", "is_offline_mode", "INTEGER NOT NULL DEFAULT 0", ct);
+            await EnsureColumnExistsAsync(connection, "feature_settings", "deployment_mode", "TEXT DEFAULT 'Online'", ct);
+            await EnsureColumnExistsAsync(connection, "feature_settings", "admin_can_manage_feature_toggles", "INTEGER NOT NULL DEFAULT 0", ct);
+
+            // 2. Ensure newly added columns on CompanyTenants
+            await EnsureColumnExistsAsync(connection, "CompanyTenants", "is_offline_mode", "INTEGER NOT NULL DEFAULT 0", ct);
+            await EnsureColumnExistsAsync(connection, "CompanyTenants", "deployment_mode", "TEXT DEFAULT 'Online'", ct);
+
+            // 3. Ensure tenant_id, shift_mode, and tracking_mode on employees
+            await EnsureColumnExistsAsync(connection, "employees", "tenant_id", "TEXT NULL", ct);
+            await EnsureColumnExistsAsync(connection, "employees", "shift_mode", "TEXT DEFAULT 'SINGLE_DAY'", ct);
+            await EnsureColumnExistsAsync(connection, "employees", "tracking_mode", "TEXT DEFAULT '24/7'", ct);
+
+            // 4. Ensure auto_backup_interval_hours, stay_dwell_minutes, and stay_cluster_radius_meters on CompanySettings
+            await EnsureColumnExistsAsync(connection, "CompanySettings", "auto_backup_interval_hours", "INTEGER NOT NULL DEFAULT 24", ct);
+            await EnsureColumnExistsAsync(connection, "CompanySettings", "stay_dwell_minutes", "INTEGER NOT NULL DEFAULT 10", ct);
+            await EnsureColumnExistsAsync(connection, "CompanySettings", "stay_cluster_radius_meters", "INTEGER NOT NULL DEFAULT 50", ct);
+            await EnsureColumnExistsAsync(connection, "CompanySettings", "use_speed_based_markers", "INTEGER NOT NULL DEFAULT 0", ct);
+            await EnsureColumnExistsAsync(connection, "CompanySettings", "page_transition_effect", "TEXT DEFAULT 'Fade'", ct);
+
+            // 5. Ensure missing columns on leaverequests
+            await EnsureColumnExistsAsync(connection, "leaverequests", "AdminNotes", "TEXT NULL", ct);
+            await EnsureColumnExistsAsync(connection, "leaverequests", "Status", "TEXT DEFAULT 'Pending'", ct);
+            await EnsureColumnExistsAsync(connection, "leaverequests", "is_half_day", "INTEGER NOT NULL DEFAULT 0", ct);
+            await EnsureColumnExistsAsync(connection, "leaverequests", "notes", "TEXT NULL", ct);
+            await EnsureColumnExistsAsync(connection, "leaverequests", "firebase_leave_id", "TEXT NULL", ct);
+            // Unique index on firebase_leave_id — second line of defence against duplicate Android leave submissions.
+            // The sync service checks this column first; the index prevents any race that slips through.
+            await EnsureIndexExistsAsync(connection, "leaverequests", "idx_leaverequests_firebase_id", "firebase_leave_id", unique: true, ct);
+
+            // 6. Ensure missing columns on salaryadvances
+            await EnsureColumnExistsAsync(connection, "salaryadvances", "advancetype", "TEXT NULL", ct);
+            await EnsureColumnExistsAsync(connection, "salaryadvances", "payrollid_paid", "INTEGER NULL", ct);
+
+            // 7. Ensure missing columns on attendance_regularizations
+            await EnsureColumnExistsAsync(connection, "attendance_regularizations", "admin_remarks", "TEXT NULL", ct);
+            await EnsureColumnExistsAsync(connection, "attendance_regularizations", "approved_by_id", "TEXT NULL", ct);
+
+            // 8. Ensure missing columns on resignation_requests
+            await EnsureColumnExistsAsync(connection, "resignation_requests", "admin_remarks", "TEXT NULL", ct);
+            await EnsureColumnExistsAsync(connection, "resignation_requests", "approved_last_working_day", "TEXT NULL", ct);
+            await EnsureColumnExistsAsync(connection, "resignation_requests", "is_settled", "INTEGER NOT NULL DEFAULT 0", ct);
+
+            // 9. High-scale performance indexes for 5000+ employees and multi-year queries
+            await EnsureIndexExistsAsync(connection, "daily_summaries", "idx_dailysummaries_shiftdate_empid", "shiftdate, employeeid", unique: false, ct);
+            await EnsureIndexExistsAsync(connection, "attendancelogs", "idx_attendancelogs_punchtime_empid", "punchtime, employeeid", unique: false, ct);
+            await EnsureIndexExistsAsync(connection, "payrollhistory", "idx_payrollhistory_month_year_empid", "paymonth, payyear, employeeid", unique: false, ct);
+            await EnsureIndexExistsAsync(connection, "shiftschedules", "idx_shiftschedules_date_empid", "shiftdate, employeeid", unique: false, ct);
+        }
+        catch { }
+    }
+
+    private static async Task EnsureColumnExistsAsync(
+        System.Data.Common.DbConnection connection,
+        string tableName,
+        string columnName,
+        string columnDefinition,
+        CancellationToken ct)
+    {
+        try
+        {
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText = $"PRAGMA table_info({tableName});";
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            var exists = false;
+            while (await reader.ReadAsync(ct))
+            {
+                if (string.Equals(reader.GetString(1), columnName, StringComparison.OrdinalIgnoreCase))
+                {
+                    exists = true;
+                    break;
+                }
+            }
+            await reader.CloseAsync();
+
+            if (!exists)
+            {
+                await using var alterCmd = connection.CreateCommand();
+                alterCmd.CommandText = $"ALTER TABLE {tableName} ADD COLUMN {columnName} {columnDefinition};";
+                await alterCmd.ExecuteNonQueryAsync(ct);
+            }
+        }
+        catch { }
+    }
+
+    private static async Task EnsureIndexExistsAsync(
+        System.Data.Common.DbConnection connection,
+        string tableName,
+        string indexName,
+        string columnName,
+        bool unique,
+        CancellationToken ct)
+    {
+        try
+        {
+            await using var checkCmd = connection.CreateCommand();
+            checkCmd.CommandText = $"SELECT COUNT(1) FROM sqlite_master WHERE type='index' AND name='{indexName}';";
+            var result = await checkCmd.ExecuteScalarAsync(ct);
+            if (Convert.ToInt64(result) > 0) return;
+
+            await using var createCmd = connection.CreateCommand();
+            var uniqueKeyword = unique ? "UNIQUE " : string.Empty;
+            // SQLite unique indexes ignore NULL values — multiple NULLs are allowed,
+            // which is exactly what we want (existing web-admin rows have NULL firebase_leave_id).
+            createCmd.CommandText = $"CREATE {uniqueKeyword}INDEX IF NOT EXISTS {indexName} ON {tableName} ({columnName});";
+            await createCmd.ExecuteNonQueryAsync(ct);
+        }
+        catch { }
     }
 }
 

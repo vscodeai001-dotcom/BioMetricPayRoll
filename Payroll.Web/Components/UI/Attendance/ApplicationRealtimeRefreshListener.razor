@@ -4,6 +4,16 @@
 @inject IJSRuntime JSRuntime
 
 @code {
+    [Parameter]
+    public EventCallback OnApplicationDataChanged { get; set; }
+
+    /// <summary>
+    /// Optional entity filter. When set, only Firebase application events
+    /// containing a matching Entity change reach this component.
+    /// </summary>
+    [Parameter]
+    public string? EntityFilter { get; set; }
+
     private DotNetObjectReference<ApplicationRealtimeRefreshListener>? _dotNetRef;
     private bool _registered;
     private bool _disposed;
@@ -20,7 +30,8 @@
 
             await JSRuntime.InvokeVoidAsync(
                 "attendanceRefresh.registerApplication",
-                _dotNetRef);
+                _dotNetRef,
+                EntityFilter);
 
             _registered = true;
         }
@@ -32,13 +43,22 @@
     }
 
     [JSInvokable("ApplicationDataChanged")]
-    public Task ApplicationDataChanged(object? data = null)
+    public async Task ApplicationDataChanged(object? data = null)
     {
-        // Page-level AttendanceRefreshListener instances own their existing
-        // loaders. Do not call Navigation.Refresh here: that would reload the
-        // browser instead of delivering realtime data through the current
-        // component flow.
-        return Task.CompletedTask;
+        // Existing pages that do not provide a callback retain their current
+        // behavior. Migrated Firebase-SSOT pages can opt into a targeted
+        // realtime reload without a browser refresh.
+        if (OnApplicationDataChanged.HasDelegate)
+        {
+            try
+            {
+                await InvokeAsync(() => OnApplicationDataChanged.InvokeAsync());
+            }
+            catch
+            {
+                // The realtime enhancement must never break the page circuit.
+            }
+        }
     }
 
     public async ValueTask DisposeAsync()

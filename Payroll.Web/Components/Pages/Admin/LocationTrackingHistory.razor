@@ -1,0 +1,1014 @@
+@page "/admin/location-tracking-history"
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.EntityFrameworkCore
+@using Microsoft.JSInterop
+@using global::Payroll.Shared.Data
+@using global::Payroll.Web.Services
+@attribute [Authorize(Roles = "Admin, SuperAdmin")]
+@implements IAsyncDisposable
+
+@inject IDbContextFactory<AppDbContext> DbFactory
+@inject FirebaseEmployeeManagementService FirebaseEmployees
+@inject FirebaseRealtimeService FirebaseRealtime
+@inject AuthenticationStateProvider AuthState
+@inject IJSRuntime JS
+
+<PageTitle>Location Tracking History</PageTitle>
+
+<div class="location-stays-page container-fluid py-3">
+    <div class="page-header-container mb-4">
+        <div class="d-flex align-items-center gap-3">
+            <div class="emoji-icon-badge emoji-icon-badge-primary">
+                🛰️
+            </div>
+            <div>
+                <h2 class="page-header-title">
+                    Location Tracking History &amp; GPS Radar
+                </h2>
+                <p class="page-header-subtitle">
+                    <span>📍 Historical GPS movement analysis: Dwell locations (50m radius), stay duration (≥10 min) &amp; travel trajectory</span>
+                </p>
+            </div>
+        </div>
+
+        <div class="d-flex align-items-center gap-2">
+            <button class="action-pill-btn action-pill-btn-primary" @onclick="LoadAsync" disabled="@loading">
+                <i class="bi bi-arrow-clockwise me-1 @(loading ? "spin" : "")"></i>
+                <span>@(loading ? "Analyzing Radar..." : "🔄 Refresh Radar")</span>
+            </button>
+        </div>
+    </div>
+
+    <div class="card border-0 shadow-sm mb-3 filter-card">
+        <div class="card-body p-3">
+            <div class="filter-grid">
+                <div class="filter-item filter-item-employee">
+                    <label class="form-label"><i class="bi bi-person me-1 text-primary"></i>Employee</label>
+                    <select class="form-select" @bind="employeeFilter">
+                        <option value="0">All employees</option>
+                        @foreach (var employee in employees)
+                        {
+                            <option value="@employee.EmployeeID">@employee.Name (#@employee.EmployeeID)</option>
+                        }
+                    </select>
+                </div>
+                <div class="filter-item filter-item-date">
+                    <label class="form-label"><i class="bi bi-calendar-event me-1 text-primary"></i>Date From</label>
+                    <input type="date" class="form-control" @bind="fromDate" />
+                </div>
+                <div class="filter-item filter-item-date">
+                    <label class="form-label"><i class="bi bi-calendar2-check me-1 text-primary"></i>Date To</label>
+                    <input type="date" class="form-control" @bind="toDate" />
+                </div>
+                <div class="filter-item filter-item-time">
+                    <label class="form-label"><i class="bi bi-clock me-1 text-primary"></i>From</label>
+                    <input type="time" class="form-control" @bind="fromTime" />
+                </div>
+                <div class="filter-item filter-item-time">
+                    <label class="form-label"><i class="bi bi-clock-history me-1 text-primary"></i>To</label>
+                    <input type="time" class="form-control" @bind="toTime" />
+                </div>
+                <div class="filter-item filter-item-stay">
+                    <label class="form-label"><i class="bi bi-geo-alt me-1 text-primary"></i>Min Stay (50m Radius)</label>
+                    <select class="form-select" value="@minDurationFilterMinutes" @onchange="OnDurationFilterChanged">
+                        <option value="10">≥ 10 mins (All)</option>
+                        <option value="20">≥ 20 mins</option>
+                        <option value="30">≥ 30 mins</option>
+                        <option value="60">≥ 1 hour</option>
+                        <option value="120">≥ 2 hours</option>
+                    </select>
+                </div>
+                <div class="filter-item filter-item-btn">
+                    <button class="btn btn-primary w-100 d-flex align-items-center justify-content-center gap-2 shadow-sm" @onclick="LoadAsync" disabled="@loading">
+                        @if (loading)
+                        {
+                            <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                            <span>Searching...</span>
+                        }
+                        else
+                        {
+                            <i class="bi bi-search"></i>
+                            <span>Search</span>
+                        }
+                    </button>
+                </div>
+            </div>
+            <div class="small text-muted mt-2 d-flex align-items-center gap-1">
+                <i class="bi bi-shield-check text-success"></i>
+                <span>No GPS records are changed. Stay records are derived from the existing <code>EmployeeLocationHistory</code> data clustered within a 50m radius for ≥10 minutes.</span>
+            </div>
+        </div>
+    </div>
+
+    @if (!string.IsNullOrWhiteSpace(error))
+    {
+        <div class="alert alert-danger border-0 shadow-sm"><i class="bi bi-exclamation-triangle me-2"></i>@error</div>
+    }
+
+    <div class="row g-3 mb-3">
+        <div class="col-6 col-lg-3"><div class="metric-card"><span>Employees</span><strong>@summary.Employees</strong><i class="bi bi-people"></i></div></div>
+        <div class="col-6 col-lg-3"><div class="metric-card"><span>Detected stays</span><strong>@summary.Stays</strong><i class="bi bi-pin-map"></i></div></div>
+        <div class="col-6 col-lg-3"><div class="metric-card"><span>Total observed stay time</span><strong>@FormatDuration(summary.TotalStay)</strong><i class="bi bi-hourglass-split"></i></div></div>
+        <div class="col-6 col-lg-3"><div class="metric-card"><span>GPS points analyzed</span><strong>@summary.Points</strong><i class="bi bi-broadcast-pin"></i></div></div>
+    </div>
+
+    <div class="row g-3">
+        <div class="col-12 col-xl-5">
+            <div class="card border-0 shadow-sm h-100 report-card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <div>
+                        <strong><i class="bi bi-clock-history me-2"></i>Detected Stayed Locations</strong>
+                        <div class="small text-muted">Stayed ≥ 10 minutes within 50-metre radius cluster</div>
+                    </div>
+                    <span class="badge bg-primary-subtle text-primary">@stays.Count</span>
+                </div>
+                <div class="stay-list">
+                    @if (loading)
+                    {
+                        <div class="p-4 text-center text-muted"><span class="spinner-border spinner-border-sm me-2"></span>Analyzing GPS history...</div>
+                    }
+                    else if (stays.Count == 0)
+                    {
+                        <div class="p-4 text-center text-muted"><i class="bi bi-geo-alt display-6 d-block mb-2"></i>No qualifying ≥@(minDurationFilterMinutes)-minute stays found for the selected filters.</div>
+                    }
+                    else
+                    {
+                        @foreach (var stay in stays)
+                        {
+                            <button type="button" class="stay-row" id="stay-row-@stay.Id" @onclick="() => FocusStay(stay.Id)">
+                                <div class="stay-row-top">
+                                    <span class="stay-index">@stay.Sequence</span>
+                                    <div class="stay-main">
+                                        <div class="d-flex align-items-center gap-2">
+                                            <strong>@stay.EmployeeName</strong>
+                                            <span class="badge @(stay.PlaceCategory == "Worksite" ? "bg-primary-subtle text-primary border border-primary-subtle" : "bg-warning-subtle text-warning-emphasis border border-warning-subtle")">
+                                                @(stay.PlaceCategory == "Worksite" ? "🏢 Worksite" : "📍 Field Halt")
+                                            </span>
+                                        </div>
+                                        <span class="small text-muted">@FormatIst(stay.StartUtc) · @FormatDuration(stay.Duration)</span>
+                                    </div>
+                                    <span class="stay-duration">@FormatDuration(stay.Duration)</span>
+                                </div>
+                                <div class="stay-location-line">
+                                    <i class="bi bi-geo-alt"></i>
+                                    <span data-stay-address="@stay.Id">Address unavailable</span>
+                                </div>
+                                <div class="small text-muted px-2 py-1 mb-1 rounded bg-light-subtle">
+                                    <i class="bi bi-info-circle me-1 text-primary"></i>Stayed <strong>@FormatDuration(stay.Duration)</strong> at @stay.MatchedLocation (50m radius, ≥10m dwell)
+                                </div>
+                                <div class="stay-meta">
+                                    <span><i class="bi bi-clock"></i>@FormatIst(stay.StartUtc, "HH:mm") - @FormatIst(stay.EndUtc, "HH:mm")</span>
+                                    <span><i class="bi bi-bullseye"></i>@stay.AccuracyMeters.ToString("F1") m</span>
+                                    <span><i class="bi bi-shop"></i>@stay.MatchedLocation</span>
+                                </div>
+                                <div class="stay-coords"><code>@stay.Latitude.ToString("F6"), @stay.Longitude.ToString("F6")</code><span>GPS points: @stay.PointCount</span></div>
+                            </button>
+                        }
+                    }
+                </div>
+            </div>
+        </div>
+
+        <div class="col-12 col-xl-7">
+            <div class="card border-0 shadow-sm history-map-card">
+                <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                    <div>
+                        <strong><i class="bi bi-map me-2"></i>Location History Map</strong>
+                        <div class="small text-muted">Movement path + highlighted stayed locations. Click a stay or marker to synchronize the report.</div>
+                    </div>
+                    <span class="badge bg-light text-dark border">@points.Count GPS points</span>
+                </div>
+                <div id="location-stay-history-map" class="location-stay-history-map"></div>
+            </div>
+        </div>
+    </div>
+
+    @if (stays.Count > 0)
+    {
+        <div class="card border-0 shadow-sm mt-3 detail-card">
+            <div class="card-header"><strong><i class="bi bi-list-columns-reverse me-2"></i>Stay Details</strong></div>
+            <div class="table-responsive">
+                <table class="table table-hover align-middle mb-0">
+                    <thead>
+                        <tr>
+                            <th>Employee</th><th>Start</th><th>End</th><th>Duration</th><th>Location</th><th>Accuracy</th><th>Arrival</th><th>Departure</th><th>Distance</th><th>Radius</th><th>Coordinates</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    @foreach (var stay in stays)
+                    {
+                        <tr id="stay-detail-row-@stay.Id" class="stay-detail-row" @onclick="() => FocusStay(stay.Id)">
+                            <td><strong>@stay.EmployeeName</strong><div class="small text-muted">ID @stay.EmployeeId</div></td>
+                            <td class="nowrap">@FormatIst(stay.StartUtc)</td>
+                            <td class="nowrap">@FormatIst(stay.EndUtc)</td>
+                            <td><span class="badge bg-primary-subtle text-primary">@FormatDuration(stay.Duration)</span></td>
+                            <td><strong data-stay-address="@stay.Id">Address unavailable</strong><div class="small text-muted">@stay.MatchedLocation</div></td>
+                            <td>@stay.AccuracyMeters.ToString("F1") m</td>
+                            <td>@FormatSpeed(stay.ArrivalSpeedKmh)</td>
+                            <td>@FormatSpeed(stay.DepartureSpeedKmh)</td>
+                            <td>@FormatDistance(stay.DistanceFromMatchedLocationMeters)</td>
+                            <td>@(stay.RadiusMeters > 0 ? $"{stay.RadiusMeters} m" : "-")</td>
+                            <td><code>@stay.Latitude.ToString("F6"), @stay.Longitude.ToString("F6")</code></td>
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    }
+</div>
+
+<style>
+    .location-stays-page { min-width: 0; }
+    .location-stays-page .card { border-radius: 15px; overflow: hidden; }
+    .filter-card {
+        background: linear-gradient(180deg, rgba(127,127,127,.05), transparent);
+        border-radius: 12px;
+        container-type: inline-size;
+        container-name: filterCard;
+    }
+    .filter-grid {
+        display: grid;
+        grid-template-columns: minmax(180px, 1.4fr) minmax(125px, 1fr) minmax(125px, 1fr) minmax(95px, 0.85fr) minmax(95px, 0.85fr) minmax(145px, 1.1fr) minmax(110px, auto);
+        gap: 12px;
+        align-items: flex-end;
+    }
+    .filter-item { min-width: 0; }
+    .filter-item .form-label {
+        font-size: .75rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: .04em;
+        margin-bottom: 5px;
+        display: flex;
+        align-items: center;
+        white-space: nowrap;
+    }
+    .filter-item .form-control,
+    .filter-item .form-select {
+        height: 38px;
+        font-size: .85rem;
+        border-radius: 8px;
+        padding: 6px 10px;
+        width: 100%;
+    }
+    .filter-item input[type="time"] {
+        font-variant-numeric: tabular-nums;
+        min-width: 0;
+    }
+    .filter-item input[type="date"] {
+        min-width: 0;
+    }
+    .filter-item .btn {
+        height: 38px;
+        font-weight: 600;
+        font-size: .85rem;
+        border-radius: 8px;
+        white-space: nowrap;
+    }
+    @@container filterCard (max-width: 1200px) {
+        .filter-grid {
+            grid-template-columns: repeat(4, 1fr);
+        }
+        .filter-item-employee {
+            grid-column: span 2;
+        }
+        .filter-item-stay {
+            grid-column: span 1;
+        }
+        .filter-item-btn {
+            grid-column: span 1;
+        }
+    }
+    @@container filterCard (max-width: 680px) {
+        .filter-grid {
+            grid-template-columns: 1fr 1fr;
+        }
+        .filter-item-employee,
+        .filter-item-stay,
+        .filter-item-btn {
+            grid-column: 1 / -1;
+        }
+    }
+    @@media (max-width: 1480px) {
+        .filter-grid {
+            grid-template-columns: repeat(4, 1fr);
+        }
+        .filter-item-employee {
+            grid-column: span 2;
+        }
+        .filter-item-stay {
+            grid-column: span 1;
+        }
+        .filter-item-btn {
+            grid-column: span 1;
+        }
+    }
+    @@media (max-width: 680px) {
+        .filter-grid {
+            grid-template-columns: 1fr 1fr;
+        }
+        .filter-item-employee,
+        .filter-item-stay,
+        .filter-item-btn {
+            grid-column: 1 / -1;
+        }
+    }
+    .metric-card { min-height: 112px; padding: 16px 18px; border-radius: 15px; background: var(--bs-body-bg); box-shadow: 0 6px 22px rgba(0,0,0,.07); position: relative; overflow: hidden; border: 1px solid rgba(127,127,127,.12); }
+    .metric-card span { display:block; color:#64748b; font-size:.76rem; font-weight:700; text-transform:uppercase; letter-spacing:.03em; }
+    .metric-card strong { display:block; margin-top:8px; font-size:1.55rem; }
+    .metric-card i { position:absolute; right:16px; bottom:12px; font-size:1.7rem; opacity:.18; }
+    .report-card .card-header, .history-map-card .card-header, .detail-card .card-header { background: rgba(127,127,127,.055); border-bottom-color: rgba(127,127,127,.14); }
+    .stay-list { max-height: 620px; overflow:auto; }
+    .stay-row { display:block; width:100%; text-align:left; border:0; border-bottom:1px solid rgba(127,127,127,.14); background:transparent; padding:14px 16px; color:inherit; transition:background .18s, transform .18s; }
+    .stay-row:hover, .stay-row.selected { background:rgba(var(--bs-primary-rgb),.075); }
+    .stay-row-top { display:flex; gap:10px; align-items:flex-start; }
+    .stay-index { width:28px; height:28px; border-radius:50%; display:grid; place-items:center; background:var(--bs-primary); color:#fff; font-size:.72rem; font-weight:800; flex:0 0 auto; }
+    .stay-main { min-width:0; flex:1; display:grid; gap:2px; }
+    .stay-main strong { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .stay-duration { font-weight:800; white-space:nowrap; color:var(--bs-primary); }
+    .stay-location-line { display:flex; gap:7px; margin:9px 0 7px 38px; font-size:.82rem; font-weight:650; }
+    .stay-location-line i { color:var(--bs-primary); }
+    .stay-location-line span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .stay-meta { display:flex; flex-wrap:wrap; gap:8px 12px; margin-left:38px; color:#64748b; font-size:.72rem; }
+    .stay-meta span { white-space:nowrap; }
+    .stay-coords { display:flex; justify-content:space-between; gap:10px; margin:8px 0 0 38px; color:#64748b; font-size:.68rem; }
+    .stay-coords code { font-size:.68rem; }
+    .location-stay-history-map { height:620px; min-height:420px; background:#dbe4ec; }
+    .stay-detail-row { cursor:pointer; }
+    .stay-detail-row.selected { background:rgba(var(--bs-primary-rgb),.09); }
+    .detail-card .table { min-width:1200px; }
+    .detail-card th { white-space:nowrap; font-size:.69rem; text-transform:uppercase; letter-spacing:.03em; }
+    .detail-card td { font-size:.76rem; }
+    .nowrap { white-space:nowrap; }
+    .stay-map-popup { min-width:210px; }
+    .stay-map-popup strong { display:block; margin-bottom:4px; }
+    .stay-map-popup .popup-meta { display:grid; grid-template-columns:1fr 1fr; gap:4px; font-size:11px; }
+
+    /* Location history screen - Dark mode text contrast & readability */
+    [data-theme="dark"] .location-stays-page h3,
+    [data-bs-theme="dark"] .location-stays-page h3,
+    body.dark .location-stays-page h3 {
+        color: #f8fafc !important;
+    }
+    [data-theme="dark"] .location-stays-page .text-muted,
+    [data-bs-theme="dark"] .location-stays-page .text-muted,
+    body.dark .location-stays-page .text-muted {
+        color: #94a3b8 !important;
+    }
+    [data-theme="dark"] .location-stays-page .filter-card .form-label,
+    [data-bs-theme="dark"] .location-stays-page .filter-card .form-label,
+    body.dark .location-stays-page .filter-card .form-label {
+        color: #cbd5e1 !important;
+    }
+    [data-theme="dark"] .location-stays-page .metric-card,
+    [data-bs-theme="dark"] .location-stays-page .metric-card,
+    body.dark .location-stays-page .metric-card {
+        background:#161f2d; color:#e7edf6; border-color:rgba(255,255,255,.09);
+        box-shadow:0 6px 22px rgba(0,0,0,.20);
+    }
+    [data-theme="dark"] .location-stays-page .metric-card span,
+    [data-bs-theme="dark"] .location-stays-page .metric-card span,
+    body.dark .location-stays-page .metric-card span {
+        color: #94a3b8 !important;
+    }
+    [data-theme="dark"] .location-stays-page .metric-card strong,
+    [data-bs-theme="dark"] .location-stays-page .metric-card strong,
+    body.dark .location-stays-page .metric-card strong {
+        color: #f8fafc !important;
+    }
+    [data-theme="dark"] .location-stays-page .metric-card i,
+    [data-bs-theme="dark"] .location-stays-page .metric-card i,
+    body.dark .location-stays-page .metric-card i {
+        color: #60a5fa !important;
+        opacity: 0.28 !important;
+    }
+    [data-theme="dark"] .location-stays-page .filter-card,
+    [data-bs-theme="dark"] .location-stays-page .filter-card,
+    body.dark .location-stays-page .filter-card,
+    [data-theme="dark"] .location-stays-page .report-card,
+    [data-bs-theme="dark"] .location-stays-page .report-card,
+    body.dark .location-stays-page .report-card,
+    [data-theme="dark"] .location-stays-page .history-map-card,
+    [data-bs-theme="dark"] .location-stays-page .history-map-card,
+    body.dark .location-stays-page .history-map-card,
+    [data-theme="dark"] .location-stays-page .detail-card,
+    [data-bs-theme="dark"] .location-stays-page .detail-card,
+    body.dark .location-stays-page .detail-card {
+        background:#161f2d; color:#e7edf6;
+    }
+    [data-theme="dark"] .location-stays-page .card-header,
+    [data-bs-theme="dark"] .location-stays-page .card-header,
+    body.dark .location-stays-page .card-header {
+        background:rgba(255,255,255,.035); border-color:rgba(255,255,255,.09);
+        color:#e7edf6;
+    }
+    [data-theme="dark"] .location-stays-page .card-header strong,
+    [data-bs-theme="dark"] .location-stays-page .card-header strong,
+    body.dark .location-stays-page .card-header strong {
+        color: #f8fafc !important;
+    }
+    [data-theme="dark"] .location-stays-page .stay-row,
+    [data-bs-theme="dark"] .location-stays-page .stay-row,
+    body.dark .location-stays-page .stay-row {
+        border-color:rgba(255,255,255,.09); color:#e7edf6;
+    }
+    [data-theme="dark"] .location-stays-page .stay-row:hover,
+    [data-theme="dark"] .location-stays-page .stay-row.selected,
+    [data-bs-theme="dark"] .location-stays-page .stay-row:hover,
+    [data-bs-theme="dark"] .location-stays-page .stay-row.selected,
+    body.dark .location-stays-page .stay-row:hover,
+    body.dark .location-stays-page .stay-row.selected {
+        background:rgba(13,110,253,.14);
+    }
+    [data-theme="dark"] .location-stays-page .stay-main strong,
+    [data-bs-theme="dark"] .location-stays-page .stay-main strong,
+    body.dark .location-stays-page .stay-main strong {
+        color: #f8fafc !important;
+    }
+    [data-theme="dark"] .location-stays-page .stay-main .text-muted,
+    [data-bs-theme="dark"] .location-stays-page .stay-main .text-muted,
+    body.dark .location-stays-page .stay-main .text-muted {
+        color: #94a3b8 !important;
+    }
+    [data-theme="dark"] .location-stays-page .stay-duration,
+    [data-bs-theme="dark"] .location-stays-page .stay-duration,
+    body.dark .location-stays-page .stay-duration {
+        color: #60a5fa !important;
+    }
+    [data-theme="dark"] .location-stays-page .stay-location-line,
+    [data-bs-theme="dark"] .location-stays-page .stay-location-line,
+    body.dark .location-stays-page .stay-location-line {
+        color: #f1f5f9 !important;
+    }
+    [data-theme="dark"] .location-stays-page .stay-location-line span,
+    [data-bs-theme="dark"] .location-stays-page .stay-location-line span,
+    body.dark .location-stays-page .stay-location-line span {
+        color: #f1f5f9 !important;
+    }
+    [data-theme="dark"] .location-stays-page .stay-location-line i,
+    [data-bs-theme="dark"] .location-stays-page .stay-location-line i,
+    body.dark .location-stays-page .stay-location-line i {
+        color: #38bdf8 !important;
+    }
+    [data-theme="dark"] .location-stays-page .stay-meta,
+    [data-bs-theme="dark"] .location-stays-page .stay-meta,
+    body.dark .location-stays-page .stay-meta {
+        color: #cbd5e1 !important;
+    }
+    [data-theme="dark"] .location-stays-page .stay-meta span,
+    [data-bs-theme="dark"] .location-stays-page .stay-meta span,
+    body.dark .location-stays-page .stay-meta span {
+        color: #cbd5e1 !important;
+    }
+    [data-theme="dark"] .location-stays-page .stay-meta i,
+    [data-bs-theme="dark"] .location-stays-page .stay-meta i,
+    body.dark .location-stays-page .stay-meta i {
+        color: #60a5fa !important;
+        margin-right: 3px;
+    }
+    [data-theme="dark"] .location-stays-page .stay-coords,
+    [data-bs-theme="dark"] .location-stays-page .stay-coords,
+    body.dark .location-stays-page .stay-coords {
+        color: #94a3b8 !important;
+    }
+    [data-theme="dark"] .location-stays-page .stay-coords span,
+    [data-bs-theme="dark"] .location-stays-page .stay-coords span,
+    body.dark .location-stays-page .stay-coords span {
+        color: #94a3b8 !important;
+    }
+    [data-theme="dark"] .location-stays-page .badge.bg-light,
+    [data-bs-theme="dark"] .location-stays-page .badge.bg-light,
+    body.dark .location-stays-page .badge.bg-light {
+        background: rgba(255,255,255,.09) !important;
+        color: #cbd5e1 !important;
+        border-color: rgba(255,255,255,.15) !important;
+    }
+    [data-theme="dark"] .location-stays-page .badge.bg-primary-subtle,
+    [data-bs-theme="dark"] .location-stays-page .badge.bg-primary-subtle,
+    body.dark .location-stays-page .badge.bg-primary-subtle {
+        background: rgba(13,110,253,.22) !important;
+        color: #93c5fd !important;
+    }
+    [data-theme="dark"] .location-stays-page .detail-card .table,
+    [data-bs-theme="dark"] .location-stays-page .detail-card .table,
+    body.dark .location-stays-page .detail-card .table {
+        --bs-table-bg:#161f2d; --bs-table-color:#e7edf6;
+        --bs-table-border-color:rgba(255,255,255,.09);
+        --bs-table-hover-bg:rgba(13,110,253,.10); --bs-table-hover-color:#f4f8ff;
+    }
+    [data-theme="dark"] .location-stays-page .detail-card th,
+    [data-bs-theme="dark"] .location-stays-page .detail-card th,
+    body.dark .location-stays-page .detail-card th {
+        color: #94a3b8 !important;
+    }
+    [data-theme="dark"] .location-stays-page .detail-card td,
+    [data-bs-theme="dark"] .location-stays-page .detail-card td,
+    body.dark .location-stays-page .detail-card td {
+        color: #e2e8f0 !important;
+    }
+    [data-theme="dark"] .location-stays-page .detail-card td strong,
+    [data-bs-theme="dark"] .location-stays-page .detail-card td strong,
+    body.dark .location-stays-page .detail-card td strong {
+        color: #f8fafc !important;
+    }
+    [data-theme="dark"] .location-stays-page .detail-card td .text-muted,
+    [data-bs-theme="dark"] .location-stays-page .detail-card td .text-muted,
+    body.dark .location-stays-page .detail-card td .text-muted {
+        color: #94a3b8 !important;
+    }
+    [data-theme="dark"] .location-stays-page .form-control,
+    [data-bs-theme="dark"] .location-stays-page .form-control,
+    body.dark .location-stays-page .form-control,
+    [data-theme="dark"] .location-stays-page .form-select,
+    [data-bs-theme="dark"] .location-stays-page .form-select,
+    body.dark .location-stays-page .form-select {
+        background:#111a28; color:#e7edf6; border-color:rgba(255,255,255,.14);
+    }
+    [data-theme="dark"] .location-stays-page code,
+    [data-bs-theme="dark"] .location-stays-page code,
+    body.dark .location-stays-page code {
+        color:#93c5fd !important;
+        background: rgba(255,255,255,.06) !important;
+        padding: 2px 6px;
+        border-radius: 4px;
+    }
+    [data-theme="dark"] .location-stays-page .leaflet-popup-content-wrapper,
+    [data-bs-theme="dark"] .location-stays-page .leaflet-popup-content-wrapper,
+    body.dark .location-stays-page .leaflet-popup-content-wrapper {
+        background: #1e293b !important;
+        color: #f1f5f9 !important;
+        border: 1px solid rgba(255,255,255,.14) !important;
+        box-shadow: 0 10px 25px rgba(0,0,0,.45) !important;
+    }
+    [data-theme="dark"] .location-stays-page .leaflet-popup-tip,
+    [data-bs-theme="dark"] .location-stays-page .leaflet-popup-tip,
+    body.dark .location-stays-page .leaflet-popup-tip {
+        background: #1e293b !important;
+    }
+    [data-theme="dark"] .location-stays-page .stay-map-popup strong,
+    [data-bs-theme="dark"] .location-stays-page .stay-map-popup strong,
+    body.dark .location-stays-page .stay-map-popup strong {
+        color: #f8fafc !important;
+    }
+    [data-theme="dark"] .location-stays-page .stay-map-popup > div,
+    [data-bs-theme="dark"] .location-stays-page .stay-map-popup > div,
+    body.dark .location-stays-page .stay-map-popup > div {
+        color: #cbd5e1 !important;
+    }
+    [data-theme="dark"] .location-stays-page .stay-map-popup .popup-meta span,
+    [data-bs-theme="dark"] .location-stays-page .stay-map-popup .popup-meta span,
+    body.dark .location-stays-page .stay-map-popup .popup-meta span {
+        color: #94a3b8 !important;
+    }
+    [data-theme="dark"] .location-stays-page .stay-map-popup .popup-meta b,
+    [data-bs-theme="dark"] .location-stays-page .stay-map-popup .popup-meta b,
+    body.dark .location-stays-page .stay-map-popup .popup-meta b {
+        color: #f8fafc !important;
+    }
+
+    .spin { animation: locationStaySpin 1s linear infinite; }
+    @@keyframes locationStaySpin { to { transform:rotate(360deg); } }
+    @@media(max-width:767.98px) {
+        .location-stays-page { padding-left:.25rem; padding-right:.25rem; }
+        .location-stay-history-map { height:480px; }
+        .stay-list { max-height:none; }
+    }
+</style>
+
+@code {
+    private bool loading;
+    private string? error;
+    private int employeeFilter;
+    private int minDurationFilterMinutes = 10;
+    private DateTime fromDate = DateTime.Today;
+    private DateTime toDate = DateTime.Today;
+    private TimeOnly fromTime = new(0, 0);
+    private TimeOnly toTime = new(23, 59);
+    private List<EmployeeOption> employees = new();
+    private List<PointRow> points = new();
+    private List<StayRow> allDetectedStays = new();
+    private List<StayRow> stays = new();
+    private Summary summary = new();
+    private bool mapInitialized;
+    private List<ShopLocation>? cachedShops;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (loading || !points.Any()) return;
+        await InitializeMapAsync();
+    }
+
+    private async Task OnDurationFilterChanged(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), out var mins))
+        {
+            minDurationFilterMinutes = mins;
+            ApplyStayFilters();
+            mapInitialized = false;
+            await InitializeMapAsync();
+        }
+    }
+
+    private void ApplyStayFilters()
+    {
+        var minDuration = TimeSpan.FromMinutes(minDurationFilterMinutes);
+        stays = allDetectedStays.Where(x => x.Duration >= minDuration).ToList();
+
+        var sequenceByEmployee = new Dictionary<int, int>();
+        foreach (var stay in stays.OrderBy(x => x.StartUtc))
+        {
+            sequenceByEmployee.TryGetValue(stay.EmployeeId, out var sequence);
+            stay.Sequence = ++sequence;
+            sequenceByEmployee[stay.EmployeeId] = sequence;
+        }
+
+        summary = new Summary
+        {
+            Employees = stays.Select(x => x.EmployeeId).Distinct().Count(),
+            Stays = stays.Count,
+            Points = points.Count,
+            TotalStay = new TimeSpan(stays.Sum(x => x.Duration.Ticks))
+        };
+    }
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        error = null;
+        mapInitialized = false;
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+
+            employees = await db.Employees.AsNoTracking()
+                .Where(x => !x.IsDeleted)
+                .OrderBy(x => x.Name)
+                .Select(x => new EmployeeOption { EmployeeID = x.EmployeeID, Name = x.Name, Role = x.Role ?? "Staff" })
+                .ToListAsync();
+
+            var fromLocal = fromDate.Date.Add(fromTime.ToTimeSpan());
+            var toLocal = toDate.Date.Add(toTime.ToTimeSpan());
+            if (toLocal < fromLocal)
+                throw new InvalidOperationException("To date/time must be after the From date/time.");
+
+            var fromUtc = IndiaToUtc(fromLocal);
+            var toUtc = IndiaToUtc(toLocal).AddSeconds(1);
+
+            var query = db.EmployeeLocationHistory.AsNoTracking()
+                .Where(x => x.CapturedAtUtc >= fromUtc && x.CapturedAtUtc < toUtc);
+
+            if (employeeFilter > 0)
+                query = query.Where(x => x.EmployeeId == employeeFilter);
+
+            var raw = await query
+                .OrderBy(x => x.EmployeeId)
+                .ThenBy(x => x.SessionId)
+                .ThenBy(x => x.CapturedAtUtc)
+                .ToListAsync();
+
+            var employeeNames = employees.ToDictionary(x => x.EmployeeID, x => x.Name);
+            points = raw.Select(x => new PointRow
+            {
+                EmployeeId = x.EmployeeId,
+                EmployeeName = employeeNames.TryGetValue(x.EmployeeId, out var name) ? name : $"Employee {x.EmployeeId}",
+                SessionId = x.SessionId,
+                Latitude = x.Latitude,
+                Longitude = x.Longitude,
+                AccuracyMeters = x.AccuracyMeters,
+                DistanceFromOfficeMeters = x.DistanceFromOfficeMeters,
+                AllowedRadiusMeters = x.AllowedRadiusMeters,
+                IsWithinAllowedRadius = x.IsWithinAllowedRadius,
+                CapturedAtUtc = x.CapturedAtUtc,
+                RecordedAtUtc = x.RecordedAtUtc
+            }).ToList();
+
+            allDetectedStays = DetectStays(points);
+            await EnrichShopMatchesAsync(allDetectedStays);
+            ApplyStayFilters();
+        }
+        catch (Exception ex)
+        {
+            error = "Unable to analyze location history: " + ex.Message;
+            points.Clear();
+            allDetectedStays.Clear();
+            stays.Clear();
+            summary = new Summary();
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task InitializeMapAsync()
+    {
+        if (mapInitialized) return;
+        mapInitialized = true;
+
+        var payload = new
+        {
+            points = points.Select(x => new { x.Latitude, x.Longitude, timestamp = x.CapturedAtUtc.ToUniversalTime().ToString("O") }),
+            stays = stays.Select(x => new
+            {
+                id = x.Id,
+                employee = x.EmployeeName,
+                start = x.StartUtc.ToUniversalTime().ToString("O"),
+                end = x.EndUtc.ToUniversalTime().ToString("O"),
+                durationMinutes = x.Duration.TotalMinutes,
+                lat = x.Latitude,
+                lng = x.Longitude,
+                accuracy = x.AccuracyMeters,
+                location = x.MatchedLocation,
+                distance = x.DistanceFromMatchedLocationMeters
+            })
+        };
+
+        await JS.InvokeVoidAsync("initializeLocationStayHistoryMap", "location-stay-history-map", payload);
+        await JS.InvokeVoidAsync("resolveLocationStayAddresses", "location-stay-history-map", stays.Select(x => new { id = x.Id, lat = x.Latitude, lng = x.Longitude }));
+    }
+
+    private async Task FocusStay(long id)
+    {
+        await JS.InvokeVoidAsync("focusLocationStayHistory", "location-stay-history-map", id);
+    }
+
+    private List<StayRow> DetectStays(List<PointRow> source)
+    {
+        var result = new List<StayRow>();
+        var nextId = 1L;
+
+        foreach (var sessionGroup in source
+                     .Where(x => x.SessionId != Guid.Empty)
+                     .GroupBy(x => new { x.EmployeeId, x.SessionId })
+                     .OrderBy(x => x.Key.EmployeeId))
+        {
+            var ordered = sessionGroup.OrderBy(x => x.CapturedAtUtc).ToList();
+            var run = new List<PointRow>();
+            PointRow? anchor = null;
+
+            void FinishRun()
+            {
+                if (run.Count < 2 || anchor is null)
+                {
+                    run.Clear();
+                    anchor = null;
+                    return;
+                }
+
+                var duration = run[^1].CapturedAtUtc - run[0].CapturedAtUtc;
+                if (duration >= TimeSpan.FromMinutes(10))
+                {
+                    var averageAccuracy = run.Where(x => x.AccuracyMeters > 0).Select(x => x.AccuracyMeters).DefaultIfEmpty().Average();
+                    var previous = ordered.IndexOf(run[0]) > 0 ? ordered[ordered.IndexOf(run[0]) - 1] : null;
+                    var next = ordered.IndexOf(run[^1]) + 1 < ordered.Count ? ordered[ordered.IndexOf(run[^1]) + 1] : null;
+
+                    result.Add(new StayRow
+                    {
+                        Id = nextId++,
+                        EmployeeId = run[0].EmployeeId,
+                        EmployeeName = run[0].EmployeeName,
+                        SessionId = run[0].SessionId,
+                        StartUtc = run[0].CapturedAtUtc,
+                        EndUtc = run[^1].CapturedAtUtc,
+                        Duration = duration,
+                        Latitude = run.Average(x => x.Latitude),
+                        Longitude = run.Average(x => x.Longitude),
+                        AccuracyMeters = averageAccuracy,
+                        PointCount = run.Count,
+                        DistanceFromMatchedLocationMeters = 0,
+                        RadiusMeters = run[0].AllowedRadiusMeters,
+                        ArrivalSpeedKmh = CalculateSpeedKmh(previous, run[0]),
+                        DepartureSpeedKmh = CalculateSpeedKmh(run[^1], next),
+                        PlaceCategory = "Field Halt"
+                    });
+                }
+
+                run.Clear();
+                anchor = null;
+            }
+
+            foreach (var point in ordered)
+            {
+                if (anchor is null)
+                {
+                    anchor = point;
+                    run.Add(point);
+                    continue;
+                }
+
+                var distance = CalculateDistance(anchor.Latitude, anchor.Longitude, point.Latitude, point.Longitude);
+                if (distance <= 50d)
+                {
+                    run.Add(point);
+                }
+                else
+                {
+                    FinishRun();
+                    anchor = point;
+                    run.Add(point);
+                }
+            }
+
+            FinishRun();
+        }
+
+        return result.OrderBy(x => x.StartUtc).ToList();
+    }
+
+    private async Task EnrichShopMatchesAsync(List<StayRow> stayRows)
+    {
+        foreach (var stay in stayRows)
+        {
+            stay.MatchedLocation = "Field Halt / Client Visit";
+            stay.PlaceCategory = "Field Halt";
+        }
+
+        try
+        {
+            if (cachedShops == null)
+            {
+                var auth = await AuthState.GetAuthenticationStateAsync();
+                var user = auth.User;
+                var actorUid = user.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+                    ?? user.FindFirst("sub")?.Value
+                    ?? user.Identity?.Name
+                    ?? "admin";
+                var role = user.IsInRole("SuperAdmin") ? "SuperAdmin" : "Admin";
+                var ownerUid = FirebaseRealtime.ResolveOwnerUid(actorUid, role);
+                var shopsJson = await FirebaseRealtime.GetOwnerTableAsync(ownerUid, "shops");
+                if (shopsJson.HasValue && shopsJson.Value.ValueKind == System.Text.Json.JsonValueKind.Object)
+                {
+                    var shops = new List<ShopLocation>();
+                    foreach (var property in shopsJson.Value.EnumerateObject())
+                    {
+                        var value = property.Value;
+                        if (value.ValueKind != System.Text.Json.JsonValueKind.Object) continue;
+                        var lat = ReadDouble(value, "latitude", "lat");
+                        var lng = ReadDouble(value, "longitude", "lng", "lon");
+                        var radius = ReadDouble(value, "radiusMeters", "allowedRadiusMeters", "radius");
+                        var name = ReadString(value, "name", "brandingName") ?? property.Name;
+                        if (!lat.HasValue || !lng.HasValue || !radius.HasValue || radius <= 0) continue;
+                        shops.Add(new ShopLocation { Id = property.Name, Name = name, Latitude = lat.Value, Longitude = lng.Value, RadiusMeters = radius.Value });
+                    }
+                    cachedShops = shops;
+                }
+                else
+                {
+                    cachedShops = new List<ShopLocation>();
+                }
+            }
+
+            var activeShops = cachedShops;
+            if (activeShops.Count == 0) return;
+
+            foreach (var stay in stayRows)
+            {
+                var match = activeShops
+                    .Select(shop => new { shop, distance = CalculateDistance(stay.Latitude, stay.Longitude, shop.Latitude, shop.Longitude) })
+                    .Where(x => x.distance <= Math.Max(x.shop.RadiusMeters, 120d))
+                    .OrderBy(x => x.distance)
+                    .FirstOrDefault();
+
+                if (match is not null)
+                {
+                    stay.MatchedLocation = match.shop.Name;
+                    stay.DistanceFromMatchedLocationMeters = match.distance;
+                    stay.RadiusMeters = (int)Math.Round(match.shop.RadiusMeters);
+                    stay.PlaceCategory = "Worksite";
+                }
+            }
+        }
+        catch
+        {
+            // Shop enrichment is presentation-only. GPS stay detection must not fail because a shop projection is unavailable.
+        }
+    }
+
+    private static double? ReadDouble(System.Text.Json.JsonElement value, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            if (!value.TryGetProperty(name, out var property)) continue;
+            if (property.ValueKind == System.Text.Json.JsonValueKind.Number && property.TryGetDouble(out var number)) return number;
+            if (property.ValueKind == System.Text.Json.JsonValueKind.String && double.TryParse(property.GetString(), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out number)) return number;
+        }
+        return null;
+    }
+
+    private static string? ReadString(System.Text.Json.JsonElement value, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            if (value.TryGetProperty(name, out var property) && property.ValueKind == System.Text.Json.JsonValueKind.String)
+                return property.GetString();
+        }
+        return null;
+    }
+
+    private static double CalculateSpeedKmh(PointRow? a, PointRow? b)
+    {
+        if (a is null || b is null) return 0;
+        var seconds = (b.CapturedAtUtc - a.CapturedAtUtc).TotalSeconds;
+        if (seconds <= 0 || seconds > 600) return 0;
+        return CalculateDistance(a.Latitude, a.Longitude, b.Latitude, b.Longitude) / seconds * 3.6;
+    }
+
+    private static double CalculateDistance(double lat1, double lon1, double lat2, double lon2)
+    {
+        const double radius = 6371000d;
+        var p1 = lat1 * Math.PI / 180d;
+        var p2 = lat2 * Math.PI / 180d;
+        var dp = (lat2 - lat1) * Math.PI / 180d;
+        var dl = (lon2 - lon1) * Math.PI / 180d;
+        var a = Math.Sin(dp / 2) * Math.Sin(dp / 2) + Math.Cos(p1) * Math.Cos(p2) * Math.Sin(dl / 2) * Math.Sin(dl / 2);
+        a = Math.Clamp(a, 0d, 1d);
+        return radius * 2d * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1d - a));
+    }
+
+    private static DateTime IndiaToUtc(DateTime india)
+        => TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(india, DateTimeKind.Unspecified), IndiaTimeZone());
+
+    private static TimeZoneInfo IndiaTimeZone()
+        => TimeZoneInfo.FindSystemTimeZoneById(OperatingSystem.IsWindows() ? "India Standard Time" : "Asia/Kolkata");
+
+    private static string FormatIst(DateTime utc, string format = "dd MMM yyyy HH:mm:ss")
+        => TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), IndiaTimeZone()).ToString(format);
+
+    private static string FormatDuration(TimeSpan duration)
+    {
+        if (duration.TotalHours >= 1) return $"{(int)duration.TotalHours}h {duration.Minutes}m";
+        return $"{Math.Max(0, (int)duration.TotalMinutes)}m {Math.Max(0, duration.Seconds)}s";
+    }
+
+    private static string FormatDistance(double meters)
+        => meters <= 0 ? "-" : meters >= 1000 ? $"{meters / 1000d:F2} km" : $"{meters:F0} m";
+
+    private static string FormatSpeed(double kmh) => kmh <= 0 ? "-" : $"{kmh:F1} km/h";
+
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+    private sealed class EmployeeOption
+    {
+        public int EmployeeID { get; set; }
+        public string Name { get; set; } = "";
+        public string Role { get; set; } = "Staff";
+    }
+
+    private sealed class PointRow
+    {
+        public int EmployeeId { get; set; }
+        public string EmployeeName { get; set; } = "";
+        public Guid SessionId { get; set; }
+        public double Latitude { get; set; }
+        public double Longitude { get; set; }
+        public double AccuracyMeters { get; set; }
+        public double DistanceFromOfficeMeters { get; set; }
+        public int AllowedRadiusMeters { get; set; }
+        public bool IsWithinAllowedRadius { get; set; }
+        public DateTime CapturedAtUtc { get; set; }
+        public DateTime RecordedAtUtc { get; set; }
+    }
+
+    private sealed class StayRow
+    {
+        public long Id { get; set; }
+        public int Sequence { get; set; }
+        public int EmployeeId { get; set; }
+        public string EmployeeName { get; set; } = "";
+        public Guid SessionId { get; set; }
+        public DateTime StartUtc { get; set; }
+        public DateTime EndUtc { get; set; }
+        public TimeSpan Duration { get; set; }
+        public double Latitude { get; set; }
+        public double Longitude { get; set; }
+        public double AccuracyMeters { get; set; }
+        public int PointCount { get; set; }
+        public double ArrivalSpeedKmh { get; set; }
+        public double DepartureSpeedKmh { get; set; }
+        public string MatchedLocation { get; set; } = "Unknown / Other Location";
+        public string PlaceCategory { get; set; } = "Field Halt";
+        public double DistanceFromMatchedLocationMeters { get; set; }
+        public int RadiusMeters { get; set; }
+    }
+
+    private sealed class ShopLocation
+    {
+        public string Id { get; set; } = "";
+        public string Name { get; set; } = "";
+        public double Latitude { get; set; }
+        public double Longitude { get; set; }
+        public double RadiusMeters { get; set; }
+    }
+
+    private sealed class Summary
+    {
+        public int Employees { get; set; }
+        public int Stays { get; set; }
+        public int Points { get; set; }
+        public TimeSpan TotalStay { get; set; }
+    }
+}

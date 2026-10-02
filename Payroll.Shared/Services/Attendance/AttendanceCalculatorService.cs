@@ -1,4 +1,4 @@
-﻿using Payroll.Shared.Data;
+using Payroll.Shared.Data;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
@@ -154,7 +154,8 @@ namespace Payroll.Shared.Services
 
         private DateTime? GetOpenPunchEndTime(
             DateTime businessDay,
-            List<AttendanceLog> punches)
+            List<AttendanceLog> punches,
+            ScheduleResult scheduleResult)
         {
             if (punches == null ||
                 punches.Count == 0 ||
@@ -163,42 +164,169 @@ namespace Payroll.Shared.Services
                 return null;
             }
 
-            DateTime today =
-                GetIndiaNow().Date;
+            DateTime currentIndiaTime = GetIndiaNow();
+            DateTime now = new DateTime(
+                currentIndiaTime.Year,
+                currentIndiaTime.Month,
+                currentIndiaTime.Day,
+                currentIndiaTime.Hour,
+                currentIndiaTime.Minute,
+                0,
+                DateTimeKind.Unspecified);
 
-            DateTime requestedDay =
-                businessDay.Date;
+            DateTime lastPunch = DateTime.SpecifyKind(
+                punches[^1].PunchTime,
+                DateTimeKind.Unspecified);
 
-            // Only today's open punch can be calculated live.
-            if (requestedDay != today)
+            // If the shift has a defined schedule and current time has crossed ShiftEnd:
+            // For BOTH single day and continuous/overnight shifts, do NOT calculate throughout.
+            // Cap at ShiftEnd so open punches do not accumulate unearned overtime.
+            if (scheduleResult.HasShift && now > scheduleResult.ShiftEnd)
             {
-                return null;
+                if (lastPunch < scheduleResult.ShiftEnd)
+                {
+                    return scheduleResult.ShiftEnd;
+                }
+
+                return lastPunch;
             }
 
-            DateTime currentIndiaTime =
-    GetIndiaNow();
-
-            DateTime now =
-                new DateTime(
-                    currentIndiaTime.Year,
-                    currentIndiaTime.Month,
-                    currentIndiaTime.Day,
-                    currentIndiaTime.Hour,
-                    currentIndiaTime.Minute,
-                    0,
-                    DateTimeKind.Unspecified);
-
-            DateTime lastPunch =
-                DateTime.SpecifyKind(
-                    punches[^1].PunchTime,
-                    DateTimeKind.Unspecified);
-
-            if (now <= lastPunch)
+            // Live today while shift is ongoing (now <= scheduleResult.ShiftEnd or flexible shift):
+            if (businessDay.Date == now.Date)
             {
-                return null;
+                if (now > lastPunch)
+                {
+                    return now;
+                }
+
+                return lastPunch;
             }
 
-            return now;
+            // Overnight open punches can remain open after midnight while the
+            // ShiftDate is still the previous calendar date and shift is ongoing.
+            if (scheduleResult.HasShift &&
+                scheduleResult.ShiftEnd.Date > scheduleResult.ShiftStart.Date)
+            {
+                if (now >= scheduleResult.ShiftStart &&
+                    now <= scheduleResult.ShiftEnd)
+                {
+                    return now;
+                }
+
+                if (now > scheduleResult.ShiftEnd)
+                {
+                    return scheduleResult.ShiftEnd;
+                }
+            }
+
+            // Historical or past shift date with an open punch:
+            // Cap at scheduled shift end so earned and OT hours are preserved.
+            if (scheduleResult.HasShift)
+            {
+                if (lastPunch < scheduleResult.ShiftEnd)
+                {
+                    return scheduleResult.ShiftEnd;
+                }
+
+                return lastPunch;
+            }
+
+            return lastPunch;
+        }
+
+        /// <summary>
+        /// For an overnight shift, append next-day punches that belong to the
+        /// previous ShiftDate. Punches through the scheduled end are included.
+        /// If the sequence is still open at the scheduled end, the first OUT
+        /// after that end is included as post-shift overtime; a subsequent IN
+        /// is treated as the next attendance session and is not pulled back.
+        /// </summary>
+        private List<AttendanceLog> LoadCrossDayPunchesForOvernightShift(
+            Employee emp,
+            DateTime businessDay,
+            List<AttendanceLog> punches,
+            ScheduleResult scheduleResult)
+        {
+            if (!scheduleResult.HasShift ||
+                scheduleResult.ShiftEnd.Date <= scheduleResult.ShiftStart.Date)
+            {
+                return punches;
+            }
+
+            DateTime nextDayStart = businessDay.Date.AddDays(1);
+            DateTime nextDayEnd = nextDayStart.AddDays(1);
+
+            using var db = _dbFactory.CreateDbContext();
+
+            var nextDayPunches = db.AttendanceLogs
+                .AsNoTracking()
+                .Where(p =>
+                    p.EmployeeID == emp.EmployeeID &&
+                    p.PunchTime >= nextDayStart &&
+                    p.PunchTime < nextDayEnd)
+                .OrderBy(p => p.PunchTime)
+                .ToList()
+                .Where(p =>
+                    p.LogType != "Correction Request" || p.IsApproved)
+                .ToList();
+
+            if (nextDayPunches.Count == 0)
+                return punches;
+
+            var result = punches.ToList();
+
+            var throughShiftEnd = nextDayPunches
+                .Where(p => p.PunchTime <= scheduleResult.ShiftEnd)
+                .ToList();
+
+            AddDistinctPunches(result, throughShiftEnd);
+
+            // If the overnight sequence is still open at shift end, capture
+            // one OUT immediately after the scheduled end. This supports
+            // legitimate post-shift OT without absorbing the next day's
+            // independent IN/OUT session.
+            var ordered = result
+                .OrderBy(p => p.PunchTime)
+                .ToList();
+
+            if (ordered.Count % 2 != 0)
+            {
+                var firstAfterEnd = nextDayPunches
+                    .Where(p => p.PunchTime > scheduleResult.ShiftEnd)
+                    .OrderBy(p => p.PunchTime)
+                    .FirstOrDefault();
+
+                if (firstAfterEnd != null &&
+                    !string.Equals(firstAfterEnd.LogType, "IN", StringComparison.OrdinalIgnoreCase))
+                {
+                    AddDistinctPunches(result, new[] { firstAfterEnd });
+                }
+            }
+
+            return result
+                .OrderBy(p => p.PunchTime)
+                .ToList();
+        }
+
+        private static void AddDistinctPunches(
+            List<AttendanceLog> target,
+            IEnumerable<AttendanceLog> additions)
+        {
+            foreach (var punch in additions)
+            {
+                if (punch.LogID > 0 &&
+                    target.Any(x => x.LogID == punch.LogID))
+                    continue;
+
+                if (punch.LogID <= 0 &&
+                    target.Any(x =>
+                        x.EmployeeID == punch.EmployeeID &&
+                        x.PunchTime == punch.PunchTime &&
+                        x.LogType == punch.LogType))
+                    continue;
+
+                target.Add(punch);
+            }
         }
 
         // ============================================================
@@ -275,7 +403,7 @@ namespace Payroll.Shared.Services
                     total +=
                         outTime - inTime;
                 }
-                else
+                else if (outTime < inTime)
                 {
                     LogInvalidPunchPair(
                         punches,
@@ -563,57 +691,8 @@ namespace Payroll.Shared.Services
                 }
             }
 
-            // --------------------------------------------------------
-            // TODAY'S OPEN IN
-            // --------------------------------------------------------
-
-            if (openPunchEnd.HasValue &&
-                punches.Count % 2 != 0)
-            {
-                DateTime inTime =
-                    DateTime.SpecifyKind(
-                        punches[^1].PunchTime,
-                        DateTimeKind.Unspecified);
-
-                DateTime outTime =
-                    DateTime.SpecifyKind(
-                        openPunchEnd.Value,
-                        DateTimeKind.Unspecified);
-
-                if (outTime > inTime)
-                {
-                    // Pre-shift OT
-                    if (inTime < shiftStart)
-                    {
-                        DateTime preShiftEnd =
-                            outTime < shiftStart
-                                ? outTime
-                                : shiftStart;
-
-                        if (preShiftEnd > inTime)
-                        {
-                            totalOt +=
-                                preShiftEnd - inTime;
-                        }
-                    }
-
-                    // Post-shift OT
-                    if (outTime > shiftEnd)
-                    {
-                        DateTime postShiftStart =
-                            inTime > shiftEnd
-                                ? inTime
-                                : shiftEnd;
-
-                        if (outTime > postShiftStart)
-                        {
-                            totalOt +=
-                                outTime - postShiftStart;
-                        }
-                    }
-                }
-            }
-
+            // Note: Overtime requires a valid completed OUT punch.
+            // Open punches (odd count) do not produce overtime until a valid OUT punch is recorded.
             return totalOt;
         }
 
@@ -814,6 +893,49 @@ namespace Payroll.Shared.Services
             day =
                 NormalizeBusinessDate(day);
 
+            // ========================================================
+            // SHIFT RESOLUTION
+            // ========================================================
+            // Resolve the concrete/recurring schedule before processing
+            // punches. 1200-K needs the resolved shift interval so punches
+            // after midnight can still belong to the previous ShiftDate.
+
+            if (schedule == null)
+            {
+                using var dbContext =
+                    _dbFactory.CreateDbContext();
+
+                schedule =
+                    dbContext.ShiftSchedules
+                        .AsNoTracking()
+                        .FirstOrDefault(
+                            s =>
+                                s.EmployeeID ==
+                                    emp.EmployeeID &&
+                                s.IsRecurringPattern &&
+                                s.AppliesToDayOfWeek ==
+                                    day.DayOfWeek);
+            }
+
+            int paidBreakMin =
+                emp.StandardBreakMinutes;
+
+            int startGrace =
+                settings.LateGraceMinutes;
+
+            int endGrace =
+                settings.EndTimeGraceMinutes;
+
+            var scheduleResult =
+                _scheduleService.CalculateSchedule(
+                    emp,
+                    day,
+                    schedule,
+                    settings,
+                    paidBreakMin,
+                    startGrace,
+                    endGrace);
+
             punchesForDay =
                 (punchesForDay ??
                  new List<AttendanceLog>())
@@ -838,6 +960,16 @@ namespace Payroll.Shared.Services
                             p.IsApproved)
                     .ToList();
 
+            // 1200-K: an overnight ShiftDate owns the next calendar day's
+            // punches up to the scheduled shift end. This keeps a 22:00-06:00
+            // shift together instead of splitting it at midnight.
+            punchesForDay =
+                LoadCrossDayPunchesForOvernightShift(
+                    emp,
+                    day,
+                    punchesForDay,
+                    scheduleResult);
+
             var pr =
                 _punchProcessor.ProcessPunches(
                     punchesForDay,
@@ -850,7 +982,8 @@ namespace Payroll.Shared.Services
             DateTime? openPunchEnd =
                 GetOpenPunchEndTime(
                     day,
-                    pr.Ordered);
+                    pr.Ordered,
+                    scheduleResult);
 
             var dayTypeResult =
                 _dayTypeService.DetectDayType(
@@ -859,42 +992,6 @@ namespace Payroll.Shared.Services
                     pr.Ordered,
                     leaveRecord,
                     holidays);
-
-            int paidBreakMin =
-                emp.StandardBreakMinutes;
-
-            int startGrace =
-                settings.LateGraceMinutes;
-
-            int endGrace =
-                settings.EndTimeGraceMinutes;
-
-            if (schedule == null)
-            {
-                using var dbContext =
-                    _dbFactory.CreateDbContext();
-
-                schedule =
-                    dbContext.ShiftSchedules
-                        .AsNoTracking()
-                        .FirstOrDefault(
-                            s =>
-                                s.EmployeeID ==
-                                    emp.EmployeeID &&
-                                s.IsRecurringPattern &&
-                                s.AppliesToDayOfWeek ==
-                                    day.DayOfWeek);
-            }
-
-            var scheduleResult =
-                _scheduleService.CalculateSchedule(
-                    emp,
-                    day,
-                    schedule,
-                    settings,
-                    paidBreakMin,
-                    startGrace,
-                    endGrace);
 
             string status = "ERROR";
 
@@ -966,7 +1063,9 @@ namespace Payroll.Shared.Services
                         _breakService
                             .CalculateBreakPenalty(
                                 pr.Ordered,
-                                0);
+                                0,
+                                scheduleResult.HasShift ? scheduleResult.ShiftStart : (DateTime?)null,
+                                scheduleResult.HasShift ? scheduleResult.ShiftEnd : (DateTime?)null);
 
                     earnedStandard =
                         CalculateGrossWorkedIncludingOpenPunch(
@@ -1016,7 +1115,9 @@ namespace Payroll.Shared.Services
                         _breakService
                             .CalculateBreakPenalty(
                                 pr.Ordered,
-                                0);
+                                0,
+                                scheduleResult.HasShift ? scheduleResult.ShiftStart : (DateTime?)null,
+                                scheduleResult.HasShift ? scheduleResult.ShiftEnd : (DateTime?)null);
 
                     // ------------------------------------------------
                     // WEEKLY OFF WORKED
@@ -1197,7 +1298,9 @@ namespace Payroll.Shared.Services
                         _breakService
                             .CalculateBreakPenalty(
                                 pr.Ordered,
-                                paidBreakMin);
+                                paidBreakMin,
+                                scheduleResult.HasShift ? scheduleResult.ShiftStart : (DateTime?)null,
+                                scheduleResult.HasShift ? scheduleResult.ShiftEnd : (DateTime?)null);
 
                     // ------------------------------------------------
                     // REGULAR WORKED
@@ -1213,61 +1316,52 @@ namespace Payroll.Shared.Services
                     // pre-shift time as regular scheduled work.
                     // ------------------------------------------------
 
-                    TimeSpan workedInsideShift =
-                        CalculateWorkedInsideShift(
-                            pr.Ordered,
-                            scheduleResult.ShiftStart,
-                            scheduleResult.ShiftEnd,
-                            openPunchEnd);
-
-                    // IMPORTANT:
-                    //
-                    // Worked is the actual punch time inside the
-                    // scheduled shift.
-                    //
-                    // Break/gap time remains a separate value and is
-                    // passed independently to DailySummaryBuilder.
-                    //
-                    // Do NOT subtract totalBreak here. That would make
-                    // the Worked column smaller than the actual
-                    // shift-overlap work.
-                    //
-                    // Example:
-                    //
-                    // 18:00 - 18:05 = 00:05
-                    // 18:10 - 18:30 = 00:20
-                    //
-                    // Worked = 00:25
-                    // OT     = 06:20
-                    //
-                    earnedStandard =
-                        workedInsideShift;
-
-                    if (earnedStandard <
-                        TimeSpan.Zero)
+                    if (!scheduleResult.HasShift)
                     {
                         earnedStandard =
-                            TimeSpan.Zero;
+                            CalculateGrossWorkedIncludingOpenPunch(
+                                pr.Ordered,
+                                openPunchEnd);
+
+                        if (earnedStandard < TimeSpan.Zero)
+                        {
+                            earnedStandard = TimeSpan.Zero;
+                        }
+
+                        overtime = TimeSpan.Zero;
                     }
-
-                    // ------------------------------------------------
-                    // OUTSIDE SHIFT OT
-                    //
-                    // Pre-shift and post-shift punch time is OT.
-                    // ------------------------------------------------
-
-                    overtime =
-                        CalculateOutsideShiftOvertime(
-                            pr.Ordered,
-                            scheduleResult.ShiftStart,
-                            scheduleResult.ShiftEnd,
-                            openPunchEnd);
-
-                    if (overtime <
-                        TimeSpan.Zero)
+                    else
                     {
+                        TimeSpan workedInsideShift =
+                            CalculateWorkedInsideShift(
+                                pr.Ordered,
+                                scheduleResult.ShiftStart,
+                                scheduleResult.ShiftEnd,
+                                openPunchEnd);
+
+                        earnedStandard =
+                            workedInsideShift;
+
+                        if (earnedStandard <
+                            TimeSpan.Zero)
+                        {
+                            earnedStandard =
+                                TimeSpan.Zero;
+                        }
+
                         overtime =
-                            TimeSpan.Zero;
+                            CalculateOutsideShiftOvertime(
+                                pr.Ordered,
+                                scheduleResult.ShiftStart,
+                                scheduleResult.ShiftEnd,
+                                openPunchEnd);
+
+                        if (overtime <
+                            TimeSpan.Zero)
+                        {
+                            overtime =
+                                TimeSpan.Zero;
+                        }
                     }
 
                     // ------------------------------------------------
@@ -1293,9 +1387,7 @@ namespace Payroll.Shared.Services
                     // calculate live up to current India time.
                     //
                     // Historical odd punch:
-                    // Missing Punch.
-                    //
-                    // No fake OUT is inserted.
+                    // Missing Punch (with calculated worked/OT hours retained).
                     // ------------------------------------------------
 
                     else if (
@@ -1308,21 +1400,21 @@ namespace Payroll.Shared.Services
                             day.Date,
                             pr.Ordered.Count,
                             openPunchEnd.HasValue);
+
                         if (openPunchEnd.HasValue)
                         {
-                            status =
-                                "Present";
+                            DateTime indiaNow = GetIndiaNow();
+                            bool isShiftCrossed = scheduleResult.HasShift && indiaNow > scheduleResult.ShiftEnd;
+                            bool isLiveToday = (day.Date == indiaNow.Date ||
+                                (scheduleResult.HasShift &&
+                                 scheduleResult.ShiftEnd.Date > scheduleResult.ShiftStart.Date &&
+                                 indiaNow <= scheduleResult.ShiftEnd)) && !isShiftCrossed;
+
+                            status = isLiveToday ? "Present" : "Missing Punch";
                         }
                         else
                         {
-                            status =
-                                "Missing Punch";
-
-                            earnedStandard =
-                                TimeSpan.Zero;
-
-                            overtime =
-                                TimeSpan.Zero;
+                            status = "Missing Punch";
                         }
                     }
 

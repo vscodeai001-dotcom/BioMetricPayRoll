@@ -1,0 +1,407 @@
+@page "/employees/insights/{EmployeeId:int}"
+@using System.Globalization
+@using Microsoft.AspNetCore.Authorization
+@using global::Payroll.Shared
+@using global::Payroll.Shared.Data
+@using global::Payroll.Shared.Services
+@using global::Payroll.Web.Services
+@inject FirebaseEmployeeManagementService FirebaseEmployeeService
+@inject FirebaseEmployeeHistoryService FirebaseEmployeeHistoryService
+@inject FirebaseAttendanceService FirebaseAttendanceService
+@inject NavigationManager Navigation
+@inject ILogger<EmployeeInsights> _logger
+@inject IToastService toastService
+@attribute [Authorize(Roles = "Admin, SuperAdmin")]
+
+@if (EmployeeId == 0)
+{
+    <div class="alert alert-danger">Invalid Employee ID.</div>
+}
+else if (employee == null)
+{
+    <div class="p-5 text-center">
+        <div class="spinner-border text-primary" role="status"></div>
+        <p class="mt-3 text-muted fw-semibold">Loading Employee Insights... 📊</p>
+    </div>
+}
+else
+{
+    <PageTitle>Insights - @employee.Name 📊</PageTitle>
+
+    @* --- TOP HEADER & ACTIONS --- *@
+    <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+        <div>
+            <h3 class="mb-0 fw-bold">@employee.Name <span class="badge bg-primary fs-6 align-middle">#@employee.EmployeeID</span></h3>
+            <div class="text-muted small">
+                <span>💼 @employee.Role</span> • 
+                <span>🧬 Bio ID: @employee.BiometricID</span> • 
+                <span>🗓️ Joined: @(employee.HireDate?.ToString("dd-MMM-yyyy") ?? "--")</span> • 
+                <span class="text-success fw-bold">Employee Insights 📊</span>
+            </div>
+        </div>
+        <div class="d-flex align-items-center gap-2">
+            <button class="btn btn-outline-secondary btn-sm" @onclick="PrevMonth" title="Previous Month">
+                <i class="bi bi-chevron-left"></i>
+            </button>
+            <div class="badge bg-light text-dark border px-3 py-2 fw-semibold fs-6">
+                📅 @selectedMonth.ToString("MMMM yyyy")
+            </div>
+            <button class="btn btn-outline-secondary btn-sm" @onclick="NextMonth" title="Next Month">
+                <i class="bi bi-chevron-right"></i>
+            </button>
+            <button class="btn btn-outline-primary btn-sm ms-2" @onclick="GoToDetails" title="View Profile">
+                <i class="bi bi-person-vcard me-1"></i> Profile Details 👁️
+            </button>
+            <button class="btn btn-secondary btn-sm" @onclick="GoBack" title="Back to Directory">
+                <i class="bi bi-arrow-left me-1"></i> Directory
+            </button>
+        </div>
+    </div>
+
+    @* --- SALARY & COST PROJECTION CARDS (SSOT Matching Android StaffDetailActivity) --- *@
+    <div class="row g-3 mb-4">
+        <div class="col-md-3 col-sm-6">
+            <div class="card h-100 shadow-sm border-0 bg-primary text-white rounded-3">
+                <div class="card-body p-3">
+                    <div class="text-white-50 small text-uppercase fw-semibold">Gross Earned</div>
+                    <div class="fs-4 fw-bold mt-1">@totalEarnedGross.ToString("C0", inrCulture)</div>
+                    <div class="small mt-1 text-white-50">
+                        Base: @(employee.DirectHourlyWage > 0 ? $"{employee.DirectHourlyWage:C0}/hr" : $"{employee.MonthlySalary:C0}/mo")
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-md-3 col-sm-6">
+            <div class="card h-100 shadow-sm border-0 bg-success text-white rounded-3">
+                <div class="card-body p-3">
+                    <div class="text-white-50 small text-uppercase fw-semibold">Estimated Net Payable</div>
+                    <div class="fs-4 fw-bold mt-1">@netPayable.ToString("C0", inrCulture)</div>
+                    <div class="small mt-1 text-white-50">
+                        Advances: -@advancesSum.ToString("C0", inrCulture)
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-md-3 col-sm-6">
+            <div class="card h-100 shadow-sm border-0 bg-info text-white rounded-3">
+                <div class="card-body p-3">
+                    <div class="text-white-50 small text-uppercase fw-semibold">Overtime Earned</div>
+                    <div class="fs-4 fw-bold mt-1">@earnedOtPay.ToString("C0", inrCulture)</div>
+                    <div class="small mt-1 text-white-50">
+                        Total OT: @totalOtHours.ToString("N1") hrs (@employee.OT_Rule)
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-md-3 col-sm-6">
+            <div class="card h-100 shadow-sm border-0 bg-warning text-dark rounded-3">
+                <div class="card-body p-3">
+                    <div class="text-dark-50 small text-uppercase fw-semibold">Allowances &amp; Bonus</div>
+                    <div class="fs-4 fw-bold mt-1">@((allowancesSum + bonusesSum).ToString("C0", inrCulture))</div>
+                    <div class="small mt-1 text-muted">
+                        Allowances: @allowancesSum.ToString("C0", inrCulture) • Bonus: @bonusesSum.ToString("C0", inrCulture)
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    @* --- ATTENDANCE METRICS TILES (SSOT Matching Android Cards) --- *@
+    <div class="card shadow-sm border-0 rounded-3 mb-4">
+        <div class="card-header bg-light py-2 px-3 fw-semibold text-uppercase small text-muted">
+            <i class="bi bi-calendar-check me-2 text-primary"></i> Attendance Summary (@selectedMonth.ToString("MMMM yyyy"))
+        </div>
+        <div class="card-body p-3">
+            <div class="row text-center g-2">
+                <div class="col-6 col-md-2 border-end">
+                    <div class="fs-4 fw-bold text-dark">@workingDaysCount</div>
+                    <div class="text-muted small">Working Days</div>
+                </div>
+                <div class="col-6 col-md-2 border-end">
+                    <div class="fs-4 fw-bold text-success">@presentDaysCount</div>
+                    <div class="text-muted small">Present</div>
+                </div>
+                <div class="col-6 col-md-2 border-end">
+                    <div class="fs-4 fw-bold text-warning">@halfDaysCount</div>
+                    <div class="text-muted small">Half Day</div>
+                </div>
+                <div class="col-6 col-md-2 border-end">
+                    <div class="fs-4 fw-bold text-danger">@absentDaysCount</div>
+                    <div class="text-muted small">Absent</div>
+                </div>
+                <div class="col-6 col-md-2 border-end">
+                    <div class="fs-4 fw-bold text-info">@leaveDaysCount</div>
+                    <div class="text-muted small">Leave / Holiday</div>
+                </div>
+                <div class="col-6 col-md-2">
+                    <div class="fs-4 fw-bold text-primary">@totalWorkedHours.ToString("N1")</div>
+                    <div class="text-muted small">Hours Worked</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    @* --- DAILY ATTENDANCE & PUNCHES BREAKDOWN TABLE --- *@
+    <div class="card shadow-sm border-0 rounded-3 mb-4">
+        <div class="card-header bg-light py-2 px-3 d-flex justify-content-between align-items-center">
+            <span class="fw-semibold small text-uppercase text-muted">
+                <i class="bi bi-clock-history me-2 text-primary"></i> Daily Punch Logs &amp; Status
+            </span>
+            <span class="badge bg-secondary">@monthSummaries.Count records</span>
+        </div>
+        <div class="card-body p-0">
+            @if (isLoading)
+            {
+                <div class="text-center py-4">
+                    <div class="spinner-border spinner-border-sm text-primary" role="status"></div>
+                    <span class="ms-2 text-muted small">Loading records...</span>
+                </div>
+            }
+            else if (!monthSummaries.Any())
+            {
+                <div class="text-center py-5 text-muted">
+                    <i class="bi bi-calendar-x fs-2 d-block mb-2"></i>
+                    No attendance records found for this period.
+                </div>
+            }
+            else
+            {
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle table-sm mb-0">
+                        <thead class="table-light small text-uppercase">
+                            <tr>
+                                <th class="ps-3">Date</th>
+                                <th>Status</th>
+                                <th class="text-center">Hours Worked</th>
+                                <th class="text-center">Overtime</th>
+                                <th class="text-center">Lateness</th>
+                                <th class="text-center">Allowance</th>
+                                <th class="pe-3">Raw Punches (SSOT)</th>
+                            </tr>
+                        </thead>
+                        <tbody class="small">
+                            @foreach (var summary in monthSummaries.OrderByDescending(s => s.ShiftDate))
+                            {
+                                var punches = GetPunchesForDate(summary.ShiftDate);
+                                <tr>
+                                    <td class="ps-3 fw-semibold">@summary.ShiftDate.ToString("dd-MMM-yyyy (ddd)")</td>
+                                    <td>
+                                        <span class="badge @GetStatusBadgeClass(summary.Status)">@summary.Status</span>
+                                    </td>
+                                    <td class="text-center">@summary.EarnedStandardHours.ToString("N1") hrs</td>
+                                    <td class="text-center">
+                                        @(summary.TotalOvertimeDuration.TotalMinutes > 0 ? $"{summary.TotalOvertimeDuration.TotalHours:N1} hrs" : "--")
+                                    </td>
+                                    <td class="text-center text-muted">
+                                        @(summary.TotalLateness.TotalMinutes > 0 ? $"{summary.TotalLateness.TotalMinutes:N0}m" : "--")
+                                    </td>
+                                    <td class="text-center">
+                                        @(summary.ShiftAllowanceEarned > 0 ? summary.ShiftAllowanceEarned.ToString("C0", inrCulture) : "--")
+                                    </td>
+                                    <td class="pe-3">
+                                        @if (punches.Any())
+                                        {
+                                            <div class="d-flex flex-wrap gap-1">
+                                                @foreach (var p in punches)
+                                                {
+                                                    <span class="badge bg-light text-dark border" style="font-size:0.75rem;">
+                                                        ⏰ @p.PunchTime.ToLocalTime().ToString("hh:mm tt") @(string.IsNullOrWhiteSpace(p.LogType) ? "" : $"({p.LogType})")
+                                                    </span>
+                                                }
+                                            </div>
+                                        }
+                                        else
+                                        {
+                                            <span class="text-muted" style="font-size:0.75rem;">--</span>
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </div>
+    </div>
+}
+
+<ApplicationRealtimeRefreshListener EntityFilter="Employee" OnApplicationDataChanged="HandleRealtimeRefresh" />
+<AttendanceRefreshListener OnAttendanceChanged="HandleRealtimeRefresh" />
+
+@code {
+    [Parameter] public int EmployeeId { get; set; }
+
+    private Employee? employee;
+    private DateTime selectedMonth = new DateTime(DateTime.Now.Year, DateTime.Now.Month, 1);
+    private CultureInfo inrCulture = new CultureInfo("en-IN");
+    private bool isLoading = false;
+
+    private List<DailySummary> monthSummaries = new();
+    private List<AttendanceLog> monthPunches = new();
+    private List<SalaryAdvance> monthAdvances = new();
+    private List<BonusRecord> monthBonuses = new();
+
+    // Aggregates
+    private decimal totalEarnedGross = 0m;
+    private decimal earnedOtPay = 0m;
+    private decimal allowancesSum = 0m;
+    private decimal bonusesSum = 0m;
+    private decimal advancesSum = 0m;
+    private decimal netPayable = 0m;
+
+    private int workingDaysCount = 0;
+    private int presentDaysCount = 0;
+    private int halfDaysCount = 0;
+    private int absentDaysCount = 0;
+    private int leaveDaysCount = 0;
+    private decimal totalWorkedHours = 0m;
+    private double totalOtHours = 0;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadInsightsData();
+    }
+
+    private async Task LoadInsightsData()
+    {
+        if (EmployeeId == 0) return;
+        isLoading = true;
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            employee = await FirebaseEmployeeService.GetEmployeeAsync(EmployeeId);
+            if (employee == null || employee.IsDeleted)
+            {
+                Navigation.NavigateTo("/employees");
+                return;
+            }
+
+            var startOfMonth = DateOnly.FromDateTime(selectedMonth);
+            var endOfMonth = DateOnly.FromDateTime(selectedMonth.AddMonths(1).AddDays(-1));
+
+            // Load daily summaries from Firebase SSOT
+            monthSummaries = await FirebaseEmployeeHistoryService.GetDailySummariesAsync(
+                EmployeeId, startOfMonth, endOfMonth);
+
+            // Load canonical punches
+            monthPunches = await FirebaseAttendanceService.GetAttendancePunchesAsync(
+                startOfMonth, endOfMonth);
+            monthPunches = monthPunches.Where(p => p.EmployeeID == EmployeeId).ToList();
+
+            // Load financial items
+            var advances = await FirebaseEmployeeHistoryService.GetAdvancesAsync(EmployeeId);
+            monthAdvances = advances.Where(a => a.AdvanceDate.HasValue && a.AdvanceDate.Value.Year == selectedMonth.Year && a.AdvanceDate.Value.Month == selectedMonth.Month).ToList();
+
+            var bonuses = await FirebaseEmployeeHistoryService.GetBonusesAsync(EmployeeId);
+            monthBonuses = bonuses.Where(b => b.BonusDate.Year == selectedMonth.Year && b.BonusDate.Month == selectedMonth.Month).ToList();
+
+            CalculateMetrics();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error loading employee insights for ID {Id}", EmployeeId);
+            toastService.ShowError("Failed to load employee insights.");
+        }
+        finally
+        {
+            isLoading = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void CalculateMetrics()
+    {
+        if (employee == null) return;
+
+        presentDaysCount = monthSummaries.Count(s => s.Status == "Present");
+        halfDaysCount = monthSummaries.Count(s => s.Status == "Half Day");
+        absentDaysCount = monthSummaries.Count(s => s.Status.Contains("Absent") || s.Status.Contains("Loss"));
+        leaveDaysCount = monthSummaries.Count(s => s.Status.Contains("Leave") || s.Status == "Holiday" || s.Status == "Weekly Off");
+
+        totalWorkedHours = monthSummaries.Sum(s => s.EarnedStandardHours);
+        totalOtHours = monthSummaries.Sum(s => s.TotalOvertimeDuration.TotalHours);
+        allowancesSum = monthSummaries.Sum(s => s.ShiftAllowanceEarned);
+        bonusesSum = monthBonuses.Sum(b => b.Amount);
+        advancesSum = monthAdvances.Sum(a => a.Amount);
+
+        // Count expected working days
+        var startOfMonth = DateOnly.FromDateTime(selectedMonth);
+        var endOfMonth = DateOnly.FromDateTime(selectedMonth.AddMonths(1).AddDays(-1));
+        var daysInMonth = DateTime.DaysInMonth(selectedMonth.Year, selectedMonth.Month);
+        workingDaysCount = 0;
+        for (var d = startOfMonth; d <= endOfMonth; d = d.AddDays(1))
+        {
+            if (!employee.CompOffDayOfWeek.HasValue || d.DayOfWeek != employee.CompOffDayOfWeek.Value)
+            {
+                workingDaysCount++;
+            }
+        }
+
+        // Salary estimation
+        var directWage = employee.DirectHourlyWage ?? 0m;
+        var monthlySalary = employee.MonthlySalary;
+        var isHourly = directWage > 0;
+        var standardHoursPerDay = employee.StandardHours > 0 ? (decimal)employee.StandardHours : 8m;
+
+        if (isHourly)
+        {
+            totalEarnedGross = totalWorkedHours * directWage;
+            earnedOtPay = (decimal)totalOtHours * directWage * 1.5m;
+        }
+        else
+        {
+            var dailyRate = workingDaysCount > 0 ? monthlySalary / workingDaysCount : 0m;
+            var hourlyRate = dailyRate / standardHoursPerDay;
+            totalEarnedGross = (presentDaysCount * dailyRate) + (halfDaysCount * (dailyRate / 2m));
+            
+            var otMultiplier = 1.0m;
+            if (employee.OT_Rule == "1.5x") otMultiplier = 1.5m;
+            else if (employee.OT_Rule == "2.0x") otMultiplier = 2.0m;
+            earnedOtPay = (decimal)totalOtHours * (employee.OT_FlatRate > 0 ? employee.OT_FlatRate : hourlyRate * otMultiplier);
+        }
+
+        netPayable = Math.Max(0m, (totalEarnedGross + earnedOtPay + allowancesSum + bonusesSum) - advancesSum);
+    }
+
+    private List<AttendanceLog> GetPunchesForDate(DateOnly date)
+    {
+        return monthPunches
+            .Where(p => DateOnly.FromDateTime(p.PunchTime.ToLocalTime()) == date)
+            .OrderBy(p => p.PunchTime)
+            .ToList();
+    }
+
+    private string GetStatusBadgeClass(string? status) => status switch
+    {
+        "Present" => "bg-success text-white",
+        "Half Day" => "bg-warning text-dark",
+        "Absent" => "bg-danger text-white",
+        "Holiday" => "bg-info text-white",
+        "Weekly Off" => "bg-secondary text-white",
+        _ => "bg-light text-dark border"
+    };
+
+    private async Task PrevMonth()
+    {
+        selectedMonth = selectedMonth.AddMonths(-1);
+        await LoadInsightsData();
+    }
+
+    private async Task NextMonth()
+    {
+        selectedMonth = selectedMonth.AddMonths(1);
+        await LoadInsightsData();
+    }
+
+    private void GoToDetails() => Navigation.NavigateTo($"/employees/details/{EmployeeId}");
+    private void GoBack() => Navigation.NavigateTo("/employees");
+
+    private async Task HandleRealtimeRefresh()
+    {
+        await LoadInsightsData();
+    }
+}

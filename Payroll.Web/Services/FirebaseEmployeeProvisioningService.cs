@@ -31,11 +31,8 @@ public sealed class FirebaseEmployeeProvisioningService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Firebase claims are the long-lived bridge between the Firebase Auth
-        // account and the existing payroll employee record. This reconciliation
-        // intentionally keeps running so Firebase Console-created users are
-        // provisioned even when they are added after Web startup.
-        await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
+        // Stagger startup slightly so it does not collide with SuperAdmin provisioning
+        await Task.Delay(TimeSpan.FromSeconds(8), stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -54,7 +51,8 @@ public sealed class FirebaseEmployeeProvisioningService : BackgroundService
                     "Firebase Employee claim provisioning cycle failed; the next cycle will retry.");
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(3600), stoppingToken);
+            // Periodic claim check every 2 minutes instead of aggressive 30s hammering
+            await Task.Delay(TimeSpan.FromMinutes(2), stoppingToken);
         }
     }
 
@@ -104,34 +102,83 @@ public sealed class FirebaseEmployeeProvisioningService : BackgroundService
             UserRecord? firebaseUser;
             try
             {
-                firebaseUser = await auth.GetUserByEmailAsync(email, ct);
+                using var opCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                opCts.CancelAfter(TimeSpan.FromSeconds(10));
+                firebaseUser = await auth.GetUserByEmailAsync(email, opCts.Token);
             }
             catch (FirebaseAuthException ex) when (ex.AuthErrorCode == AuthErrorCode.UserNotFound)
             {
-                // Do not create an account here because this service must never
-                // invent or persist an employee password. User Management or a
-                // successful one-time password migration creates the Auth user.
+                continue;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Could not resolve Firebase user for employee {Email}.", email);
                 continue;
             }
 
-            await auth.SetCustomUserClaimsAsync(
-                firebaseUser.Uid,
-                new Dictionary<string, object>
-                {
-                    ["role"] = "Employee",
-                    ["employee_id"] = employee.EmployeeID,
-                    ["owner_uid"] = ownerUid
-                },
-                ct);
+            if (firebaseUser == null) continue;
 
-            count++;
+            // Resolve which tenant this employee belongs to
+            string targetOwnerUid = employee.TenantId?.Trim() ?? string.Empty;
+
+            if (string.IsNullOrWhiteSpace(targetOwnerUid) &&
+                firebaseUser.CustomClaims != null &&
+                firebaseUser.CustomClaims.TryGetValue("owner_uid", out var existingOwner) &&
+                !string.IsNullOrWhiteSpace(existingOwner?.ToString()))
+            {
+                targetOwnerUid = existingOwner.ToString()!.Trim();
+            }
+
+            if (string.IsNullOrWhiteSpace(targetOwnerUid))
+            {
+                targetOwnerUid = _firebase.ResolveOwnerUid(employee.Email, "Employee");
+            }
+
+            if (string.IsNullOrWhiteSpace(targetOwnerUid))
+            {
+                targetOwnerUid = Payroll.Shared.Firebase.FirebaseSsotSchema.DefaultOwnerUid;
+            }
+
+            // PERFORMANCE OPTIMIZATION: Check if claims are already accurately set.
+            // Avoids making redundant Google Auth API write calls every cycle.
+            if (firebaseUser.CustomClaims != null &&
+                firebaseUser.CustomClaims.TryGetValue("role", out var r) && r?.ToString() == "Employee" &&
+                firebaseUser.CustomClaims.TryGetValue("employee_id", out var eid) && Convert.ToInt32(eid) == employee.EmployeeID &&
+                firebaseUser.CustomClaims.TryGetValue("owner_uid", out var ouid) && string.Equals(ouid?.ToString(), targetOwnerUid, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            try
+            {
+                using var opCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                opCts.CancelAfter(TimeSpan.FromSeconds(10));
+                await auth.SetCustomUserClaimsAsync(
+                    firebaseUser.Uid,
+                    new Dictionary<string, object>
+                    {
+                        ["role"] = "Employee",
+                        ["employee_id"] = employee.EmployeeID,
+                        ["owner_uid"] = targetOwnerUid
+                    },
+                    opCts.Token);
+
+                count++;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to set claims for employee {Email}.", email);
+            }
         }
 
         await ProvisionAdministrativeUsersAsync(users, auth, ownerUid, ct);
 
-        _logger.LogInformation(
-            "Firebase claim provisioning cycle completed. Employees provisioned: {Count}.",
-            count);
+        if (count > 0)
+        {
+            _logger.LogInformation(
+                "Firebase claim provisioning cycle completed. Employees updated: {Count}.",
+                count);
+        }
     }
 
     private async Task ProvisionAdministrativeUsersAsync(
@@ -157,23 +204,47 @@ public sealed class FirebaseEmployeeProvisioningService : BackgroundService
             UserRecord firebaseUser;
             try
             {
-                firebaseUser = await auth.GetUserByEmailAsync(identity.Email.Trim(), ct);
+                using var opCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                opCts.CancelAfter(TimeSpan.FromSeconds(10));
+                firebaseUser = await auth.GetUserByEmailAsync(identity.Email.Trim(), opCts.Token);
             }
             catch (FirebaseAuthException ex) when (ex.AuthErrorCode == AuthErrorCode.UserNotFound)
             {
-                // Never invent an administrative password here. The account
-                // must first exist in Firebase Authentication.
+                continue;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Could not resolve Firebase user for admin {Email}.", identity.Email);
                 continue;
             }
 
-            await auth.SetCustomUserClaimsAsync(
-                firebaseUser.Uid,
-                new Dictionary<string, object>
-                {
-                    ["role"] = role,
-                    ["owner_uid"] = ownerUid
-                },
-                ct);
+            if (firebaseUser == null) continue;
+
+            // Skip if already matching
+            if (firebaseUser.CustomClaims != null &&
+                firebaseUser.CustomClaims.TryGetValue("role", out var r) && r?.ToString() == role &&
+                firebaseUser.CustomClaims.TryGetValue("owner_uid", out var ouid) && ouid?.ToString() == ownerUid)
+            {
+                continue;
+            }
+
+            try
+            {
+                using var opCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                opCts.CancelAfter(TimeSpan.FromSeconds(10));
+                await auth.SetCustomUserClaimsAsync(
+                    firebaseUser.Uid,
+                    new Dictionary<string, object>
+                    {
+                        ["role"] = role,
+                        ["owner_uid"] = ownerUid
+                    },
+                    opCts.Token);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to set claims for admin {Email}.", identity.Email);
+            }
         }
     }
 

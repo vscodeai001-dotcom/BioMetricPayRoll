@@ -1,4 +1,4 @@
-﻿using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
 using Payroll.Shared.Data;
 using System.Threading.Tasks;
 
@@ -38,17 +38,161 @@ namespace Payroll.Shared.Services
             }
         }
 
-        // --- THIS METHOD IS UNCHANGED ---
+        // --- WIPE ALL TRANSACTIONAL DATA ---
+        // Dynamically discovers all existing transactional tables from sqlite_master
+        // or information_schema, disables foreign key constraints during bulk delete,
+        // and clears sqlite_sequence.
         public async Task WipeAllTransactionalDataAsync()
         {
-            // 1. Truncate tables not linked by foreign key
-            await _dbContext.Database.ExecuteSqlRawAsync("TRUNCATE TABLE public.shiftschedules, public.daily_summaries RESTART IDENTITY;");
+            var isSqlite = _dbContext.Database.IsSqlite();
 
-            // 2. Truncate employees (which cascades to logs, payroll, advances, leave)
-            await _dbContext.Database.ExecuteSqlRawAsync("TRUNCATE TABLE public.employees RESTART IDENTITY CASCADE;");
+            if (isSqlite)
+            {
+                await _dbContext.Database.ExecuteSqlRawAsync("PRAGMA foreign_keys = OFF;");
+            }
 
-            // 3. Truncate all user accounts (which cascades to their role links)
-            await _dbContext.Database.ExecuteSqlRawAsync("TRUNCATE TABLE public.\"AspNetUsers\" RESTART IDENTITY CASCADE;");
+            try
+            {
+                var ignoredTables = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    "__EFMigrationsHistory",
+                    "feature_settings",
+                    "CompanySettings",
+                    "holidays",
+                    "professional_tax_slabs",
+                    "AspNetRoles",
+                    "AspNetRoleClaims",
+                    "AspNetUsers",
+                    "AspNetUserRoles",
+                    "UserThemePreferences"
+                };
+
+                var connection = _dbContext.Database.GetDbConnection();
+                var wasOpen = connection.State == System.Data.ConnectionState.Open;
+                if (!wasOpen)
+                {
+                    await connection.OpenAsync();
+                }
+
+                var existingTables = new List<string>();
+                using (var cmd = connection.CreateCommand())
+                {
+                    cmd.CommandText = isSqlite
+                        ? "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';"
+                        : "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';";
+
+                    using var reader = await cmd.ExecuteReaderAsync();
+                    while (await reader.ReadAsync())
+                    {
+                        var tableName = reader.GetString(0);
+                        if (!ignoredTables.Contains(tableName))
+                        {
+                            existingTables.Add(tableName);
+                        }
+                    }
+                }
+
+                foreach (var table in existingTables)
+                {
+                    var deleteSql = "DELETE FROM \"" + table.Replace("\"", "") + "\";";
+                    await _dbContext.Database.ExecuteSqlRawAsync(deleteSql);
+                }
+
+                if (isSqlite && existingTables.Count > 0)
+                {
+                    var tableList = string.Join(",", existingTables.Select(t => "'" + t.Replace("'", "''") + "'"));
+                    var seqSql = "DELETE FROM sqlite_sequence WHERE name IN (" + tableList + ");";
+                    await _dbContext.Database.ExecuteSqlRawAsync(seqSql);
+                }
+            }
+            finally
+            {
+                if (isSqlite)
+                {
+                    await _dbContext.Database.ExecuteSqlRawAsync("PRAGMA foreign_keys = ON;");
+                }
+            }
+        }
+
+        // --- WIPE OPERATIONAL DATA ONLY (PARTIAL WIPE) ---
+        // Preserves all Admin Settings screens:
+        // Employee Records, Holiday Management, Company Settings, User & Role Mgmt, Feature Toggles, Tax Slabs, Shops.
+        // Wipes attendance logs, punches, GPS tracking, payroll, leaves, advances, and audit logs.
+        public async Task WipeOperationalDataOnlyAsync()
+        {
+            var isSqlite = _dbContext.Database.IsSqlite();
+
+            if (isSqlite)
+            {
+                await _dbContext.Database.ExecuteSqlRawAsync("PRAGMA foreign_keys = OFF;");
+            }
+
+            try
+            {
+                var ignoredTables = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    "__EFMigrationsHistory",
+                    "feature_settings",
+                    "CompanySettings",
+                    "holidays",
+                    "professional_tax_slabs",
+                    "AspNetRoles",
+                    "AspNetRoleClaims",
+                    "AspNetUsers",
+                    "AspNetUserRoles",
+                    "AspNetUserClaims",
+                    "AspNetUserLogins",
+                    "AspNetUserTokens",
+                    "Employees",
+                    "Shops",
+                    "UserThemePreferences"
+                };
+
+                var connection = _dbContext.Database.GetDbConnection();
+                var wasOpen = connection.State == System.Data.ConnectionState.Open;
+                if (!wasOpen)
+                {
+                    await connection.OpenAsync();
+                }
+
+                var existingTables = new List<string>();
+                using (var cmd = connection.CreateCommand())
+                {
+                    cmd.CommandText = isSqlite
+                        ? "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';"
+                        : "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';";
+
+                    using var reader = await cmd.ExecuteReaderAsync();
+                    while (await reader.ReadAsync())
+                    {
+                        var tableName = reader.GetString(0);
+                        if (!ignoredTables.Contains(tableName))
+                        {
+                            existingTables.Add(tableName);
+                        }
+                    }
+                }
+
+                foreach (var table in existingTables)
+                {
+                    var deleteSql = "DELETE FROM \"" + table.Replace("\"", "") + "\";";
+                    await _dbContext.Database.ExecuteSqlRawAsync(deleteSql);
+                }
+
+                if (isSqlite && existingTables.Count > 0)
+                {
+                    var tableList = string.Join(",", existingTables.Select(t => "'" + t.Replace("'", "''") + "'"));
+                    var seqSql = "DELETE FROM sqlite_sequence WHERE name IN (" + tableList + ");";
+                    await _dbContext.Database.ExecuteSqlRawAsync(seqSql);
+                }
+            }
+            finally
+            {
+                if (isSqlite)
+                {
+                    await _dbContext.Database.ExecuteSqlRawAsync("PRAGMA foreign_keys = ON;");
+                }
+            }
         }
 
 

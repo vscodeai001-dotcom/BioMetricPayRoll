@@ -1,4 +1,4 @@
-﻿@using global::Payroll.Shared.Data
+@using global::Payroll.Shared.Data
 @using Microsoft.AspNetCore.Components.Forms
 @using System.Diagnostics.CodeAnalysis
 
@@ -22,20 +22,51 @@
         <input class="form-control form-control-sm" @bind="Employee.Role" placeholder="Engineer" />
     </div>
     <div class="col-md-2">
+        <label class="form-label small fw-bold text-primary mb-0">Phone Number</label>
+        <input class="form-control form-control-sm" @bind="Employee.PhoneNumber" placeholder="9876543210" />
+    </div>
+    <div class="col-md-2">
         <label class="form-label small fw-bold text-primary mb-0">Hire Date <span class="text-danger">*</span></label>
         <input type="date" class="form-control form-control-sm" @bind="HireDate" required />
     </div>
 
     @* --- ROW 2: PAYROLL & SHIFT --- *@
-    <div class="col-md-2">
-        <label class="form-label small fw-bold text-success mb-0">Salary (₹)</label>
-        <input type="number" step="0.01" min="0" class="form-control form-control-sm" @bind="Employee.MonthlySalary" />
+    <div class="col-md-12 mt-2">
+        <h6 class="text-success small fw-bold uppercase border-bottom pb-1 mb-2">Payroll & Compensation 💰</h6>
     </div>
-    <div class="col-md-2">
-        <label class="form-label small fw-bold text-success mb-0">Hourly (₹)</label>
-        <input type="number" step="0.01" min="0" class="form-control form-control-sm" @bind="Employee.DirectHourlyWage" />
+
+    <div class="col-md-3">
+        <label class="form-label small fw-bold text-success mb-1">Salary Base Type</label>
+        <div class="btn-group btn-group-sm w-100" role="group">
+            <input type="radio" class="btn-check" name="salaryType" id="st_monthly" autocomplete="off"
+                   checked="@(Employee.SalaryType == "MONTHLY_FIXED")" @onclick="@(() => Employee.SalaryType = "MONTHLY_FIXED")">
+            <label class="btn btn-outline-success" for="st_monthly">Monthly</label>
+
+            <input type="radio" class="btn-check" name="salaryType" id="st_hourly" autocomplete="off"
+                   checked="@(Employee.SalaryType == "PER_HOUR")" @onclick="@(() => Employee.SalaryType = "PER_HOUR")">
+            <label class="btn btn-outline-success" for="st_hourly">Hourly</label>
+        </div>
     </div>
+
     <div class="col-md-2">
+        <label class="form-label small fw-bold text-success mb-0">Salary Rate (Gross ₹)</label>
+        <input type="number" step="0.01" min="0" class="form-control form-control-sm" @bind="Employee.MonthlySalary" @bind:after="ValidateSalaryComponents" />
+    </div>
+
+    <div class="col-md-2">
+        <label class="form-label small fw-bold text-success mb-0">Daily Allow.(₹)</label>
+        <input type="number" step="0.01" min="0" class="form-control form-control-sm" @bind="Employee.DailyAllowance" />
+    </div>
+
+    @if (IsSuperAdmin || CompanySettings?.EnableShiftAllowance == true)
+    {
+        <div class="col-md-2">
+            <label class="form-label small fw-bold text-primary mb-0">Night Allow.(₹)</label>
+            <input type="number" class="form-control form-control-sm" @bind="Employee.NightShiftAllowance" placeholder="0.00" />
+        </div>
+    }
+
+    <div class="col-md-3">
         <label class="form-label small fw-bold text-success mb-0">Calc Method</label>
         <select class="form-select form-select-sm" @bind="Employee.SalaryCalculationMethod">
             <option value="">-- Default --</option>
@@ -46,15 +77,11 @@
         </select>
     </div>
 
-    <div class="col-md-2">
-        <label class="form-label small fw-bold text-success mb-0">Monthly Gross (₹)</label>
-        <input type="number" step="0.01" min="0" class="form-control form-control-sm" @bind="Employee.MonthlySalary" @bind:after="ValidateSalaryComponents" /> 
-    </div>
     @if (FeatureSettings?.EnableSalaryStructuring == true) // <-- FEATURE GATE APPLIED
     {
         <div class="col-md-2">
             <label class="form-label small fw-bold text-success mb-0">Basic (₹)</label>
-            <input type="number" step="0.01" min="0" class="form-control form-control-sm" @bind="Employee.BasicSalaryComponent" @* bind after removed duplicate *@ />
+            <input type="number" step="0.01" min="0" class="form-control form-control-sm" @bind="Employee.BasicSalaryComponent" />
         </div>
         <div class="col-md-2">
             <label class="form-label small fw-bold text-success mb-0">HRA (₹)</label>
@@ -75,11 +102,29 @@
         <input type="time" class="form-control form-control-sm" @bind="ShiftEndTime" />
     </div>
     <div class="col-md-2">
+        <label class="form-label small fw-bold text-primary mb-0">Shift Mode</label>
+        <select class="form-select form-select-sm" @bind="Employee.ShiftMode">
+            <option value="SINGLE_DAY">Single Day (Standard)</option>
+            <option value="CONTINUOUS">Continuous (Overnight/Cross-Day)</option>
+        </select>
+    </div>
+    <div class="col-md-2">
+        <label class="form-label small fw-bold text-primary mb-0">Tracking Type 🛰️</label>
+        <select class="form-select form-select-sm" @bind="Employee.TrackingMode">
+            <option value="24/7">24/7 Tracking</option>
+            <option value="SHIFT">Shift Time Only</option>
+        </select>
+    </div>
+    <div class="col-md-2">
         <label class="form-label small fw-bold text-info mb-0">Break (Min) <span class="text-danger">*</span></label>
         <input type="number" min="0" class="form-control form-control-sm" @bind="Employee.StandardBreakMinutes" required />
     </div>
 
     @* --- ROW 3: RULES & DATES --- *@
+    <div class="col-md-12 mt-2">
+        <h6 class="text-secondary small fw-bold uppercase border-bottom pb-1 mb-2">Rules & Eligibility ⚙️</h6>
+    </div>
+
     <div class="col-md-2">
         <label class="form-label small fw-bold text-secondary mb-0">OT Rule</label>
         <select class="form-select form-select-sm" @bind="Employee.OT_Rule">
@@ -115,16 +160,33 @@
         <label class="form-label small fw-bold text-danger mb-0">Termination</label>
         <input type="date" class="form-control form-control-sm" @bind="TerminationDate" />
     </div>
-    @if (IsSuperAdmin || CompanySettings?.EnableShiftAllowance == true)
-    {
-        <div class="col-md-2">
-            <label class="form-label small fw-bold text-primary mb-0">Night Allow.(₹)</label>
-            <input type="number" class="form-control form-control-sm" @bind="Employee.NightShiftAllowance" placeholder="0.00" />
-        </div>
-    }
     <div class="col-md-2">
         <label class="form-label small fw-bold text-danger mb-0">TDS Rate (%)</label>
         <input type="number" step="0.01" min="0" class="form-control form-control-sm" @bind="Employee.TdsRatePercent" placeholder="0.00" />
+    </div>
+
+    <div class="col-md-12 mt-2">
+        <div class="d-flex gap-4 p-2 bg-light border rounded">
+            <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" @bind="Employee.IsBonusEligible" id="chkBonus">
+                <label class="form-check-label small fw-bold" for="chkBonus">Eligible for Bonus</label>
+            </div>
+            <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" @bind="Employee.IsPaidLeaveEligible" id="chkPaidLeave">
+                <label class="form-check-label small fw-bold" for="chkPaidLeave">Eligible for Paid Leave</label>
+            </div>
+            @if (Employee.IsPaidLeaveEligible)
+            {
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" @bind="Employee.PaidLeaveOnWeekdays" id="chkPlWeekdays">
+                    <label class="form-check-label small" for="chkPlWeekdays">On Weekdays</label>
+                </div>
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" @bind="Employee.PaidLeaveOnWeekends" id="chkPlWeekends">
+                    <label class="form-check-label small" for="chkPlWeekends">On Weekends</label>
+                </div>
+            }
+        </div>
     </div>
     <div class="col-md-2"></div> @* Spacer *@
 

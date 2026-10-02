@@ -5,7 +5,7 @@
 @using global::Payroll.Shared.Data
 @using Microsoft.EntityFrameworkCore
 @using global::Payroll.Web.Components.UI.Finance
-@inject IDbContextFactory<AppDbContext> DbFactory
+@inject FirebaseAdvanceService FirebaseAdvances
 @inject AttendanceRefreshService AttendanceRefresh
 @inject IJSRuntime JSRuntime
 @inject ILogger<SalaryAdvancePage> _logger
@@ -28,10 +28,29 @@
 }
 else
 {
-    <AttendanceRefreshListener OnAttendanceChanged="HandleAttendanceRefresh" />
+    <AttendanceRefreshListener OnAdvanceChanged="HandleAdvanceRefresh" />
 
-    <h3>Salary Advances</h3>
-    <p>Log a cash advance for an employee. It will be automatically deducted during the next payroll run.</p>
+    <div class="page-header-container">
+        <div class="d-flex align-items-center gap-3">
+            <div class="emoji-icon-badge emoji-icon-badge-danger">
+                💳
+            </div>
+            <div>
+                <h2 class="page-header-title">
+                    Salary Advance Management
+                </h2>
+                <p class="page-header-subtitle">
+                    <span>💸 Issue employee advance wages & track automatic deductions in upcoming payroll cycles</span>
+                </p>
+            </div>
+        </div>
+
+        <div class="d-flex align-items-center gap-2">
+            <span class="badge bg-warning bg-opacity-10 text-dark rounded-pill px-3 py-2 fw-semibold border">
+                <span>⚠️ Auto-Deducted at Next Payroll</span>
+            </span>
+        </div>
+    </div>
 
     @* --- 1. ADD ENTRY FORM COMPONENT --- *@
     <AdvanceEntryForm NewAdvance="newAdvance"
@@ -40,32 +59,36 @@ else
                       IsSaving="false" />
 
     @* --- 2. FILTER BAR --- *@
-    <div class="row p-3 mb-3 border rounded bg-light">
-        <div class="col-md-4">
-            <label class="form-label">Filter by Employee</label>
-            <select class="form-select" @bind="selectedEmployeeId">
-                <option value="0">-- All Employees --</option>
-                @if (employeeList != null)
-                {
-                    @foreach (var emp in employeeList)
-                    {
-                        <option value="@emp.EmployeeID">@emp.Name</option>
-                    }
-                }
-            </select>
-        </div>
-        <div class="col-md-3">
-            <label class="form-label">Start Date</label>
-            <input type="date" class="form-control" @bind="startDate" />
-        </div>
-        <div class="col-md-3">
-            <label class="form-label">End Date</label>
-            <input type="date" class="form-control" @bind="endDate" />
-        </div>
-        <div class="col-md-2 d-flex align-items-end">
-            <button class="btn btn-primary w-100" @onclick="LoadData" disabled="@(isLoadingHistory || isLoadingUnpaid)">
-                <i class="bi bi-search"></i> Search
-            </button>
+    <div class="card border-0 shadow-sm rounded-4 mb-4">
+        <div class="card-body p-3 p-md-4">
+            <div class="row g-3 align-items-end">
+                <div class="col-md-4">
+                    <label class="form-label small fw-bold text-muted">👤 Filter by Employee</label>
+                    <select class="form-select rounded-3" @bind="selectedEmployeeId">
+                        <option value="0">-- All Employees --</option>
+                        @if (employeeList != null)
+                        {
+                            @foreach (var emp in employeeList)
+                            {
+                                <option value="@emp.EmployeeID">@emp.Name</option>
+                            }
+                        }
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small fw-bold text-muted">📅 Start Date</label>
+                    <input type="date" class="form-control rounded-3" @bind="startDate" />
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small fw-bold text-muted">📅 End Date</label>
+                    <input type="date" class="form-control rounded-3" @bind="endDate" />
+                </div>
+                <div class="col-md-2">
+                    <button class="btn btn-primary action-pill-btn w-100 justify-content-center" @onclick="LoadData" disabled="@(isLoadingHistory || isLoadingUnpaid)">
+                        <span>🔍</span> <i class="bi bi-search"></i> Search
+                    </button>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -114,18 +137,15 @@ else
     {
         try
         {
-            await using var dbContext = await DbFactory.CreateDbContextAsync();
-
             // 1. GATE CHECK
-            var features = await dbContext.FeatureSettings.AsNoTracking().FirstOrDefaultAsync(f => f.Id == 1);
-            if (features != null && !features.EnableSalaryAdvance)
+            if (!await FirebaseAdvances.IsEnabledAsync())
             {
                 isAccessDenied = true;
                 return;
             }
 
             // 2. Load Data
-            employeeList = await dbContext.Employees.OrderBy(e => e.Name).ToListAsync();
+            employeeList = await FirebaseAdvances.GetActiveEmployeesAsync();
             await LoadData(); // Trigger data load
         }
         catch (Exception ex)
@@ -144,41 +164,46 @@ else
         }
     }
 
-    private async Task HandleAttendanceRefresh()
+    private async Task HandleAdvanceRefresh()
     {
-        await LoadData();
+        await LoadDataSmoothly();
     }
 
     private async Task LoadData()
     {
-        await Task.WhenAll(LoadUnpaidAdvances(), LoadAllHistory());
+        await Task.WhenAll(LoadUnpaidAdvances(isSilent: false), LoadAllHistory(isSilent: false));
     }
 
-    private async Task LoadUnpaidAdvances()
+    private async Task LoadDataSmoothly()
     {
-        isLoadingUnpaid = true;
-        unpaidAdvances = null;
-        await InvokeAsync(StateHasChanged);
+        await Task.WhenAll(LoadUnpaidAdvances(isSilent: true), LoadAllHistory(isSilent: true));
+    }
+
+    private async Task LoadUnpaidAdvances(bool isSilent = false)
+    {
+        if (!isSilent && unpaidAdvances == null)
+        {
+            isLoadingUnpaid = true;
+            await InvokeAsync(StateHasChanged);
+        }
 
         try
         {
-            await using var dbContext = await DbFactory.CreateDbContextAsync();
-            var query = dbContext.SalaryAdvances.Where(adv => adv.PayrollID_Paid == null);
-
-            if (selectedEmployeeId > 0)
-                query = query.Where(adv => adv.EmployeeID == selectedEmployeeId);
-            if (startDate.HasValue)
-                query = query.Where(adv => adv.AdvanceDate.HasValue && adv.AdvanceDate.Value.Date >= startDate.Value.Date);
-            if (endDate.HasValue)
-                query = query.Where(adv => adv.AdvanceDate.HasValue && adv.AdvanceDate.Value.Date <= endDate.Value.Date);
-
-            unpaidAdvances = await query.OrderByDescending(adv => adv.AdvanceDate).ToListAsync();
+            var freshAdvances = await FirebaseAdvances.GetAsync(
+                selectedEmployeeId, startDate, endDate, unpaidOnly: true);
+            unpaidAdvances = freshAdvances;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error loading unpaid advances.");
-            toastService.ShowError($"Error loading unpaid advances: {ex.Message}");
-            unpaidAdvances = new List<SalaryAdvance>();
+            if (!isSilent)
+            {
+                toastService.ShowError($"Error loading unpaid advances: {ex.Message}");
+            }
+            if (unpaidAdvances == null)
+            {
+                unpaidAdvances = new List<SalaryAdvance>();
+            }
         }
         finally
         {
@@ -187,30 +212,31 @@ else
         }
     }
 
-    private async Task LoadAllHistory()
+    private async Task LoadAllHistory(bool isSilent = false)
     {
-        isLoadingHistory = true;
-        allAdvancesHistory = null;
-        await InvokeAsync(StateHasChanged);
+        if (!isSilent && allAdvancesHistory == null)
+        {
+            isLoadingHistory = true;
+            await InvokeAsync(StateHasChanged);
+        }
+
         try
         {
-            await using var dbContext = await DbFactory.CreateDbContextAsync();
-            var query = dbContext.SalaryAdvances.AsQueryable();
-
-            if (selectedEmployeeId > 0)
-                query = query.Where(adv => adv.EmployeeID == selectedEmployeeId);
-            if (startDate.HasValue)
-                query = query.Where(adv => adv.AdvanceDate.HasValue && adv.AdvanceDate.Value.Date >= startDate.Value.Date);
-            if (endDate.HasValue)
-                query = query.Where(adv => adv.AdvanceDate.HasValue && adv.AdvanceDate.Value.Date <= endDate.Value.Date);
-
-            allAdvancesHistory = await query.OrderByDescending(adv => adv.AdvanceDate).ThenBy(adv => adv.EmployeeID).ToListAsync();
+            var freshHistory = await FirebaseAdvances.GetAsync(
+                selectedEmployeeId, startDate, endDate, unpaidOnly: false);
+            allAdvancesHistory = freshHistory;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error loading advance history with filters.");
-            toastService.ShowError($"Error loading advance history: {ex.Message}");
-            allAdvancesHistory = new List<SalaryAdvance>();
+            if (!isSilent)
+            {
+                toastService.ShowError($"Error loading advance history: {ex.Message}");
+            }
+            if (allAdvancesHistory == null)
+            {
+                allAdvancesHistory = new List<SalaryAdvance>();
+            }
         }
         finally
         {
@@ -226,11 +252,13 @@ else
         {
             try
             {
-                await using var dbContext = await DbFactory.CreateDbContextAsync();
                 var employeeId = advanceToDelete.EmployeeID;
-                
-                dbContext.SalaryAdvances.Remove(advanceToDelete);
-                await dbContext.SaveChangesAsync();
+                var deleted = await FirebaseAdvances.DeleteAsync(advanceToDelete);
+                if (!deleted)
+                {
+                    toastService.ShowWarning("This advance could not be deleted. Paid advances are protected.");
+                    return;
+                }
 
                 toastService.ShowSuccess("Advance deleted.");
 

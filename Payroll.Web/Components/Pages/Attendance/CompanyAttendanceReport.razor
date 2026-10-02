@@ -3,13 +3,12 @@
 @using Microsoft.AspNetCore.Authorization
 @using global::Payroll.Shared
 @using global::Payroll.Shared.Data
-@using Microsoft.EntityFrameworkCore
 @using global::Payroll.Shared.Services
 @using global::Payroll.Shared.Models
 @using global::Payroll.Web.Services
 @using System.Text
 @using System.IO
-@inject IDbContextFactory<AppDbContext> DbFactory
+@inject FirebaseAttendanceService FirebaseAttendance
 @inject IJSRuntime JSRuntime
 @inject ILogger<CompanyAttendanceReport> _logger
 @inject IToastService toastService
@@ -18,83 +17,118 @@
 
 <PageTitle>Company Attendance Report</PageTitle>
 
-<h3>Company Attendance Report</h3>
-<p>Cumulative attendance summary for all employees from the final, processed daily summaries.</p>
+<div class="page-header-container">
+    <div class="d-flex align-items-center gap-3">
+        <div class="emoji-icon-badge emoji-icon-badge-primary">
+            📊
+        </div>
+        <div>
+            <h2 class="page-header-title">
+                Company Attendance Report
+            </h2>
+            <p class="page-header-subtitle">
+                <span>🏢 Cumulative attendance & workforce metrics derived from verified daily records</span>
+            </p>
+        </div>
+    </div>
 
-<div class="mb-3 text-end">
-    <button class="btn btn-outline-success" @onclick="ExportCompanyReportToCsv" disabled="@(isLoading || companySummary == null)">
-        <span class="bi bi-file-earmark-spreadsheet"></span> Export to CSV
-    </button>
+    <div>
+        <button class="btn btn-outline-success action-pill-btn" @onclick="ExportCompanyReportToCsv" disabled="@(isLoading || companySummary == null)">
+            <span>📥</span> <span class="bi bi-file-earmark-spreadsheet-fill"></span> Export CSV
+        </button>
+    </div>
 </div>
 
-<div class="row p-3 mb-4 border rounded bg-light">
-    <div class="col-md-4">
-        <label class="form-label">Start Date</label>
-        <input type="date" class="form-control" @bind="startDate" />
-    </div>
-    <div class="col-md-4">
-        <label class="form-label">End Date</label>
-        <input type="date" class="form-control" @bind="endDate" />
-    </div>
-    <div class="col-md-4 d-flex align-items-end">
-        <button class="btn btn-primary w-100" @onclick="GenerateReport" disabled="@isLoading">
-            @if (isLoading)
-            {
-                <span class="spinner-border spinner-border-sm"></span>
-                <span> Generating...</span>
-            }
-            else
-            {
-                <span class="bi bi-calculator"></span>
-                <span> Generate Report</span>
-            }
-        </button>
+<div class="card border-0 shadow-sm rounded-4 mb-4">
+    <div class="card-body p-3 p-md-4">
+        <div class="row g-3 align-items-end">
+            <div class="col-md-4">
+                <label class="form-label fw-bold small text-muted">📅 Start Date</label>
+                <input type="date" class="form-control rounded-3" @bind="startDate" />
+            </div>
+            <div class="col-md-4">
+                <label class="form-label fw-bold small text-muted">📅 End Date</label>
+                <input type="date" class="form-control rounded-3" @bind="endDate" />
+            </div>
+            <div class="col-md-4">
+                <button class="btn btn-primary action-pill-btn w-100 justify-content-center" @onclick="GenerateReport" disabled="@isLoading">
+                    @if (isLoading)
+                    {
+                        <span class="spinner-border spinner-border-sm"></span>
+                        <span> Calculating...</span>
+                    }
+                    else
+                    {
+                        <span>⚡</span> <span class="bi bi-calculator-fill"></span>
+                        <span> Generate Report</span>
+                    }
+                </button>
+            </div>
+        </div>
     </div>
 </div>
 
 @if (isLoading)
 {
-    <p><em>Calculating company-wide totals...</em></p>
+    <div class="text-center p-5">
+        <div class="spinner-border text-primary" role="status"></div>
+        <p class="mt-3 text-muted fw-semibold">Calculating company-wide totals... 📊</p>
+    </div>
 }
 else if (companySummary != null)
 {
-    <div class="card mb-3 shadow-sm">
-        <div class="card-header bg-success text-white">
-            Company-Wide Cumulative Summary (@startDate?.ToString("dd-MMM") to @endDate?.ToString("dd-MMM-yyyy"))
+    <div class="card border-0 shadow-sm rounded-4 mb-4 overflow-hidden">
+        <div class="card-header bg-success text-white py-3 px-4 d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <span class="fw-bold fs-6">
+                <span>📈</span> Company-Wide Cumulative Summary
+            </span>
+            <span class="badge bg-white text-success rounded-pill px-3 py-1 fw-bold">
+                📅 @startDate?.ToString("dd-MMM") — @endDate?.ToString("dd-MMM-yyyy")
+            </span>
         </div>
-        <div class="card-body">
-            <div class="row text-center">
-                <div class="col">
-                    <h5 class="text-secondary">@companySummary.TotalEmployeesProcessed</h5>
-                    <span class="text-muted small">Employees Processed</span>
+        <div class="card-body p-4">
+            <div class="row g-3 text-center">
+                <div class="col-6 col-md-4 col-xl-2">
+                    <div class="p-3 bg-light rounded-3 h-100">
+                        <span class="text-muted small text-uppercase fw-bold d-block mb-1">👥 Processed</span>
+                        <h4 class="fw-bold text-dark mb-0">@companySummary.TotalEmployeesProcessed</h4>
+                        <small class="text-muted">Employees</small>
+                    </div>
                 </div>
-                <div class="col">
-                    <h5 class="text-info">@FormatTimeSpan(companySummary.TotalScheduledHours)</h5>
-                    <span class="text-muted small">Total Scheduled (HH:MM)</span>
+                <div class="col-6 col-md-4 col-xl-2">
+                    <div class="p-3 bg-light rounded-3 h-100">
+                        <span class="text-muted small text-uppercase fw-bold d-block mb-1">⏰ Scheduled</span>
+                        <h4 class="fw-bold text-info mb-0">@FormatTimeSpan(companySummary.TotalScheduledHours)</h4>
+                        <small class="text-muted">Planned (HH:MM)</small>
+                    </div>
                 </div>
-                <div class="col">
-                    <h5 class="text-success">@FormatTimeSpan(TimeSpan.FromHours((double)companySummary.TotalWorkedHours))</h5>
-                    <span class="text-muted small">Total Worked (HH:MM)</span>
+                <div class="col-6 col-md-4 col-xl-2">
+                    <div class="p-3 bg-light rounded-3 h-100">
+                        <span class="text-muted small text-uppercase fw-bold d-block mb-1">✅ Worked</span>
+                        <h4 class="fw-bold text-success mb-0">@FormatTimeSpan(TimeSpan.FromHours((double)companySummary.TotalWorkedHours))</h4>
+                        <small class="text-muted">Total (HH:MM)</small>
+                    </div>
                 </div>
-                <div class="col">
-                    <h5 class="text-primary">@FormatTimeSpan(companySummary.TotalOvertime)</h5>
-                    <span class="text-muted small">Total OT (HH:MM)</span>
+                <div class="col-6 col-md-4 col-xl-2">
+                    <div class="p-3 bg-light rounded-3 h-100">
+                        <span class="text-muted small text-uppercase fw-bold d-block mb-1">⚡ Overtime</span>
+                        <h4 class="fw-bold text-primary mb-0">@FormatTimeSpan(companySummary.TotalOvertime)</h4>
+                        <small class="text-muted">Extra Hours</small>
+                    </div>
                 </div>
-                <div class="col">
-                    <h5 class="text-danger">@FormatTimeSpan(companySummary.TotalOverallPenalty)</h5>
-                    <span class="text-muted small">Total Penalty (HH:MM)</span>
+                <div class="col-6 col-md-4 col-xl-2">
+                    <div class="p-3 bg-light rounded-3 h-100">
+                        <span class="text-muted small text-uppercase fw-bold d-block mb-1">📉 Penalty</span>
+                        <h4 class="fw-bold text-danger mb-0">@FormatTimeSpan(companySummary.TotalOverallPenalty)</h4>
+                        <small class="text-muted">Loss Hours</small>
+                    </div>
                 </div>
-                <div class="col">
-                    <h5 class="text-warning">@FormatTimeSpan(companySummary.TotalLateness)</h5>
-                    <span class="text-muted small">Total Lateness</span>
-                </div>
-                <div class="col">
-                    <h5 class="text-warning">@FormatTimeSpan(companySummary.TotalBreakPenalty)</h5>
-                    <span class="text-muted small">Total Break Penalty</span>
-                </div>
-                <div class="col">
-                    <h5 class="text-warning" style="visibility: hidden;">@FormatTimeSpan(TimeSpan.Zero)</h5>
-                    <span class="text-muted small"></span>
+                <div class="col-6 col-md-4 col-xl-2">
+                    <div class="p-3 bg-light rounded-3 h-100">
+                        <span class="text-muted small text-uppercase fw-bold d-block mb-1">⏳ Lateness</span>
+                        <h4 class="fw-bold text-warning mb-0">@FormatTimeSpan(companySummary.TotalLateness)</h4>
+                        <small class="text-muted">Late Arrivals</small>
+                    </div>
                 </div>
             </div>
         </div>
@@ -145,14 +179,13 @@ else
 
         try
         {
-            await using var dbContext = await DbFactory.CreateDbContextAsync();
             var filterStartDate = DateOnly.FromDateTime(startDate.Value);
             var filterEndDate = DateOnly.FromDateTime(endDate.Value);
 
-            // 1. Query the DailySummary table. This is extremely fast.
-            var summaries = await dbContext.DailySummaries.AsNoTracking()
-                .Where(ds => ds.ShiftDate >= filterStartDate && ds.ShiftDate <= filterEndDate)
-                .ToListAsync();
+            // Read the final calculated DailySummary projection from Firebase.
+            // SQL remains the authoritative attendance calculation/mutation boundary.
+            var summaries = await FirebaseAttendance.GetDailySummariesAsync(
+                filterStartDate, filterEndDate);
 
             if (!summaries.Any())
             {

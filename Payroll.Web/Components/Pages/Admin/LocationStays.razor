@@ -1,0 +1,515 @@
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.EntityFrameworkCore
+@using Microsoft.JSInterop
+@using global::Payroll.Shared.Data
+@using global::Payroll.Web.Services
+@implements IAsyncDisposable
+@inject IDbContextFactory<AppDbContext> DbFactory
+@inject IJSRuntime JSRuntime
+@attribute [Authorize(Roles = "Admin, SuperAdmin")]
+
+<PageTitle>10-Minute GPS Location Stays</PageTitle>
+
+<div class="container-fluid py-3 location-stays-page">
+    <div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-3">
+        <div>
+            <div class="small text-muted text-uppercase fw-bold">GPS Operations</div>
+            <h3 class="fw-bold mb-1"><i class="bi bi-geo-alt-fill me-2"></i>10-Minute Location Stays</h3>
+            <div class="text-muted">Detected from the existing EmployeeLocationHistory table. No new database table or GPS storage is used.</div>
+        </div>
+        <button class="btn btn-outline-primary" @onclick="LoadAsync" disabled="@loading">
+            <i class="bi bi-arrow-clockwise me-1"></i>@(loading ? "Loading..." : "Refresh")
+        </button>
+    </div>
+
+    <div class="alert alert-info border-0 shadow-sm">
+        <i class="bi bi-shield-check me-2"></i>
+        A stay is detected only when the employee remains within a <strong>@(configuredClusterRadiusMeters)-metre radius</strong> across the same GPS session for <strong>@(configuredDwellMinutes) minutes or longer</strong>. Easily filter by stay duration below.
+    </div>
+
+    <div class="card border-0 shadow-sm mb-3">
+        <div class="card-body">
+            <div class="row g-3 align-items-end">
+                <div class="col-12 col-md-2">
+                    <label class="form-label fw-semibold">From date</label>
+                    <input class="form-control" type="date" @bind="fromDate" />
+                </div>
+                <div class="col-12 col-md-2">
+                    <label class="form-label fw-semibold">To date</label>
+                    <input class="form-control" type="date" @bind="toDate" />
+                </div>
+                <div class="col-12 col-md-3">
+                    <label class="form-label fw-semibold">Employee</label>
+                    <select class="form-select" @bind="employeeFilter">
+                        <option value="0">All employees</option>
+                        @foreach (var employee in employees)
+                        {
+                            <option value="@employee.EmployeeID">@employee.Name (#@employee.EmployeeID)</option>
+                        }
+                    </select>
+                </div>
+                <div class="col-12 col-md-3">
+                    <label class="form-label fw-semibold">Min Stay Duration</label>
+                    <select class="form-select" @bind="minDurationFilterMinutes" @bind:after="ApplyStayFilterAsync">
+                        <option value="2">≥ 2 Minutes</option>
+                        <option value="5">≥ 5 Minutes</option>
+                        <option value="10">≥ 10 Minutes</option>
+                        <option value="30">≥ 30 Minutes</option>
+                        <option value="60">≥ 1 Hour</option>
+                        <option value="120">≥ 2 Hours</option>
+                        <option value="300">≥ 5 Hours</option>
+                        <option value="720">≥ 12 Hours</option>
+                        <option value="1440">≥ 24 Hours</option>
+                    </select>
+                </div>
+                <div class="col-12 col-md-2">
+                    <button class="btn btn-primary w-100" @onclick="LoadAsync" disabled="@loading">
+                        <i class="bi bi-search me-1"></i>Detect
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row g-3 mb-3">
+        @Metric("Detected stays", stays.Count.ToString(), "bi-geo-alt")
+        @Metric("Employees", stays.Select(x => x.EmployeeId).Distinct().Count().ToString(), "bi-people")
+        @Metric($"{configuredDwellMinutes}+ min", stays.Count(x => x.Duration >= TimeSpan.FromMinutes(configuredDwellMinutes)).ToString(), "bi-hourglass-split")
+        @Metric("GPS points", stays.Sum(x => x.PointCount).ToString(), "bi-broadcast-pin")
+    </div>
+
+    <div class="card border-0 shadow-sm mb-3">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <strong><i class="bi bi-map me-2"></i>Stay map</strong>
+            <span class="small text-muted">Click a marker or table row for details</span>
+        </div>
+        <div class="card-body p-0">
+            <div id="@mapId" class="location-stays-map"></div>
+        </div>
+    </div>
+
+    @if (selectedStay != null)
+    {
+        <div class="card border-0 shadow-sm mb-3">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <strong><i class="bi bi-info-circle me-2"></i>Selected stay details</strong>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="ClearSelection">Close</button>
+            </div>
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-12 col-md-3"><small class="text-muted d-block">Employee</small><strong>@selectedStay.EmployeeName (#@selectedStay.EmployeeId)</strong></div>
+                    <div class="col-6 col-md-2"><small class="text-muted d-block">Duration</small><strong>@FormatDuration(selectedStay.Duration)</strong></div>
+                    <div class="col-6 col-md-2"><small class="text-muted d-block">GPS points</small><strong>@selectedStay.PointCount</strong></div>
+                    <div class="col-6 col-md-2"><small class="text-muted d-block">Accuracy</small><strong>±@selectedStay.AverageAccuracyMeters.ToString("F1") m</strong></div>
+                    <div class="col-6 col-md-3"><small class="text-muted d-block">Session</small><code>@selectedStay.SessionId.ToString("N")[..8]</code></div>
+                    <div class="col-12"><small class="text-muted d-block">Time</small><strong>@FormatIst(selectedStay.StartUtc) → @FormatIst(selectedStay.EndUtc)</strong></div>
+                    <div class="col-12"><small class="text-muted d-block">Exact GPS</small><code>@selectedStay.Latitude.ToString("F6") , @selectedStay.Longitude.ToString("F6")</code></div>
+                    <div class="col-12">
+                        <small class="text-muted d-block">Physical Address</small>
+                        <strong class="text-primary">
+                            @if (!string.IsNullOrWhiteSpace(selectedStay.Address))
+                            {
+                                <span>📍 @selectedStay.Address</span>
+                            }
+                            else
+                            {
+                                <span class="spinner-border spinner-border-sm me-1"></span>
+                                <span>Resolving address...</span>
+                            }
+                        </strong>
+                    </div>
+                    <div class="col-12">
+                        <div class="alert alert-light border small mb-0">
+                            <i class="bi bi-info-circle-fill text-primary me-2"></i>
+                            Employee stayed <strong>@FormatDuration(selectedStay.Duration)</strong> at this location within a @(configuredClusterRadiusMeters)m radius (≥@(configuredDwellMinutes)m dwell).
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+
+    <div class="card border-0 shadow-sm">
+        <div class="card-header"><strong><i class="bi bi-list-check me-2"></i>Detected stay locations</strong></div>
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-sm table-hover align-middle mb-0">
+                    <thead>
+                        <tr><th>Employee</th><th>Start</th><th>End</th><th>Duration</th><th>Points</th><th>Accuracy</th><th>Coordinates</th><th>Session</th></tr>
+                    </thead>
+                    <tbody>
+                    @foreach (var stay in stays)
+                    {
+                        <tr class="location-stay-row @(selectedStay?.Id == stay.Id ? "table-primary" : "")" @onclick="() => SelectStay(stay)">
+                            <td><strong>@stay.EmployeeName</strong><div class="small text-muted">#@stay.EmployeeId</div></td>
+                            <td class="nowrap">@FormatIst(stay.StartUtc)</td>
+                            <td class="nowrap">@FormatIst(stay.EndUtc)</td>
+                            <td><strong>@FormatDuration(stay.Duration)</strong></td>
+                            <td>@stay.PointCount</td>
+                            <td>±@stay.AverageAccuracyMeters.ToString("F1") m</td>
+                            <td><code>@stay.Latitude.ToString("F6"), @stay.Longitude.ToString("F6")</code></td>
+                            <td><code>@stay.SessionId.ToString("N")[..8]</code></td>
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            </div>
+            @if (!stays.Any())
+            {
+                <div class="p-5 text-center text-muted"><i class="bi bi-geo-alt display-6 d-block mb-2"></i>No 10-minute stays detected for the selected filters.</div>
+            }
+        </div>
+    </div>
+</div>
+
+<style>
+    .location-stays-map { height: 460px; width: 100%; background: #eef2f7; }
+    .location-stay-row { cursor: pointer; }
+    .location-stay-row:hover { background: rgba(13,110,253,.06); }
+    .nowrap { white-space: nowrap; }
+    .stay-marker { width: 34px; height: 34px; border-radius: 50% 50% 50% 0; transform: rotate(-45deg); display:flex; align-items:center; justify-content:center; background:#0d6efd; border:3px solid #fff; box-shadow:0 4px 14px rgba(0,0,0,.25); }
+    .stay-marker span { transform:rotate(45deg); color:#fff; font-weight:800; font-size:12px; }
+
+    /* Dark mode styling */
+    [data-theme="dark"] .location-stays-page h3,
+    [data-bs-theme="dark"] .location-stays-page h3,
+    body.dark .location-stays-page h3 {
+        color: #f8fafc !important;
+    }
+    [data-theme="dark"] .location-stays-page .card,
+    [data-bs-theme="dark"] .location-stays-page .card,
+    body.dark .location-stays-page .card {
+        background: #161f2d;
+        color: #e7edf6;
+        border-color: rgba(255,255,255,.09);
+    }
+    [data-theme="dark"] .location-stays-page .card-header,
+    [data-bs-theme="dark"] .location-stays-page .card-header,
+    body.dark .location-stays-page .card-header {
+        background: rgba(255,255,255,.035);
+        border-color: rgba(255,255,255,.09);
+        color: #f8fafc;
+    }
+    [data-theme="dark"] .location-stays-page .text-muted,
+    [data-bs-theme="dark"] .location-stays-page .text-muted,
+    body.dark .location-stays-page .text-muted {
+        color: #94a3b8 !important;
+    }
+    [data-theme="dark"] .location-stays-page .form-label,
+    [data-bs-theme="dark"] .location-stays-page .form-label,
+    body.dark .location-stays-page .form-label {
+        color: #cbd5e1 !important;
+    }
+    [data-theme="dark"] .location-stays-page .form-control,
+    [data-bs-theme="dark"] .location-stays-page .form-control,
+    body.dark .location-stays-page .form-control,
+    [data-theme="dark"] .location-stays-page .form-select,
+    [data-bs-theme="dark"] .location-stays-page .form-select,
+    body.dark .location-stays-page .form-select {
+        background: #111a28;
+        color: #e7edf6;
+        border-color: rgba(255,255,255,.14);
+    }
+    [data-theme="dark"] .location-stays-page .table,
+    [data-bs-theme="dark"] .location-stays-page .table,
+    body.dark .location-stays-page .table {
+        --bs-table-bg: #161f2d;
+        --bs-table-color: #e7edf6;
+        --bs-table-border-color: rgba(255,255,255,.09);
+        --bs-table-hover-bg: rgba(13,110,253,.10);
+        --bs-table-hover-color: #f4f8ff;
+    }
+    [data-theme="dark"] .location-stays-page code,
+    [data-bs-theme="dark"] .location-stays-page code,
+    body.dark .location-stays-page code {
+        color: #93c5fd !important;
+        background: rgba(255,255,255,.06) !important;
+        padding: 2px 6px;
+        border-radius: 4px;
+    }
+</style>
+
+@code {
+    private readonly string mapId = $"location-stays-map-{Guid.NewGuid():N}";
+    private readonly string AddressElementId = $"location-stay-address-{Guid.NewGuid():N}";
+    private DotNetObjectReference<LocationStays>? dotNetRef;
+    private List<Employee> employees = new();
+    private List<StayRow> allDetectedStays = new();
+    private List<StayRow> stays = new();
+    private StayRow? selectedStay;
+    private DateTime fromDate = DateTime.Today;
+    private DateTime toDate = DateTime.Today;
+    private int employeeFilter;
+    private int minDurationFilterMinutes = 10;
+    private bool loading;
+
+    private int configuredDwellMinutes = 10;
+    private int configuredClusterRadiusMeters = 50;
+    private bool hasLoadedSettings;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        if (toDate.Date < fromDate.Date)
+        {
+            (fromDate, toDate) = (toDate, fromDate);
+        }
+
+        loading = true;
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+
+            if (!hasLoadedSettings)
+            {
+                var setting = await db.CompanySettings.AsNoTracking().FirstOrDefaultAsync();
+                if (setting != null)
+                {
+                    configuredDwellMinutes = setting.StayDwellMinutes > 0 ? setting.StayDwellMinutes : 10;
+                    configuredClusterRadiusMeters = setting.StayClusterRadiusMeters > 0 ? setting.StayClusterRadiusMeters : 50;
+                    minDurationFilterMinutes = configuredDwellMinutes;
+                }
+                hasLoadedSettings = true;
+            }
+
+            employees = await db.Employees.AsNoTracking()
+                .Where(x => !x.IsDeleted)
+                .OrderBy(x => x.Name)
+                .ToListAsync();
+
+            var startUtc = IndiaToUtc(fromDate.Date);
+            var endUtc = IndiaToUtc(toDate.Date.AddDays(1));
+
+            var query = db.EmployeeLocationHistory.AsNoTracking()
+                .Where(x => x.CapturedAtUtc >= startUtc && x.CapturedAtUtc < endUtc);
+
+            if (employeeFilter > 0)
+                query = query.Where(x => x.EmployeeId == employeeFilter);
+
+            var points = await query
+                .OrderBy(x => x.EmployeeId)
+                .ThenBy(x => x.SessionId)
+                .ThenBy(x => x.CapturedAtUtc)
+                .ToListAsync();
+
+            var names = employees.ToDictionary(x => x.EmployeeID, x => x.Name);
+            allDetectedStays = DetectStays(points, names, configuredDwellMinutes, configuredClusterRadiusMeters);
+            await ApplyStayFilterAsync();
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task ApplyStayFilterAsync()
+    {
+        var minDuration = TimeSpan.FromMinutes(minDurationFilterMinutes);
+        stays = allDetectedStays.Where(x => x.Duration >= minDuration).ToList();
+        selectedStay = null;
+
+        await InvokeAsync(StateHasChanged);
+        await Task.Yield();
+        dotNetRef ??= DotNetObjectReference.Create(this);
+        await JSRuntime.InvokeVoidAsync("renderLocationStaysMap", mapId, stays.Select(ToMapDto).ToList(), dotNetRef);
+    }
+
+    private void SelectStay(StayRow stay)
+    {
+        selectedStay = stay;
+        _ = InvokeAsync(async () =>
+        {
+            await JSRuntime.InvokeVoidAsync("focusLocationStay", mapId, stay.Id);
+            StateHasChanged();
+            if (string.IsNullOrWhiteSpace(stay.Address))
+            {
+                await ResolveStayAddressAsync(stay);
+            }
+        });
+    }
+
+    [JSInvokable]
+    public async Task SelectStayFromMap(long stayId)
+    {
+        selectedStay = stays.FirstOrDefault(x => x.Id == stayId);
+        await InvokeAsync(StateHasChanged);
+        if (selectedStay != null && string.IsNullOrWhiteSpace(selectedStay.Address))
+        {
+            await ResolveStayAddressAsync(selectedStay);
+        }
+    }
+
+    private async Task ResolveStayAddressAsync(StayRow stay)
+    {
+        try
+        {
+            using var client = new System.Net.Http.HttpClient();
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("BioMetricPayrollApp/1.0");
+
+            // 1. Try Komoot Photon first for high-resolution village/locality (e.g. Kurumbapet)
+            try
+            {
+                var photonUrl = $"https://photon.komoot.io/reverse?lat={stay.Latitude:F6}&lon={stay.Longitude:F6}";
+                var photonResponse = await client.GetAsync(photonUrl);
+                if (photonResponse.IsSuccessStatusCode)
+                {
+                    var photonJson = await photonResponse.Content.ReadAsStringAsync();
+                    using var pDoc = System.Text.Json.JsonDocument.Parse(photonJson);
+                    if (pDoc.RootElement.TryGetProperty("features", out var features) && features.GetArrayLength() > 0)
+                    {
+                        var props = features[0].GetProperty("properties");
+                        var name = props.TryGetProperty("name", out var n) ? n.GetString() : null;
+                        var street = props.TryGetProperty("street", out var st) ? st.GetString() : null;
+                        var locality = props.TryGetProperty("locality", out var loc) ? loc.GetString() : null;
+                        var district = props.TryGetProperty("district", out var dist) ? dist.GetString() : null;
+                        var suburb = props.TryGetProperty("suburb", out var sub) ? sub.GetString() : null;
+                        var city = props.TryGetProperty("city", out var c) ? c.GetString() : null;
+
+                        var area = locality ?? district ?? suburb;
+                        if (string.IsNullOrEmpty(area) && !string.IsNullOrEmpty(name) && name.Contains(","))
+                        {
+                            var parts = name.Split(',');
+                            if (parts.Length > 1)
+                            {
+                                area = parts[^1].Trim();
+                                name = parts[0].Trim();
+                            }
+                        }
+
+                        var addrParts = new[] { area, street, city }
+                            .Where(s => !string.IsNullOrWhiteSpace(s))
+                            .Distinct()
+                            .ToList();
+
+                        if (addrParts.Count > 0)
+                        {
+                            stay.Address = string.Join(", ", addrParts);
+                            await InvokeAsync(StateHasChanged);
+                            return;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            // 2. Fallback to Nominatim
+            var url = $"https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat={stay.Latitude:F6}&lon={stay.Longitude:F6}";
+            var response = await client.GetAsync(url);
+            if (response.IsSuccessStatusCode)
+            {
+                var json = await response.Content.ReadAsStringAsync();
+                using var doc = System.Text.Json.JsonDocument.Parse(json);
+                if (doc.RootElement.TryGetProperty("display_name", out var displayName))
+                {
+                    stay.Address = displayName.GetString();
+                    await InvokeAsync(StateHasChanged);
+                }
+            }
+        }
+        catch
+        {
+            stay.Address = $"{stay.Latitude:F6}, {stay.Longitude:F6}";
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void ClearSelection() => selectedStay = null;
+
+    private static List<StayRow> DetectStays(List<EmployeeLocationHistory> points, Dictionary<int, string> names, int dwellMinutes, int clusterRadiusMeters)
+    {
+        var result = new List<StayRow>();
+        long syntheticId = 1;
+        var maxGapMinutes = Math.Max(15, dwellMinutes);
+
+        foreach (var sessionGroup in points.GroupBy(x => new { x.EmployeeId, x.SessionId }))
+        {
+            var ordered = sessionGroup.OrderBy(x => x.CapturedAtUtc).ToList();
+            if (ordered.Count < 2) continue;
+
+            var cluster = new List<EmployeeLocationHistory> { ordered[0] };
+            for (var i = 1; i < ordered.Count; i++)
+            {
+                var previous = ordered[i - 1];
+                var current = ordered[i];
+                var distance = HaversineMeters(previous.Latitude, previous.Longitude, current.Latitude, current.Longitude);
+                var gap = current.CapturedAtUtc - previous.CapturedAtUtc;
+
+                if (distance <= clusterRadiusMeters && gap >= TimeSpan.Zero && gap <= TimeSpan.FromMinutes(maxGapMinutes))
+                {
+                    cluster.Add(current);
+                    continue;
+                }
+
+                AddStay(cluster, sessionGroup.Key.EmployeeId, sessionGroup.Key.SessionId, names, result, ref syntheticId, dwellMinutes);
+                cluster = new List<EmployeeLocationHistory> { current };
+            }
+
+            AddStay(cluster, sessionGroup.Key.EmployeeId, sessionGroup.Key.SessionId, names, result, ref syntheticId, dwellMinutes);
+        }
+
+        return result.OrderByDescending(x => x.StartUtc).ToList();
+    }
+
+    private static void AddStay(List<EmployeeLocationHistory> cluster, int employeeId, Guid sessionId, Dictionary<int, string> names, List<StayRow> result, ref long id, int dwellMinutes)
+    {
+        if (cluster.Count < 2) return;
+        var start = cluster[0].CapturedAtUtc;
+        var end = cluster[^1].CapturedAtUtc;
+        var duration = end - start;
+        if (duration < TimeSpan.FromMinutes(dwellMinutes)) return;
+
+        result.Add(new StayRow
+        {
+            Id = id++, EmployeeId = employeeId, EmployeeName = names.TryGetValue(employeeId, out var n) ? n : $"Employee #{employeeId}", SessionId = sessionId,
+            StartUtc = start, EndUtc = end, Duration = duration, PointCount = cluster.Count,
+            AverageAccuracyMeters = cluster.Average(x => x.AccuracyMeters), Latitude = cluster.Average(x => x.Latitude), Longitude = cluster.Average(x => x.Longitude)
+        });
+    }
+
+    private static double HaversineMeters(double lat1, double lon1, double lat2, double lon2)
+    {
+        const double r = 6371000d;
+        var p1 = lat1 * Math.PI / 180d; var p2 = lat2 * Math.PI / 180d;
+        var dp = (lat2 - lat1) * Math.PI / 180d; var dl = (lon2 - lon1) * Math.PI / 180d;
+        var a = Math.Sin(dp / 2) * Math.Sin(dp / 2) + Math.Cos(p1) * Math.Cos(p2) * Math.Sin(dl / 2) * Math.Sin(dl / 2);
+        return r * 2d * Math.Atan2(Math.Sqrt(Math.Clamp(a, 0, 1)), Math.Sqrt(1 - Math.Clamp(a, 0, 1)));
+    }
+
+    private static DateTime IndiaToUtc(DateTime india) => TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(india, DateTimeKind.Unspecified), TimeZoneInfo.FindSystemTimeZoneById(OperatingSystem.IsWindows() ? "India Standard Time" : "Asia/Kolkata"));
+    private static string FormatIst(DateTime utc) => TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), TimeZoneInfo.FindSystemTimeZoneById(OperatingSystem.IsWindows() ? "India Standard Time" : "Asia/Kolkata")).ToString("dd-MMM-yyyy HH:mm:ss");
+    private static string FormatDuration(TimeSpan duration) => duration.TotalHours >= 1 ? $"{(int)duration.TotalHours}h {duration.Minutes}m" : $"{(int)duration.TotalMinutes}m {duration.Seconds}s";
+
+    private static object ToMapDto(StayRow x) => new { id = x.Id, employeeId = x.EmployeeId, name = x.EmployeeName, latitude = x.Latitude, longitude = x.Longitude, duration = FormatDuration(x.Duration), start = x.StartUtc.ToString("O"), end = x.EndUtc.ToString("O"), points = x.PointCount, accuracy = x.AverageAccuracyMeters.ToString("F1") };
+
+    private RenderFragment Metric(string title, string value, string icon) => builder =>
+    {
+        var s = 0; builder.OpenElement(s++, "div"); builder.AddAttribute(s++, "class", "col-6 col-lg-3");
+        builder.OpenElement(s++, "div"); builder.AddAttribute(s++, "class", "card border-0 shadow-sm p-3 h-100");
+        builder.OpenElement(s++, "div"); builder.AddAttribute(s++, "class", "d-flex justify-content-between align-items-start");
+        builder.OpenElement(s++, "div"); builder.OpenElement(s++, "small"); builder.AddAttribute(s++, "class", "text-muted"); builder.AddContent(s++, title); builder.CloseElement(); builder.OpenElement(s++, "strong"); builder.AddAttribute(s++, "class", "fs-4 d-block mt-1"); builder.AddContent(s++, value); builder.CloseElement(); builder.CloseElement();
+        builder.OpenElement(s++, "i"); builder.AddAttribute(s++, "class", $"bi {icon} fs-4 text-primary"); builder.CloseElement(); builder.CloseElement(); builder.CloseElement(); builder.CloseElement();
+    };
+
+    public async ValueTask DisposeAsync()
+    {
+        try { await JSRuntime.InvokeVoidAsync("destroyLocationStaysMap", mapId); } catch { }
+        dotNetRef?.Dispose();
+    }
+
+    private sealed class StayRow
+    {
+        public long Id { get; set; }
+        public int EmployeeId { get; set; }
+        public string EmployeeName { get; set; } = "";
+        public Guid SessionId { get; set; }
+        public DateTime StartUtc { get; set; }
+        public DateTime EndUtc { get; set; }
+        public TimeSpan Duration { get; set; }
+        public int PointCount { get; set; }
+        public double AverageAccuracyMeters { get; set; }
+        public double Latitude { get; set; }
+        public double Longitude { get; set; }
+        public string? Address { get; set; }
+    }
+}

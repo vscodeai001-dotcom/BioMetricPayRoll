@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Payroll.Shared.Data;
@@ -19,17 +19,52 @@ namespace Payroll.Shared.Services
 
             DateTime shiftStart = day.Date.Add(effectiveStartTime!.Value.ToTimeSpan());
             DateTime shiftEnd = day.Date.Add(effectiveEndTime!.Value.ToTimeSpan());
-            DateTime todayCutoffTime = day.Date.AddHours(cutoffHour);
 
-            if (shiftEnd <= shiftStart)
+            // 1200-K: an end time equal to or earlier than the start time
+            // means the scheduled shift crosses midnight.
+            // Do not truncate an explicitly scheduled overnight shift with
+            // WorkDayCutoffHour. The cutoff is a business-day setting, not
+            // the scheduled end of an overnight shift.
+            bool isContinuous = string.Equals(emp.ShiftMode, "CONTINUOUS", StringComparison.OrdinalIgnoreCase);
+            bool overnight = shiftEnd <= shiftStart || isContinuous;
+            if (overnight)
             {
-                shiftEnd = shiftEnd.AddDays(1);
+                if (shiftEnd <= shiftStart)
+                {
+                    shiftEnd = shiftEnd.AddDays(1);
+                }
             }
-            if (shiftEnd > todayCutoffTime)
+            else
             {
-                shiftEnd = todayCutoffTime;
+                // Preserve the existing business-day cutoff behavior for
+                // ordinary same-day shifts. Only an explicit overnight shift
+                // bypasses this ceiling.
+                DateTime todayCutoffTime = day.Date.AddHours(cutoffHour);
+                if (shiftEnd > todayCutoffTime)
+                {
+                    shiftEnd = todayCutoffTime;
+                }
             }
+
             return (shiftStart, shiftEnd);
+        }
+
+        /// <summary>
+        /// Returns true when the effective shift crosses midnight or is continuous.
+        /// </summary>
+        public bool IsOvernightShift(
+            Employee emp,
+            ShiftSchedule? schedule)
+        {
+            if (string.Equals(emp.ShiftMode, "CONTINUOUS", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            TimeOnly? start = schedule?.StartTime ?? emp.ShiftStartTime;
+            TimeOnly? end = schedule?.EndTime ?? emp.ShiftEndTime;
+
+            return start.HasValue &&
+                   end.HasValue &&
+                   end.Value <= start.Value;
         }
 
         // 2. Get Punch Window (FIXED: Removed fallback logic)

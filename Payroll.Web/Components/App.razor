@@ -31,7 +31,7 @@
           type="image/png"
           href="favicon.png" />
 
-    <HeadOutlet />
+    <HeadOutlet @rendermode="InteractiveServer" />
 
 </head>
 
@@ -60,7 +60,7 @@
        themeInterop.js is loaded before Blazor starts.
        ============================================================ *@
 
-    <script src="/js/themeInterop.js?v=20260915-realtime-map-v12"></script>
+    <script src="/js/themeInterop.js?v=20260928-geo-sync-v1"></script>
 
     @* ============================================================
        EMPLOYEE GPS TRACKER
@@ -68,17 +68,21 @@
        Must load BEFORE Blazor starts so components can call it.
        ============================================================ *@
 
-    <script src="/js/employee-gps-tracker.js?v=20260906-persistent-gps"></script>
+    <script src="/js/employee-gps-tracker.js?v=20260923-gps-fix-v2"></script>
 
     @* ============================================================
        REAL-TIME ATTENDANCE REFRESH
        ============================================================ *@
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.21/signalr.min.js"></script>
+    @* SignalR bundled locally for 100% offline & fast reliability.
+       Firebase realtime remains active as the primary SSOT cloud transport. *@
+    <script src="/js/signalr.min.js?v=8.0.17"></script>
     <script src="https://www.gstatic.com/firebasejs/11.10.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/11.10.0/firebase-auth-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/11.10.0/firebase-database-compat.js"></script>
-    <script src="/js/attendance-refresh.js?v=20260915-firebase-realtime-v4"></script>
+    <script src="/js/attendance-cache.js?v=20260917-1200E"></script>
+    <script src="/js/attendance-refresh.js?v=20260928-geo-sync-v1"></script>
+    <script src="/js/employee-cache.js?v=20260917-1100N"></script>
 
 
     @* ============================================================

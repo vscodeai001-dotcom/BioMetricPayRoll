@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 
@@ -25,5 +25,8 @@ namespace Payroll.Shared
 
         [Column("payrollid_paid")]
         public int? PayrollID_Paid { get; set; } // Null = Unpaid/Standalone
+
+        [NotMapped]
+        public string? FirebaseKey { get; set; }
     }
 }

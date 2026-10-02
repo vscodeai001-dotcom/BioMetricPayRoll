@@ -8,37 +8,62 @@
 @inject IToastService toastService
 @inject IJSRuntime JSRuntime
 @inject Payroll.Web.Services.AuditService AuditService
+@inject FirebaseEmployeeManagementService FirebaseEmployeeManagementService
 @inject Payroll.Web.Services.AttendanceRefreshService AttendanceRefresh
 @attribute [Authorize(Roles = "SuperAdmin")]
 
 <PageTitle>Recycle Bin</PageTitle>
 
-<h3><i class="bi bi-trash-fill me-2 text-danger"></i> Employee Recycle Bin</h3>
-<p class="text-danger">Only SuperAdmins can permanently delete records. Permanent deletion removes **all** linked history (attendance, payroll, advances).</p>
+<div class="page-header-container mb-4">
+    <div class="d-flex align-items-center gap-3">
+        <div class="emoji-icon-badge emoji-icon-badge-danger">
+            🗑️
+        </div>
+        <div>
+            <h2 class="page-header-title">
+                Employee Recycle Bin & Archival
+            </h2>
+            <p class="page-header-subtitle">
+                <span>⚠️ SuperAdmin Restricted: Restore soft-deleted employees or permanently purge historical records</span>
+            </p>
+        </div>
+    </div>
+
+    <div class="d-flex align-items-center gap-2">
+        <span class="badge bg-danger bg-opacity-10 text-danger rounded-pill px-3 py-2 fw-semibold border border-danger border-opacity-25">
+            <span>👑 SuperAdmin Vault</span>
+        </span>
+    </div>
+</div>
 
 @if (isLoading)
 {
-    <p><em>Loading deleted employees...</em></p>
+    <div class="text-center p-5">
+        <div class="spinner-border text-primary" role="status"></div>
+        <p class="mt-3 text-muted fw-semibold">Loading recycle bin... 🗑️</p>
+    </div>
 }
 else if (!deletedEmployees.Any())
 {
-    <div class="alert alert-success">
-        No employees currently in the Recycle Bin.
+    <div class="text-center p-5 bg-light rounded-4 border">
+        <span class="fs-1 d-block mb-2">🎉</span>
+        <p class="mb-0 text-muted fw-semibold">No employees currently in the Recycle Bin. All records are active!</p>
     </div>
 }
 else
 {
-    <div class="table-responsive">
-        <table class="table table-sm table-striped table-bordered table-hover">
-            <thead class="table-dark">
-                <tr>
-                    <th>ID</th>
-                    <th>Name</th>
-                    <th>Termination Date</th>
-                    <th>Status</th>
-                    <th class="text-center">Action</th>
-                </tr>
-            </thead>
+    <div class="table-responsive-card">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead>
+                    <tr>
+                        <th>🆔 ID</th>
+                        <th>👤 Employee Name</th>
+                        <th>📅 Termination Date</th>
+                        <th>📌 Status</th>
+                        <th class="text-center">⚡ Action</th>
+                    </tr>
+                </thead>
             <tbody>
                 @foreach (var emp in deletedEmployees.OrderByDescending(e => e.TerminationDate))
                 {
@@ -60,6 +85,7 @@ else
             </tbody>
         </table>
     </div>
+</div>
 }
 
 <AttendanceRefreshListener OnAttendanceChanged="HandleRefresh" />
@@ -88,11 +114,14 @@ else
                
                 return;
             }
-            // Load employees marked as deleted
-            deletedEmployees = await dbContext.Employees
-                .Where(e => e.IsDeleted) // <-- Filter for deleted records
+            // Employee recycle-bin projection is read from Firebase SSOT.
+            // Restore and permanent-wipe mutations intentionally remain on the
+            // existing SQL mutation boundary below.
+            deletedEmployees = (await FirebaseEmployeeManagementService
+                    .GetAllEmployeesIncludingDeletedAsync())
+                .Where(e => e.IsDeleted)
                 .OrderBy(e => e.Name)
-                .ToListAsync();
+                .ToList();
         }
         catch (Exception ex)
         {
@@ -119,11 +148,29 @@ else
                 entity.IsDeleted = false; // <-- RESTORE ACTION
                 dbContext.Update(entity);
                 await dbContext.SaveChangesAsync();
-                
-                // --- AUDIT LOG ---
-                await AuditService.LogAsync("RESTORE", "Employee", entity.EmployeeID.ToString(), 
+
+                // Firebase is the shared Employee projection. Keep restore state
+                // aligned with SQL and record the destructive-state transition in
+                // the Firebase audit stream as well as the legacy SQL audit log.
+                var firebaseEmployee = await FirebaseEmployeeManagementService.GetEmployeeAsync(entity.EmployeeID);
+                if (firebaseEmployee != null)
+                {
+                    firebaseEmployee.IsDeleted = false;
+                    var firebaseRestore = await FirebaseEmployeeManagementService.SaveEmployeeAsync(firebaseEmployee);
+                    if (!firebaseRestore.Success)
+                        throw new InvalidOperationException($"Firebase restore synchronization failed: {firebaseRestore.Message}");
+                }
+                else
+                {
+                    throw new InvalidOperationException("Firebase Employee record is missing; restore was not considered synchronized.");
+                }
+
+                await AuditService.LogAsync("RESTORE", "Employee", entity.EmployeeID.ToString(),
                     $"Employee restored from Recycle Bin.");
-                // -----------------
+                await FirebaseEmployeeManagementService.LogAuditAsync(
+                    "RESTORE", "Employee", entity.EmployeeID.ToString(),
+                    "Employee restored from Recycle Bin; SQL and Firebase employee state synchronized.");
+
                 await AttendanceRefresh.NotifyEmployeeChangedAsync(entity.EmployeeID, "RESTORED");
             }
             toastService.ShowSuccess("Employee restored successfully.");
@@ -157,13 +204,29 @@ else
 
             if (entity != null)
             {
+                // Verify the Firebase projection is already in the deleted state
+                // before allowing the irreversible SQL wipe. This prevents an
+                // orphaned active Firebase Employee from surviving the operation.
+                var firebaseState = await FirebaseEmployeeManagementService.GetEmployeeDeletionStateAsync(entity.EmployeeID);
+                if (!firebaseState.Exists || !firebaseState.IsDeleted)
+                {
+                    throw new InvalidOperationException(
+                        "Permanent wipe blocked: Firebase Employee projection is not in the soft-deleted state.");
+                }
+
+                await FirebaseEmployeeManagementService.LogAuditAsync(
+                    "PERMANENT WIPE REQUESTED", "Employee", entity.EmployeeID.ToString(),
+                    "SuperAdmin requested permanent Employee wipe after Firebase soft-delete verification.");
+
                 dbContext.Employees.Remove(entity); // <-- PERMANENT DELETE ACTION (CASCADE required in DB)
                 await dbContext.SaveChangesAsync();
-                
-                // --- AUDIT LOG ---
-                await AuditService.LogAsync("PERMANENT WIPE", "Employee", entity.EmployeeID.ToString(), 
-                    $"Employee record and all linked history permanently deleted.");
-                // -----------------
+
+                await AuditService.LogAsync("PERMANENT WIPE", "Employee", entity.EmployeeID.ToString(),
+                    $"Employee record and all linked history permanently deleted after Firebase soft-delete verification.");
+
+                await FirebaseEmployeeManagementService.LogAuditAsync(
+                    "PERMANENT WIPE", "Employee", entity.EmployeeID.ToString(),
+                    "SQL Employee and linked history permanently deleted after Firebase soft-delete verification. Firebase Employee projection remains as historical tombstone.");
             }
 
             await AttendanceRefresh.NotifyEmployeeChangedAsync(emp.EmployeeID, "PERMANENT_DELETE");

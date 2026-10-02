@@ -3,68 +3,122 @@
 @using Microsoft.EntityFrameworkCore
 @using global::Payroll.Shared.Data
 @inject IDbContextFactory<AppDbContext> DbFactory
+@inject FirebaseRealtimeService Firebase
 @attribute [Authorize(Roles = "SuperAdmin")]
 
 <PageTitle>System Audit Logs</PageTitle>
 
-<div class="d-flex justify-content-between align-items-center mb-3">
-    <h3><i class="bi bi-shield-check me-2"></i> System Audit Logs</h3>
-    <span class="badge bg-warning text-dark">SuperAdmin Only</span>
-</div>
-<p>Track security events, user changes, and critical updates.</p>
+<div class="page-header-container">
+    <div class="d-flex align-items-center gap-3">
+        <div class="emoji-icon-badge emoji-icon-badge-danger">
+            🛡️
+        </div>
+        <div>
+            <h2 class="page-header-title">
+                System Audit Trail & Security Logs
+            </h2>
+            <p class="page-header-subtitle">
+                <span>🔐 Immutable telemetry tracking user logins, employee modifications & payroll transactions</span>
+            </p>
+        </div>
+    </div>
 
-<div class="row p-3 mb-3 bg-light border rounded">
-    <div class="col-md-3">
-        <label class="form-label small fw-bold">Start Date</label>
-        <input type="date" @bind="startDate" class="form-control" />
+    <div class="d-flex align-items-center gap-2">
+        <span class="badge bg-warning bg-opacity-10 text-dark rounded-pill px-3 py-2 fw-semibold border border-warning">
+            👑 SuperAdmin Privilege
+        </span>
     </div>
-    <div class="col-md-3">
-        <label class="form-label small fw-bold">End Date</label>
-        <input type="date" @bind="endDate" class="form-control" />
-    </div>
-    <div class="col-md-2 d-flex align-items-end">
-        <button class="btn btn-primary w-100" @onclick="LoadLogs">
-            <i class="bi bi-search me-1"></i> Search
-        </button>
+</div>
+
+<div class="card border-0 shadow-sm rounded-4 mb-4">
+    <div class="card-body p-3 p-md-4">
+        <div class="row g-3">
+            <div class="col-md-3">
+                <label class="form-label small fw-bold text-muted">📅 Start Date</label>
+                <input type="date" @bind="startDate" class="form-control rounded-3" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small fw-bold text-muted">📅 End Date</label>
+                <input type="date" @bind="endDate" class="form-control rounded-3" />
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small fw-bold text-muted">👤 Actor / User</label>
+                <input type="text" @bind="actorFilter" class="form-control rounded-3" placeholder="Email / UID" />
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small fw-bold text-muted">💼 Role</label>
+                <input type="text" @bind="roleFilter" class="form-control rounded-3" placeholder="Admin / Employee" />
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small fw-bold text-muted">🏷️ Module / Action</label>
+                <input type="text" @bind="moduleActionFilter" class="form-control rounded-3" placeholder="Attendance / UPDATE" />
+            </div>
+            <div class="col-12 text-end">
+                <button class="btn btn-primary action-pill-btn px-4" @onclick="LoadLogs">
+                    <span>🔍</span> <i class="bi bi-search"></i> Search Logs
+                </button>
+            </div>
+        </div>
     </div>
 </div>
 
 @if (isLoading)
 {
-    <p><em>Loading logs...</em></p>
+    <div class="text-center p-5">
+        <div class="spinner-border text-primary" role="status"></div>
+        <p class="mt-3 text-muted fw-semibold">Loading security audit records... 🛡️</p>
+    </div>
 }
 else if (logs == null || !logs.Any())
 {
-    <div class="alert alert-info">No audit logs found for this period.</div>
+    <div class="text-center p-5 bg-light rounded-4 border">
+        <span class="fs-1 d-block mb-2">🔍</span>
+        <p class="mb-0 text-muted fw-semibold">No audit logs found matching the specified filters.</p>
+    </div>
 }
 else
 {
-    <div class="table-responsive">
-        <table class="table table-sm table-striped table-hover border">
-            <thead class="table-dark">
-                <tr>
-                    <th>Timestamp</th>
-                    <th>User (Performer)</th>
-                    <th>Action</th>
-                    <th>Entity Type</th>
-                    <th>Details</th>
-                </tr>
-            </thead>
-            <tbody>
-                @foreach (var log in logs)
-                {
+    <div class="table-responsive-card">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead>
                     <tr>
-                        <td style="white-space:nowrap;">@ToIndiaTime(log.Timestamp).ToString("dd-MMM-yyyy HH:mm:ss")</td>
-                        <td class="fw-bold">@log.UserEmail</td>
-                        <td>
-                            <span class="badge @GetBadgeColor(log.ActionType)">@log.ActionType</span>
-                        </td>
-                        <td>@log.EntityType <small class="text-muted">(ID: @log.EntityID)</small></td>
-                        <td class="small text-muted">@log.Details</td>
+                        <th>⏰ Timestamp</th>
+                        <th>👤 User (Performer)</th>
+                        <th>⚡ Action</th>
+                        <th>📦 Entity Type</th>
+                        <th>📝 Change Details</th>
                     </tr>
-                }
-            </tbody>
-        </table>
+                </thead>
+                <tbody>
+                    @foreach (var log in logs)
+                    {
+                        <tr>
+                            <td class="text-nowrap small text-muted">
+                                📅 @ToIndiaTime(log.Timestamp).ToString("dd-MMM-yyyy HH:mm:ss")
+                            </td>
+                            <td class="fw-bold text-dark">
+                                <span>👤</span> @log.UserEmail
+                            </td>
+                            <td>
+                                <span class="badge @GetBadgeColor(log.ActionType) rounded-pill px-2 py-1">
+                                    @log.ActionType
+                                </span>
+                            </td>
+                            <td>
+                                <span class="badge bg-light text-dark border rounded-pill px-2">
+                                    📦 @log.EntityType
+                                </span>
+                                <small class="text-muted ms-1">#@log.EntityID</small>
+                            </td>
+                            <td class="small text-muted" style="max-width: 320px; overflow-wrap: anywhere;">
+                                @log.Details
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
     </div>
 }
 
@@ -76,6 +130,9 @@ else
     private DateTime startDate = DateTime.Today.AddDays(-7);
     private DateTime endDate = DateTime.Today;
     private bool isLoading = false;
+    private string actorFilter = string.Empty;
+    private string roleFilter = string.Empty;
+    private string moduleActionFilter = string.Empty;
     
 
     protected override async Task OnInitializedAsync()
@@ -102,12 +159,69 @@ else
                 return;
             }
 
-            logs = await db.AuditLogs
+            // Firebase is the cross-platform audit SSOT. Keep the existing SQL
+            // table as a compatibility fallback so historical Web-only records
+            // are never lost if Firebase is temporarily unavailable.
+            var sqlLogs = await db.AuditLogs
                 .AsNoTracking()
                 .Where(l => l.Timestamp >= queryStart && l.Timestamp < queryEndExclusive)
                 .OrderByDescending(l => l.Timestamp)
-                .Take(500) // Safety limit
+                .Take(1000)
                 .ToListAsync();
+
+            var firebaseLogs = new List<AuditLog>();
+            try
+            {
+                var ownerUid = Firebase.ResolveOwnerUid("audit-viewer", "SuperAdmin");
+                // BANDWIDTH OPTIMIZATION: Use server-side timestamp range query instead of
+                // downloading the entire audit_logs table and filtering in C#.
+                // Firebase filters by the indexed "timestamp" field (milliseconds) and caps
+                // results at 200 most-recent records matching the selected date window.
+                var startMillis = new DateTimeOffset(queryStart, TimeSpan.Zero).ToUnixTimeMilliseconds();
+                var endMillis = new DateTimeOffset(queryEndExclusive, TimeSpan.Zero).ToUnixTimeMilliseconds() - 1;
+                var remote = await Firebase.GetOwnerTableByChildRangeAsync(
+                    ownerUid, "audit_logs", "timestamp",
+                    startAt: startMillis, endAt: endMillis, limitToLast: 200);
+                if (remote.HasValue && remote.Value.ValueKind == System.Text.Json.JsonValueKind.Object)
+                {
+                    foreach (var property in remote.Value.EnumerateObject())
+                    {
+                        if (!property.Value.TryGetProperty("timestamp", out var ts) || !ts.TryGetInt64(out var millis)) continue;
+                        var stamp = DateTimeOffset.FromUnixTimeMilliseconds(millis).UtcDateTime;
+                        if (stamp < queryStart || stamp >= queryEndExclusive) continue;
+                        firebaseLogs.Add(new AuditLog
+                        {
+                            LogID = TryLong(property.Name),
+                            Timestamp = stamp,
+                            UserID = StringProp(property.Value, "userId", "SYSTEM"),
+                            UserEmail = StringProp(property.Value, "userDisplayName", "System"),
+                            ActionType = StringProp(property.Value, "action", "UNKNOWN"),
+                            EntityType = StringProp(property.Value, "module", "Unknown"),
+                            EntityID = StringProp(property.Value, "targetId", null),
+                            Details = BuildDetails(property.Value)
+                        });
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Firebase audit read failed; using SQL history: {ex}");
+            }
+
+            // Merge both stores so Firebase-backed events and historical SQL-only
+            // events remain visible. Firebase uses the SQL LogID as its record
+            // key for events emitted by AuditService, making LogID a stable
+            // deduplication key.
+            logs = sqlLogs
+                .Concat(firebaseLogs)
+                .GroupBy(l => l.LogID > 0
+                    ? $"ID:{l.LogID}"
+                    : $"F:{l.Timestamp:O}|{l.UserID}|{l.ActionType}|{l.EntityType}|{l.EntityID}|{l.Details}")
+                .Select(g => g.OrderByDescending(x => x.Timestamp).First())
+                .Where(MatchesFilters)
+                .OrderByDescending(l => l.Timestamp)
+                .Take(500)
+                .ToList();
 
 
 
@@ -130,6 +244,45 @@ else
         TimeZoneInfo.ConvertTimeToUtc(
             DateTime.SpecifyKind(indiaTime, DateTimeKind.Unspecified),
             IndiaTimeZone);
+
+    private bool MatchesFilters(AuditLog l) =>
+        (string.IsNullOrWhiteSpace(actorFilter) || $"{l.UserEmail} {l.UserID}".Contains(actorFilter, StringComparison.OrdinalIgnoreCase)) &&
+        (string.IsNullOrWhiteSpace(roleFilter) || l.Details?.Contains(roleFilter, StringComparison.OrdinalIgnoreCase) == true) &&
+        (string.IsNullOrWhiteSpace(moduleActionFilter) || $"{l.EntityType} {l.ActionType} {l.Details}".Contains(moduleActionFilter, StringComparison.OrdinalIgnoreCase));
+
+   private static string StringProp(
+    System.Text.Json.JsonElement e,
+    string name,
+    string? fallback)
+{
+    if (e.TryGetProperty(name, out var v) &&
+        v.ValueKind == System.Text.Json.JsonValueKind.String)
+    {
+        return v.GetString() ?? fallback ?? string.Empty;
+    }
+
+    return fallback ?? string.Empty;
+}
+
+    private static long TryLong(string value) => long.TryParse(value, out var id) ? id : 0;
+
+    private static string BuildDetails(System.Text.Json.JsonElement e)
+    {
+        var oldValue = JsonPropText(e, "oldValue");
+        var newValue = JsonPropText(e, "newValue");
+        var role = StringProp(e, "actorRole", null);
+        var target = StringProp(e, "targetId", null);
+        var correlationId = StringProp(e, "correlationId", null);
+        return $"Role: {role}; Target: {target}; Correlation: {correlationId}; Old: {oldValue}; New: {newValue}";
+    }
+
+    private static string JsonPropText(System.Text.Json.JsonElement e, string name)
+    {
+        if (!e.TryGetProperty(name, out var value)) return string.Empty;
+        return value.ValueKind == System.Text.Json.JsonValueKind.String
+            ? value.GetString() ?? string.Empty
+            : value.GetRawText();
+    }
 
     private string GetBadgeColor(string action) => action switch
     {

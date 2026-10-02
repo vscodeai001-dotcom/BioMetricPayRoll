@@ -1,14 +1,14 @@
 @page "/employees/details/{EmployeeId:int}"
 @using System.Globalization
 @using Microsoft.AspNetCore.Authorization
-@using Microsoft.EntityFrameworkCore
 @using global::Payroll.Web.Components.UI.Leave
 @using global::Payroll.Shared
 @using global::Payroll.Shared.Data
 @using global::Payroll.Shared.Services
 @using global::Payroll.Web.Components.Pages.Employees
 @using global::Payroll.Web.Models
-@inject IDbContextFactory<AppDbContext> DbFactory
+@inject FirebaseEmployeeManagementService FirebaseEmployeeService
+@inject FirebaseEmployeeHistoryService FirebaseEmployeeHistoryService
 @inject NavigationManager Navigation
 @inject IJSRuntime JSRuntime
 @inject ILogger<EmployeeDetails> _logger
@@ -34,6 +34,9 @@ else
     <div class="d-flex justify-content-between align-items-center mb-3">
         <h3>Details for @employee.Name</h3>
         <div>
+            <a class="btn btn-outline-info me-2" href="/employees/insights/@EmployeeId" title="Employee Insights">
+                <i class="bi bi-graph-up-arrow me-1"></i> Employee Insights 📊
+            </a>
             <button class="btn btn-primary me-2" @onclick="ShowEditEmployeeModal" title="Edit Profile">
                 <i class="bi bi-pencil-square me-2"></i> Edit Employee
             </button>
@@ -66,6 +69,7 @@ else
                         </div>
                         <div class="col-6">
                             <strong>Shift:</strong> @(employee.ShiftStartTime?.ToString("hh:mm tt") ?? "-") to @(employee.ShiftEndTime?.ToString("hh:mm tt") ?? "-")
+                            <span class="badge @(employee.ShiftMode == "CONTINUOUS" ? "bg-info" : "bg-secondary") ms-1">@(employee.ShiftMode == "CONTINUOUS" ? "Continuous" : "Single Day")</span>
                         </div>
                         
                         <div class="col-12"><hr class="my-1" /></div>
@@ -144,6 +148,7 @@ else
     <div class="modal-backdrop fade show"></div>
 }
 
+<ApplicationRealtimeRefreshListener EntityFilter="Employee" OnApplicationDataChanged="HandleRealtimeRefresh" />
 <AttendanceRefreshListener OnAttendanceChanged="HandleRealtimeRefresh" />
 
 @code {
@@ -192,32 +197,27 @@ else
 
         try
         {
-            await using var dbContext = await DbFactory.CreateDbContextAsync();
-            
-            // 1. Load Settings
-            featureSettings = await dbContext.FeatureSettings.AsNoTracking().FirstOrDefaultAsync(f => f.Id == 1);
-            companySettings = await dbContext.CompanySettings.AsNoTracking().FirstOrDefaultAsync(s => s.SettingID == 1);
+            // 1. Firebase SSOT profile/settings.
+            featureSettings = await FirebaseEmployeeService.GetFeatureSettingsAsync();
+            companySettings = await FirebaseEmployeeService.GetCompanySettingsAsync();
 
-            // 2. Load Employee
-            employee = await dbContext.Employees.FindAsync(EmployeeId);
-            if (employee == null) 
-            { 
-                Navigation.NavigateTo("/employees"); 
-                return; 
+            // 2. Load Employee from Firebase SSOT.
+            employee = await FirebaseEmployeeService.GetEmployeeAsync(EmployeeId);
+            if (employee == null || employee.IsDeleted)
+            {
+                Navigation.NavigateTo("/employees");
+                return;
             }
 
-            // 3. Load Histories
-            advanceHistory = await dbContext.SalaryAdvances.Where(a => a.EmployeeID == EmployeeId).OrderByDescending(a => a.AdvanceDate).ToListAsync();
-            leaveHistory = await dbContext.LeaveRequests.Where(l => l.EmployeeID == EmployeeId).OrderByDescending(l => l.LeaveDate).ToListAsync();
-            payrollHistory = await dbContext.PayrollHistories.Where(p => p.EmployeeID == EmployeeId && p.PayYear >= yearAgo.Year).OrderByDescending(p => p.PayYear).ThenByDescending(p => p.PayMonth).ToListAsync();
-            bonusHistory = await dbContext.BonusRecords.Where(b => b.EmployeeID == EmployeeId).OrderByDescending(b => b.BonusDate).ToListAsync(); // <-- NEW
-            auditHistory = await dbContext.AuditLogs
-    .Where(a => a.EntityID == EmployeeId.ToString() && a.EntityType == "Employee")
-    .OrderByDescending(a => a.Timestamp)
-    .Take(20) 
-    .ToListAsync();
+            // 3. All employee-scoped history shown by this page now comes from
+            // the same Firebase SSOT used by Android. No EF/SQLite history read.
+            advanceHistory = await FirebaseEmployeeHistoryService.GetAdvancesAsync(EmployeeId);
+            leaveHistory = await FirebaseEmployeeHistoryService.GetLeaveAsync(EmployeeId);
+            payrollHistory = await FirebaseEmployeeHistoryService.GetPayrollAsync(EmployeeId, yearAgo.Year);
+            bonusHistory = await FirebaseEmployeeHistoryService.GetBonusesAsync(EmployeeId);
+            auditHistory = await FirebaseEmployeeHistoryService.GetEmployeeAuditAsync(EmployeeId, 20);
 
-            // 4. Calc Attendance
+            // 4. Calc Attendance from the canonical Firebase daily summaries.
             currentMonthAttendance = await CalculateAttendanceSummary(displayMonth, displayMonth.AddMonths(1), employee);
         }
         catch (Exception ex)
@@ -250,22 +250,41 @@ else
             Email = employee.Email,
             
             MonthlySalary = employee.MonthlySalary,
+            BasicSalaryComponent = employee.BasicSalaryComponent,
+            HraComponent = employee.HraComponent,
+            DaComponent = employee.DaComponent,
+            StandardHours = employee.StandardHours,
             DirectHourlyWage = employee.DirectHourlyWage,
-
+            PayrollTypeOverride = employee.PayrollTypeOverride,
             SalaryCalculationMethod = employee.SalaryCalculationMethod,
-            
+
             OT_Rule = employee.OT_Rule,
             OT_FlatRate = employee.OT_FlatRate,
 
             StandardBreakMinutes = employee.StandardBreakMinutes,
             CompOffDayOfWeek = employee.CompOffDayOfWeek,
             NightShiftAllowance = employee.NightShiftAllowance,
+            PaidLeaveBalance = employee.PaidLeaveBalance,
+            SickLeaveBalance = employee.SickLeaveBalance,
+            TdsRatePercent = employee.TdsRatePercent,
 
             EnablePF = employee.EnablePF,
             UAN = employee.UAN,
             EnableESI = employee.EnableESI,
             ESINumber = employee.ESINumber,
-            
+
+            BankAccountNumber = employee.BankAccountNumber,
+            BankIfscCode = employee.BankIfscCode,
+            BankName = employee.BankName,
+
+            EnableShiftRotation = employee.EnableShiftRotation,
+            RotationGroup = employee.RotationGroup,
+            ShiftRotationPattern = employee.ShiftRotationPattern,
+            LastRotatedDate = employee.LastRotatedDate,
+            CurrentShiftIndex = employee.CurrentShiftIndex,
+
+            IsDeleted = employee.IsDeleted,
+
             // Dates handled by helpers below
             DOB = employee.DOB,
             HireDate = employee.HireDate,
@@ -316,28 +335,35 @@ else
 
         try
         {
-            await using var dbContext = await DbFactory.CreateDbContextAsync();
-            var existing = await dbContext.Employees.FindAsync(currentEmployee.EmployeeID);
-            
-            if (existing != null)
+            // Firebase is the authoritative employee store. Do not write the
+            // profile back to EF/SQLite because that would create a second
+            // source of truth and could overwrite Android's current record.
+            var result = await FirebaseEmployeeService.SaveEmployeeAsync(currentEmployee);
+
+            if (result.Success)
             {
-                dbContext.Entry(existing).CurrentValues.SetValues(currentEmployee);
-                await dbContext.SaveChangesAsync();
-                
+                await FirebaseEmployeeService.ReconcileAuthAsync(result.Employee);
+                await FirebaseEmployeeService.LogAuditAsync(
+                    "UPDATE",
+                    "Employee",
+                    result.Employee.EmployeeID.ToString(CultureInfo.InvariantCulture),
+                    "Employee profile updated from Web Employee Details.");
+
                 toastService.ShowSuccess("Profile Updated!");
                 CloseEditModal();
-                
-                // Reload data to reflect changes on the main page
-                await LoadPageData(); 
+
+                // Reload the profile from Firebase so the screen reflects the
+                // exact canonical record shared with Android.
+                await LoadPageData();
             }
             else
             {
-                toastService.ShowError("Employee not found in database.");
+                toastService.ShowError(result.Message);
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error updating employee");
+            _logger.LogError(ex, "Error updating Firebase employee profile");
             toastService.ShowError($"Update failed: {ex.Message}");
         }
         finally
@@ -354,13 +380,11 @@ else
         // Basic Implementation for Summary Card
         try
         {
-            await using var dbContext = await DbFactory.CreateDbContextAsync();
             var dStart = DateOnly.FromDateTime(startDate);
             var dEnd = DateOnly.FromDateTime(endDate.AddDays(-1));
 
-            var summaries = await dbContext.DailySummaries.AsNoTracking()
-                .Where(ds => ds.EmployeeID == emp.EmployeeID && ds.ShiftDate >= dStart && ds.ShiftDate <= dEnd)
-                .ToListAsync();
+            var summaries = await FirebaseEmployeeHistoryService.GetDailySummariesAsync(
+                emp.EmployeeID, dStart, dEnd);
 
             // FIX: Ensure EarnedStandardHours is used as it's the decimal hours field
             summary.TotalHoursCalculated = summaries.Sum(s => s.EarnedStandardHours + (decimal)s.TotalOvertimeDuration.TotalHours);

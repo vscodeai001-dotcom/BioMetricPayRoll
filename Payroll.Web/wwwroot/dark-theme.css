@@ -1,4 +1,4 @@
-﻿/* =======================================
+/* =======================================
    DARK MODE - BASE STYLES
    ======================================= */
 
@@ -1238,3 +1238,143 @@ body.dark .identity-login-card .form-check-input:checked {
     background-color: #3d8bfd;
     border-color: #3d8bfd;
 }
+
+/* =========================================================
+   APPLICATION-WIDE PREMIUM UI/UX - DARK THEME EXTENSIONS
+   ========================================================= */
+
+body.dark .page-header-container {
+    background: #18202c !important;
+    border-color: #2d3b4e !important;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3) !important;
+}
+
+body.dark .page-header-container::before {
+    background: linear-gradient(180deg, #60a5fa 0%, #a78bfa 100%) !important;
+}
+
+body.dark .page-header-title {
+    color: #f1f5f9 !important;
+}
+
+body.dark .page-header-subtitle {
+    color: #94a3b8 !important;
+}
+
+body.dark .emoji-icon-badge {
+    background: #202936 !important;
+    border-color: #334155 !important;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25) !important;
+}
+
+body.dark .emoji-icon-badge-primary {
+    background: linear-gradient(135deg, rgba(59, 130, 246, 0.2) 0%, rgba(37, 99, 235, 0.25) 100%) !important;
+    border-color: rgba(96, 165, 250, 0.4) !important;
+    color: #93c5fd !important;
+}
+
+body.dark .emoji-icon-badge-success {
+    background: linear-gradient(135deg, rgba(16, 185, 129, 0.2) 0%, rgba(5, 150, 105, 0.25) 100%) !important;
+    border-color: rgba(52, 211, 153, 0.4) !important;
+    color: #6ee7b7 !important;
+}
+
+body.dark .emoji-icon-badge-warning {
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.2) 0%, rgba(217, 119, 6, 0.25) 100%) !important;
+    border-color: rgba(251, 191, 36, 0.4) !important;
+    color: #fcd34d !important;
+}
+
+body.dark .emoji-icon-badge-danger {
+    background: linear-gradient(135deg, rgba(239, 68, 68, 0.2) 0%, rgba(220, 38, 38, 0.25) 100%) !important;
+    border-color: rgba(248, 113, 113, 0.4) !important;
+    color: #fca5a5 !important;
+}
+
+body.dark .emoji-icon-badge-purple {
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.2) 0%, rgba(124, 58, 237, 0.25) 100%) !important;
+    border-color: rgba(167, 139, 250, 0.4) !important;
+    color: #c4b5fd !important;
+}
+
+body.dark .emoji-icon-badge-info {
+    background: linear-gradient(135deg, rgba(6, 182, 212, 0.2) 0%, rgba(8, 145, 178, 0.25) 100%) !important;
+    border-color: rgba(34, 211, 238, 0.4) !important;
+    color: #67e8f9 !important;
+}
+
+body.dark .premium-stat-card {
+    background: #18202c !important;
+    border-color: #2d3b4e !important;
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25) !important;
+}
+
+body.dark .premium-stat-card:hover {
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.38) !important;
+}
+
+body.dark .premium-stat-card .stat-number {
+    color: #f8fafc !important;
+}
+
+body.dark .premium-stat-card .stat-label {
+    color: #94a3b8 !important;
+}
+
+body.dark .premium-stat-card .stat-sub {
+    color: #64748b !important;
+}
+
+body.dark .table-responsive-card {
+    background: #18202c !important;
+    border-color: #2d3b4e !important;
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25) !important;
+}
+
+body.dark .table-responsive-card .table thead th {
+    background: #1e2838 !important;
+    color: #cbd5e1 !important;
+    border-bottom-color: #334155 !important;
+}
+
+body.dark .table-responsive-card .table tbody td {
+    border-bottom-color: #242f3e !important;
+    color: #e2e8f0 !important;
+}
+
+body.dark .status-pill-success {
+    background: rgba(16, 185, 129, 0.15) !important;
+    color: #34d399 !important;
+    border-color: rgba(52, 211, 153, 0.3) !important;
+}
+
+body.dark .status-pill-danger {
+    background: rgba(239, 68, 68, 0.15) !important;
+    color: #f87171 !important;
+    border-color: rgba(248, 113, 113, 0.3) !important;
+}
+
+body.dark .status-pill-warning {
+    background: rgba(245, 158, 11, 0.15) !important;
+    color: #fbbf24 !important;
+    border-color: rgba(251, 191, 36, 0.3) !important;
+}
+
+body.dark .status-pill-info {
+    background: rgba(59, 130, 246, 0.15) !important;
+    color: #60a5fa !important;
+    border-color: rgba(96, 165, 250, 0.3) !important;
+}
+
+body.dark .status-pill-purple {
+    background: rgba(139, 92, 246, 0.15) !important;
+    color: #a78bfa !important;
+    border-color: rgba(167, 139, 250, 0.3) !important;
+}
+
+body.dark .status-pill-secondary {
+    background: rgba(148, 163, 184, 0.15) !important;
+    color: #94a3b8 !important;
+    border-color: rgba(148, 163, 184, 0.3) !important;
+}
+

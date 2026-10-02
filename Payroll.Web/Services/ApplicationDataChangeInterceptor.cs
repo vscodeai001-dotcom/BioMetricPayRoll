@@ -210,17 +210,23 @@ public sealed class ApplicationDataChangeInterceptor : SaveChangesInterceptor
                 string.IsNullOrWhiteSpace(actorUid) ? "biometricpayroll" : actorUid,
                 role);
 
-            _ = _firebase.PublishApplicationDataChangedAsync(
-                pending.Changes.Cast<object>().ToArray(),
-                ownerUid);
-
-            // Publish the actual committed local row snapshots to Firebase.
-            // This is best-effort and never participates in the local transaction.
+            // Firebase is the shared realtime SSOT. The committed row data MUST
+            // reach Firebase before the invalidation event is published.
+            // Publishing the event first creates a race where Android/Web reloads
+            // immediately, reads the old Firebase snapshot, and then stays stale
+            // until a later login/manual refresh.
             if (!string.IsNullOrWhiteSpace(ownerUid))
             {
-                _ = _firebase.PublishCommittedChangesAsync(
+                await _firebase.PublishCommittedChangesAsync(
                     db,
                     pending.Entries,
+                    ownerUid,
+                    CancellationToken.None);
+
+                // The event is published only after the write attempt completes,
+                // so listeners never intentionally race the Firebase projection.
+                await _firebase.PublishApplicationDataChangedAsync(
+                    pending.Changes.Cast<object>().ToArray(),
                     ownerUid,
                     CancellationToken.None);
             }

@@ -7,6 +7,7 @@
 @inject IDbContextFactory<AppDbContext> DbFactory
 @inject ResignationService ExitService
 @inject AuthenticationStateProvider Auth
+@inject Payroll.Web.Services.FirebaseEmployeeManagementService FirebaseEmployees
 @inject IToastService toastService
 @inject NavigationManager Navigation
 @attribute [Authorize(Roles = "Employee, SuperAdmin")]
@@ -40,8 +41,26 @@ else
 {
     <div class="container-fluid h-100 d-flex flex-column">
         @* --- HEADER --- *@
-        <div class="d-flex justify-content-between align-items-center mb-4 border-bottom pb-2 flex-shrink-0">
-            <h3 class="text-primary fw-bold mb-0"><i class="bi bi-door-open me-2"></i>Resignation & Exit</h3>
+        <div class="page-header-container mb-4">
+            <div class="d-flex align-items-center gap-3">
+                <div class="emoji-icon-badge emoji-icon-badge-danger">
+                    🚪
+                </div>
+                <div>
+                    <h2 class="page-header-title">
+                        Resignation & Exit Formalities
+                    </h2>
+                    <p class="page-header-subtitle">
+                        <span>📄 Formal resignation submission, notice period tracker, and FnF clearance</span>
+                    </p>
+                </div>
+            </div>
+
+            <div class="d-flex align-items-center gap-2">
+                <span class="badge bg-secondary bg-opacity-10 text-secondary rounded-pill px-3 py-2 fw-semibold border">
+                    <span>🏢 Official Separation Workflow</span>
+                </span>
+            </div>
         </div>
 
         <div class="flex-grow-1 overflow-auto">
@@ -198,7 +217,7 @@ else
             // 2. Employee Check
             var auth = await Auth.GetAuthenticationStateAsync();
             var email = auth.User.Identity?.Name;
-            linkedEmployee = await db.Employees.FirstOrDefaultAsync(e => e.Email == email);
+            linkedEmployee = await FirebaseEmployees.GetEmployeeByEmailAsync(email);
             if (linkedEmployee == null) return;
 
             // 3. Existing Request Check

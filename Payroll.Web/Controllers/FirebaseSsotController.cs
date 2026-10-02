@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Payroll.Web.Services;
+using Payroll.Shared.Firebase;
 
 namespace Payroll.Web.Controllers;
 
@@ -44,7 +45,7 @@ public sealed class FirebaseSsotController : ControllerBase
         string table,
         CancellationToken cancellationToken)
     {
-        if (!IsAdmin() || !_firebase.IsFirebaseSsotTable(table))
+        if (!IsAdmin() || !FirebaseSsotSchema.IsTable(table))
             return Forbid();
 
         var ownerUid = ResolveOwnerUid();
@@ -62,7 +63,7 @@ public sealed class FirebaseSsotController : ControllerBase
         string recordId,
         CancellationToken cancellationToken)
     {
-        if (!IsAdmin() || !_firebase.IsFirebaseSsotTable(table))
+        if (!IsAdmin() || !FirebaseSsotSchema.IsTable(table))
             return Forbid();
 
         var ownerUid = ResolveOwnerUid();
@@ -84,7 +85,7 @@ public sealed class FirebaseSsotController : ControllerBase
         [FromBody] JsonElement value,
         CancellationToken cancellationToken)
     {
-        if (!IsAdmin() || !_firebase.IsFirebaseSsotTable(table))
+        if (!IsAdmin() || !FirebaseSsotSchema.IsTable(table))
             return Forbid();
 
         var ownerUid = ResolveOwnerUid();
@@ -114,7 +115,7 @@ public sealed class FirebaseSsotController : ControllerBase
         string recordId,
         CancellationToken cancellationToken)
     {
-        if (!IsAdmin() || !_firebase.IsFirebaseSsotTable(table))
+        if (!IsAdmin() || !FirebaseSsotSchema.IsTable(table))
             return Forbid();
 
         var ownerUid = ResolveOwnerUid();

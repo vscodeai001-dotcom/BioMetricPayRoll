@@ -11,9 +11,12 @@
 @inject IToastService toastService
 @inject IJSRuntime JSRuntime
 @inject FeatureCleanUpService CleanerService
+@inject Payroll.Web.Services.DatabaseBackupRestoreService BackupService
 @inject ILogger<FeatureToggleManager> _logger
 @inject AuthenticationStateProvider AuthState
 @inject Payroll.Web.Services.AttendanceRefreshService AttendanceRefresh
+@inject Payroll.Web.Services.ITenantContextService TenantContext
+@inject Payroll.Web.Services.FirebaseRealtimeService FirebaseRealtime
 
 <PageTitle>Feature & Permission Manager</PageTitle>
 
@@ -22,8 +25,8 @@
         <h3 class="mb-0 text-primary fw-bold">Feature & Permission Manager</h3>
         <p class="text-muted small mb-0">Master control panel for system modules and role capabilities.</p>
     </div>
-    @* Only SuperAdmin can save all settings *@
-    @if (userIsSuperAdmin)
+    @* SuperAdmin or authorized Admin can save settings *@
+    @if (userIsSuperAdmin || settings?.AdminCanManageFeatureToggles == true || settings?.AdminCanManageEmployeePermissions == true)
     {
         <button class="btn btn-primary shadow-sm" @onclick="SaveAllSettings" disabled="@(isSaving || isLoading)">
             @if (isSaving)
@@ -58,13 +61,16 @@ else
 {
     @* --- TABS NAVIGATION --- *@
     <ul class="nav nav-tabs nav-tabs-bordered mb-0 border-bottom-0">
-        @if (userIsSuperAdmin)
+        @if (userIsSuperAdmin || settings.AdminCanManageFeatureToggles)
         {
             <li class="nav-item">
                 <button class="nav-link @(activeTab == "modules" ? "active fw-bold" : "")" @onclick="@(() => activeTab = "modules")">
                     <i class="bi bi-grid-fill me-2"></i> Core Modules
                 </button>
             </li>
+        }
+        @if (userIsSuperAdmin)
+        {
             <li class="nav-item">
                 <button class="nav-link @(activeTab == "admin" ? "active fw-bold" : "")" @onclick="@(() => activeTab = "admin")">
                     <i class="bi bi-person-lock me-2"></i> Admin Permissions
@@ -72,7 +78,7 @@ else
             </li>
         }
         
-        @if (userIsSuperAdmin || settings.AdminCanManageEmployeePermissions)
+        @if (userIsSuperAdmin || settings.AdminCanManageEmployeePermissions || settings.AdminCanManageFeatureToggles)
         {
             <li class="nav-item">
                 <button class="nav-link @(activeTab == "employee" ? "active fw-bold" : "")" @onclick="@(() => activeTab = "employee")">
@@ -96,9 +102,9 @@ else
         <div class="card-body p-4 bg-light-subtle">
 
             @* ====================================================================================== *@
-            @* TAB 1: CORE MODULES (SuperAdmin Only) *@
+            @* TAB 1: CORE MODULES *@
             @* ====================================================================================== *@
-            @if (userIsSuperAdmin)
+            @if (userIsSuperAdmin || settings.AdminCanManageFeatureToggles)
             {
                 <div class="@(activeTab == "modules" ? "" : "d-none")">
                     
@@ -327,6 +333,33 @@ else
                                             </div>
                                         </div>
                                     </div>
+                                    <hr class="my-3 text-muted opacity-25" />
+                                    <div class="mb-1">
+                                        <label class="form-label fw-bold text-warning small mb-2">
+                                            <i class="bi bi-fire me-1"></i> Firebase Plan Mode (Data & Bandwidth Optimization)
+                                        </label>
+                                        <div class="d-flex gap-3 align-items-center">
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="radio" name="planMode" id="planSpark" value="Spark"
+                                                       checked="@(settings.FirebasePlanMode != "Blaze")"
+                                                       @onchange="@(() => settings.FirebasePlanMode = "Spark")" />
+                                                <label class="form-check-label fw-bold text-success small" for="planSpark">
+                                                    ⚡ Spark (Free Tier - 80% Bandwidth Optimized)
+                                                </label>
+                                            </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="radio" name="planMode" id="planBlaze" value="Blaze"
+                                                       checked="@(settings.FirebasePlanMode == "Blaze")"
+                                                       @onchange="@(() => settings.FirebasePlanMode = "Blaze")" />
+                                                <label class="form-check-label fw-bold text-danger small" for="planBlaze">
+                                                    🔥 Blaze (Pay-as-you-go - Full Unrestricted Sync)
+                                                </label>
+                                            </div>
+                                        </div>
+                                        <small class="text-muted d-block mt-1" style="font-size: 0.78rem;">
+                                            Spark mode restricts background live node caching and auto-purges tracking history older than 24h to save up to 80% bandwidth.
+                                        </small>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -397,19 +430,23 @@ else
                                     </div>
                                     <div class="form-check form-switch mb-2">
                                         <input class="form-check-input" type="checkbox" role="switch" @bind="settings.AdminCanManageEmployeePermissions" id="a8" />
-                                        <label class="form-check-label" for="a8">Manage Employee Perms</LAbel>
+                                        <label class="form-check-label" for="a8">Manage Employee Perms</label>
+                                    </div>
+                                    <div class="form-check form-switch mb-2">
+                                        <input class="form-check-input" type="checkbox" role="switch" @bind="settings.AdminCanManageFeatureToggles" id="a_ft" />
+                                        <label class="form-check-label" for="a_ft">Manage Feature Toggles</label>
                                     </div>
                                 </div>
                             </div>
                         </div>
                     </div>
                 </div>
-            
+            }
 
             @* ====================================================================================== *@
             @* TAB 3: EMPLOYEE PERMISSIONS *@
             @* ====================================================================================== *@
-            @if (userIsSuperAdmin || settings.AdminCanManageEmployeePermissions)
+            @if (userIsSuperAdmin || settings.AdminCanManageEmployeePermissions || settings.AdminCanManageFeatureToggles)
             {
                 <div class="@(activeTab == "employee" ? "" : "d-none")">
                     <h5 class="text-info mb-3 border-bottom pb-2">Employee Portal Permissions</h5>
@@ -575,29 +612,187 @@ else
             @* ====================================================================================== *@
             @if (userIsSuperAdmin)
             {
-             <div class="@(activeTab == "danger" ? "" : "d-none")">
-                    <h5 class="text-danger mb-3 border-bottom border-danger pb-2">Danger Zone</h5>
-                    
-                    <div class="row g-3">
-                      <div class="col-md-6">
-                            <div class="card border-danger h-100 shadow-sm">
-                                <div class="card-body text-center">
-                                    <i class="bi bi-arrow-counterclockwise text-danger fs-1 mb-2"></i>
-                                    <h6 class="fw-bold">Reset Feature Toggles</h6>
-                                    <p class="small text-muted mb-3">Revert all settings on this page to factory defaults.</p>
-                                    <button class="btn btn-outline-danger w-100" @onclick="ConfirmResetToggles">Reset Toggles</button>
+                <div class="@(activeTab == "danger" ? "" : "d-none")">
+                    <div class="d-flex justify-content-between align-items-center mb-3 border-bottom pb-2">
+                        <div>
+                            <h5 class="text-danger mb-0 fw-bold"><i class="bi bi-shield-exclamation me-2"></i>Database Backups & Danger Zone</h5>
+                            <small class="text-muted">Manage full local backups, automated hourly backups, cloud restore, and company-scoped data wipe.</small>
+                        </div>
+                        <span class="badge bg-success-subtle text-success border border-success-subtle px-3 py-2">
+                            <i class="bi bi-clock-history me-1"></i>Hourly Auto-Backup: Active
+                        </span>
+                    </div>
+
+                    @* ACTIVE TENANT ISOLATION BANNER *@
+                    <div class="alert alert-danger border-danger-subtle d-flex align-items-center justify-content-between mb-4 shadow-sm py-2 px-3">
+                        <div class="d-flex align-items-center">
+                            <span class="fs-3 me-3">@(string.IsNullOrWhiteSpace(activeTenant?.IconEmoji) ? "🏢" : activeTenant.IconEmoji)</span>
+                            <div>
+                                <div class="fw-bold fs-6 text-danger-emphasis">
+                                    Danger Zone Workspace: @(activeTenant?.CompanyName ?? "Primary Workspace")
+                                </div>
+                                <div class="small text-muted">
+                                    Tenant Code: <code>@(activeTenant?.CompanyCode ?? "PRIMARY")</code> | ID: <code>@(activeTenant?.TenantId ?? "biometricpayroll")</code>
                                 </div>
                             </div>
                         </div>
-                         <div class="col-md-6">
-                            <div class="card bg-danger text-white h-100 shadow-sm">
-                                <div class="card-body text-center">
-                                    <i class="bi bi-database-x fs-1 mb-2"></i>
-                                    <h6 class="fw-bold">Wipe All Data</h6>
-                                    <p class="small mb-3" style="opacity:0.9">Permanently delete employees, logs, payroll, and users. Cannot be undone.</p>
-                                    <button class="btn btn-light text-danger w-100 fw-bold" @onclick="ConfirmWipeData">Wipe Data</button>
+                        <div class="text-end">
+                            <span class="badge bg-danger text-white px-3 py-2 d-inline-block">
+                                <i class="bi bi-shield-check me-1"></i> Multi-Tenant Isolation Active
+                            </span>
+                            <div class="small text-danger fw-semibold mt-1">Actions below affect this company ONLY</div>
+                        </div>
+                    </div>
+
+                    <div class="row g-3 mb-4">
+                        @* 1. BACKUP DATA *@
+                        <div class="col-md-3">
+                            <div class="card border-primary h-100 shadow-sm">
+                                <div class="card-body text-center d-flex flex-column justify-content-between">
+                                    <div>
+                                        <i class="bi bi-cloud-arrow-down text-primary fs-1 mb-2 d-block"></i>
+                                        <h6 class="fw-bold">Backup Database Locally</h6>
+                                        <p class="small text-muted mb-3">Creates an instant, non-blocking local snapshot of the SQLite database.</p>
+                                    </div>
+                                    <button class="btn btn-primary w-100 fw-bold" @onclick="CreateManualBackup" disabled="@(isBackingUp || isRestoring || isWiping)">
+                                        <i class="bi @(isBackingUp ? "bi-arrow-repeat spin" : "bi-download") me-1"></i>
+                                        @(isBackingUp ? "Creating..." : "Backup Data Now")
+                                    </button>
                                 </div>
                             </div>
+                        </div>
+
+                        @* 2. RESET TOGGLES *@
+                        <div class="col-md-3">
+                            <div class="card border-secondary h-100 shadow-sm">
+                                <div class="card-body text-center d-flex flex-column justify-content-between">
+                                    <div>
+                                        <i class="bi bi-arrow-counterclockwise text-secondary fs-1 mb-2 d-block"></i>
+                                        <h6 class="fw-bold">Reset Feature Toggles</h6>
+                                        <p class="small text-muted mb-3">Revert feature toggles for @(activeTenant?.CompanyName ?? "this company") to factory defaults.</p>
+                                    </div>
+                                    <button class="btn btn-outline-secondary w-100 fw-bold" @onclick="ConfirmResetToggles" disabled="@(isBackingUp || isRestoring || isWiping)">Reset Toggles</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        @* 3. PARTIAL WIPE (KEEP ADMIN SETTINGS & EMPLOYEES) *@
+                        <div class="col-md-3">
+                            <div class="card border-warning h-100 shadow-sm">
+                                <div class="card-body text-center d-flex flex-column justify-content-between">
+                                    <div>
+                                        <i class="bi bi-database-dash text-warning fs-1 mb-2 d-block"></i>
+                                        <h6 class="fw-bold text-warning-emphasis">Partial Wipe (Operational)</h6>
+                                        <p class="small text-muted mb-3">Wipes logs, tracking & payroll for <strong>@(activeTenant?.CompanyName ?? "this company")</strong> only. Other companies remain safe.</p>
+                                    </div>
+                                    <button class="btn btn-warning w-100 fw-bold text-dark" @onclick="ConfirmPartialWipeData" disabled="@(isBackingUp || isRestoring || isWiping)">
+                                        <i class="bi @(isWiping ? "bi-arrow-repeat spin" : "bi-eraser-fill") me-1"></i>
+                                        @(isWiping ? "Wiping..." : "Partial Wipe (" + (activeTenant?.CompanyCode ?? "Active") + ")")
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        @* 4. FULL WIPE ALL DATA *@
+                        <div class="col-md-3">
+                            <div class="card bg-danger text-white h-100 shadow-sm">
+                                <div class="card-body text-center d-flex flex-column justify-content-between">
+                                    <div>
+                                        <i class="bi bi-database-x fs-1 mb-2 d-block"></i>
+                                        <h6 class="fw-bold">Full Factory Wipe</h6>
+                                        <p class="small mb-3" style="opacity:0.9">Wipes employees & records for <strong>@(activeTenant?.CompanyName ?? "this company")</strong> only from Local & Cloud.</p>
+                                    </div>
+                                    <button class="btn btn-light text-danger w-100 fw-bold" @onclick="ConfirmWipeData" disabled="@(isBackingUp || isRestoring || isWiping)">
+                                        <i class="bi @(isWiping ? "bi-arrow-repeat spin" : "bi-trash3-fill") me-1"></i>
+                                        @(isWiping ? "Wiping..." : "Full Wipe (" + (activeTenant?.CompanyCode ?? "Active") + ")")
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    @* BACKUPS & RESTORE TABLE *@
+                    <div class="card border-0 shadow-sm">
+                        <div class="card-header bg-white d-flex justify-content-between align-items-center py-3">
+                            <div class="fw-bold text-dark">
+                                <i class="bi bi-archive-fill text-primary me-2"></i>Available Backups & Restore to Cloud
+                                <span class="badge bg-secondary ms-2">@backups.Count</span>
+                            </div>
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="LoadBackups" disabled="@isLoadingBackups">
+                                <i class="bi bi-arrow-clockwise me-1 @(isLoadingBackups ? "spin" : "")"></i>Refresh List
+                            </button>
+                        </div>
+                        <div class="card-body p-0">
+                            @if (isLoadingBackups)
+                            {
+                                <div class="p-4 text-center text-muted">
+                                    <span class="spinner-border spinner-border-sm me-2"></span>Loading backups...
+                                </div>
+                            }
+                            else if (backups.Count == 0)
+                            {
+                                <div class="p-4 text-center text-muted">
+                                    <i class="bi bi-folder-x display-6 d-block mb-2"></i>
+                                    No backups found yet. Click <strong>"Backup Data Now"</strong> to create your first backup.
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="table-responsive">
+                                    <table class="table table-hover align-middle mb-0">
+                                        <thead class="table-light">
+                                            <tr>
+                                                <th>Created Time (IST)</th>
+                                                <th>Backup File</th>
+                                                <th>Type</th>
+                                                <th>Size</th>
+                                                <th class="text-end pe-3">Actions</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (var b in backups)
+                                            {
+                                                <tr>
+                                                    <td>
+                                                        <i class="bi bi-clock me-1 text-muted"></i>
+                                                        <strong>@FormatBackupTime(b.CreatedAtUtc)</strong>
+                                                    </td>
+                                                    <td>
+                                                        <code class="small">@b.FileName</code>
+                                                    </td>
+                                                    <td>
+                                                        @if (b.TriggerType.Equals("HourlyAuto", StringComparison.OrdinalIgnoreCase))
+                                                        {
+                                                            <span class="badge bg-info-subtle text-info border border-info-subtle"><i class="bi bi-robot me-1"></i>Hourly Auto</span>
+                                                        }
+                                                        else if (b.TriggerType.Equals("PreWipeSafety", StringComparison.OrdinalIgnoreCase))
+                                                        {
+                                                            <span class="badge bg-danger-subtle text-danger border border-danger-subtle"><i class="bi bi-shield-lock me-1"></i>Pre-Wipe Safety</span>
+                                                        }
+                                                        else if (b.TriggerType.Equals("PreRestoreSafety", StringComparison.OrdinalIgnoreCase))
+                                                        {
+                                                            <span class="badge bg-warning-subtle text-warning border border-warning-subtle"><i class="bi bi-shield me-1"></i>Pre-Restore Safety</span>
+                                                        }
+                                                        else
+                                                        {
+                                                            <span class="badge bg-primary-subtle text-primary border border-primary-subtle"><i class="bi bi-person me-1"></i>Manual</span>
+                                                        }
+                                                    </td>
+                                                    <td>@b.FormattedSize</td>
+                                                    <td class="text-end pe-3">
+                                                        <button class="btn btn-sm btn-outline-success me-1" @onclick="() => ConfirmRestore(b.FileName)" disabled="@(isRestoring || isBackingUp || isWiping)" title="Restore to Local DB and sync to Firebase Cloud">
+                                                            <i class="bi bi-cloud-arrow-up-fill me-1"></i>@(isRestoring ? "Restoring..." : "Restore to Cloud")
+                                                        </button>
+                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteBackup(b.FileName)" disabled="@(isRestoring || isBackingUp || isWiping)" title="Delete backup">
+                                                            <i class="bi bi-trash"></i>
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                </div>
+                            }
                         </div>
                     </div>
                 </div>
@@ -611,25 +806,137 @@ else
 
 @code {
     private FeatureSettings? settings;
+    private CompanyTenant? activeTenant;
     private bool isLoading = true;
     private bool isSaving = false;
     private string activeTab = "modules";
     private bool userIsSuperAdmin = false;
     private bool authCheckCompleted = false;
-    
+
+    private List<Payroll.Web.Services.BackupMetadata> backups = new();
+    private bool isLoadingBackups = false;
+    private bool isBackingUp = false;
+    private bool isRestoring = false;
+    private bool isWiping = false;
+
     protected override async Task OnInitializedAsync()
     {
         var authState = await AuthState.GetAuthenticationStateAsync();
         var user = authState.User;
         userIsSuperAdmin = user.IsInRole("SuperAdmin");
+        
+        activeTenant = await TenantContext.GetActiveTenantAsync();
+        authCheckCompleted = true;
+        await LoadAllSettings();
 
         if (!userIsSuperAdmin)
         {
-            activeTab = "employee";
+            if (settings?.AdminCanManageFeatureToggles == true)
+            {
+                activeTab = "modules";
+            }
+            else
+            {
+                activeTab = "employee";
+            }
         }
-        
-        authCheckCompleted = true;
-        await LoadAllSettings();
+
+        if (userIsSuperAdmin)
+        {
+            await LoadBackups();
+        }
+    }
+
+    private async Task LoadBackups()
+    {
+        isLoadingBackups = true;
+        try
+        {
+            backups = await BackupService.GetBackupsAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to load backups list.");
+        }
+        finally
+        {
+            isLoadingBackups = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task CreateManualBackup()
+    {
+        isBackingUp = true;
+        try
+        {
+            var meta = await BackupService.CreateBackupAsync("Manual");
+            toastService.ShowSuccess($"Backup created successfully ({meta.FormattedSize}).");
+            await LoadBackups();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Manual backup failed.");
+            toastService.ShowError($"Backup failed: {ex.Message}");
+        }
+        finally
+        {
+            isBackingUp = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task ConfirmRestore(string fileName)
+    {
+        var confirmMsg = $"WARNING: Restoring backup '{fileName}' will replace current local database records and push all restored data to Firebase Cloud. A safety backup will be taken first. Continue?";
+        if (!await JSRuntime.InvokeAsync<bool>("confirm", confirmMsg)) return;
+
+        isRestoring = true;
+        try
+        {
+            var result = await BackupService.RestoreBackupAsync(fileName);
+            if (result.Success)
+            {
+                toastService.ShowSuccess($"Restore completed! Restored {result.CloudRecordsRestored} records to Cloud. Safety backup: {result.SafetyBackupFileName}");
+                await LoadAllSettings();
+                await LoadBackups();
+            }
+            else
+            {
+                toastService.ShowError($"Restore failed: {result.ErrorMessage}");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Restore failed for {FileName}", fileName);
+            toastService.ShowError($"Restore failed: {ex.Message}");
+        }
+        finally
+        {
+            isRestoring = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task DeleteBackup(string fileName)
+    {
+        if (!await JSRuntime.InvokeAsync<bool>("confirm", $"Delete backup '{fileName}'?")) return;
+        var deleted = await BackupService.DeleteBackupAsync(fileName);
+        if (deleted)
+        {
+            toastService.ShowSuccess("Backup deleted.");
+            await LoadBackups();
+        }
+        else
+        {
+            toastService.ShowError("Could not delete backup.");
+        }
+    }
+
+    private string FormatBackupTime(DateTime utcTime)
+    {
+        var ist = utcTime.AddHours(5).AddMinutes(30);
+        return ist.ToString("dd-MMM-yyyy hh:mm:ss tt");
     }
     
     private async Task LoadAllSettings()
@@ -637,13 +944,16 @@ else
         isLoading = true;
         try
         {
+            activeTenant ??= await TenantContext.GetActiveTenantAsync();
+            var targetFeatureId = activeTenant?.FeatureSettingsId > 0 ? activeTenant.FeatureSettingsId : 1;
+
             await using var dbContext = await DbFactory.CreateDbContextAsync();
-            settings = await dbContext.FeatureSettings.FirstOrDefaultAsync(s => s.Id == 1);
+            settings = await dbContext.FeatureSettings.FirstOrDefaultAsync(s => s.Id == targetFeatureId);
 
             if (settings == null)
             {
-                _logger.LogWarning("FeatureSettings not found, inserting defaults.");
-                settings = new FeatureSettings();
+                _logger.LogWarning("FeatureSettings not found for Id {Id}, inserting defaults.", targetFeatureId);
+                settings = new FeatureSettings { Id = targetFeatureId };
                 dbContext.FeatureSettings.Add(settings);
                 await dbContext.SaveChangesAsync();
             }
@@ -667,6 +977,10 @@ else
         isSaving = true;
         try
         {
+            activeTenant ??= await TenantContext.GetActiveTenantAsync();
+            var targetFeatureId = activeTenant?.FeatureSettingsId > 0 ? activeTenant.FeatureSettingsId : 1;
+            settings.Id = targetFeatureId;
+
             // Geo-Fencing is the master GPS switch. Child attendance modes
             // cannot remain enabled when the master is disabled.
             if (!settings.EnableGeoFencing)
@@ -676,13 +990,68 @@ else
             }
 
             await using var dbContext = await DbFactory.CreateDbContextAsync();
-            var existing = await dbContext.FeatureSettings.AsNoTracking().FirstOrDefaultAsync(s => s.Id == 1);
+            var existing = await dbContext.FeatureSettings.AsNoTracking().FirstOrDefaultAsync(s => s.Id == targetFeatureId);
             if (existing != null) dbContext.Entry(existing).State = EntityState.Detached;
+
+            if (!userIsSuperAdmin && existing != null)
+            {
+                // Preserve SuperAdmin-controlled administrator rights
+                settings.AdminCanViewDashboard = existing.AdminCanViewDashboard;
+                settings.AdminCanManageEmployees = existing.AdminCanManageEmployees;
+                settings.AdminCanViewAttendance = existing.AdminCanViewAttendance;
+                settings.AdminCanRunPayroll = existing.AdminCanRunPayroll;
+                settings.AdminCanEditSettings = existing.AdminCanEditSettings;
+                settings.AdminCanManageShifts = existing.AdminCanManageShifts;
+                settings.AdminCanManagePunchApprovals = existing.AdminCanManagePunchApprovals;
+                settings.AdminCanViewReports = existing.AdminCanViewReports;
+                settings.AdminCanManageEmployeePermissions = existing.AdminCanManageEmployeePermissions;
+                settings.AdminCanManageFeatureToggles = existing.AdminCanManageFeatureToggles;
+            }
 
             dbContext.FeatureSettings.Update(settings);
             await dbContext.SaveChangesAsync();
+
+            if (!string.IsNullOrWhiteSpace(activeTenant?.TenantId))
+            {
+                try
+                {
+                    var featureMap = new Dictionary<string, object?>
+                    {
+                        ["enablePayroll"] = settings.EnablePayroll,
+                        ["enableGeoFencing"] = settings.EnableGeoFencing,
+                        ["enableDualAttendance"] = settings.EnableDualAttendance,
+                        ["enableAutomaticGeofencePunching"] = settings.EnableAutomaticGeofencePunching,
+                        ["enableSalaryAdvance"] = settings.EnableSalaryAdvance,
+                        ["enableBonusManagement"] = settings.EnableBonusManagement,
+                        ["enableLeaveManagement"] = settings.EnableLeaveManagement,
+                        ["enableShiftScheduling"] = settings.EnableShiftScheduling,
+                        ["enablePunchCorrection"] = settings.EnablePunchCorrection,
+                        ["enableTaxDeclarations"] = settings.EnableTaxDeclarations,
+                        ["enableResignationModule"] = settings.EnableResignationModule,
+                        ["enableFlexibleBenefits"] = settings.EnableFlexibleBenefits,
+                        ["enableCompanyReports"] = settings.EnableCompanyReports,
+                        ["enableEmailNotifications"] = settings.EnableEmailNotifications,
+                        ["adminCanViewDashboard"] = settings.AdminCanViewDashboard,
+                        ["adminCanManageEmployees"] = settings.AdminCanManageEmployees,
+                        ["adminCanViewAttendance"] = settings.AdminCanViewAttendance,
+                        ["adminCanRunPayroll"] = settings.AdminCanRunPayroll,
+                        ["adminCanEditSettings"] = settings.AdminCanEditSettings,
+                        ["adminCanManageShifts"] = settings.AdminCanManageShifts,
+                        ["adminCanManagePunchApprovals"] = settings.AdminCanManagePunchApprovals,
+                        ["adminCanViewReports"] = settings.AdminCanViewReports,
+                        ["adminCanManageEmployeePermissions"] = settings.AdminCanManageEmployeePermissions,
+                        ["adminCanManageFeatureToggles"] = settings.AdminCanManageFeatureToggles
+                    };
+                    await FirebaseRealtime.SetAsync($"owners/{activeTenant.TenantId}/feature_settings/1", featureMap, default);
+                }
+                catch (Exception fbEx)
+                {
+                    _logger.LogWarning(fbEx, "Could not mirror feature settings to Firebase for {TenantId}", activeTenant.TenantId);
+                }
+            }
+
             await AttendanceRefresh.NotifyGlobalRefreshAsync("FEATURE_TOGGLES_UPDATED");
-            toastService.ShowSuccess("Feature settings saved!");
+            toastService.ShowSuccess($"Feature settings saved for {activeTenant?.CompanyName ?? "Company"}!");
         }
         catch (Exception ex)
         {
@@ -694,11 +1063,12 @@ else
 
     private async Task ConfirmResetToggles()
     {
-        if (await JSRuntime.InvokeAsync<bool>("confirm", "Reset all toggles to default?"))
+        var compName = activeTenant?.CompanyName ?? "this company";
+        if (await JSRuntime.InvokeAsync<bool>("confirm", $"Reset all toggles to default for {compName}?"))
         {
             await CleanerService.ResetAllTogglesAsync();
             await AttendanceRefresh.NotifyGlobalRefreshAsync("FEATURE_TOGGLES_RESET");
-            toastService.ShowSuccess("Toggles reset.");
+            toastService.ShowSuccess($"Toggles reset for {compName}.");
             await LoadAllSettings();
         }
     }
@@ -708,22 +1078,78 @@ else
         await LoadAllSettings();
     }
 
+    private async Task ConfirmPartialWipeData()
+    {
+        var compName = activeTenant?.CompanyName ?? "this company";
+        var tid = activeTenant?.TenantId ?? "default";
+
+        var msg1 = $"WARNING: Partial Wipe will permanently delete all attendance logs, punches, GPS tracking history, payroll records, salary advances, and leave requests for {compName} ({tid}) from BOTH Local DB and Firebase Cloud.\n\nAll Admin Settings (Employee Records, Company Settings, Holiday Management, User & Role Management, and Feature Toggles) for {compName} WILL BE KEPT.\n\nOTHER COMPANIES WILL NOT BE TOUCHED.\n\nA safety backup will be created automatically before wiping. Proceed?";
+        if (!await JSRuntime.InvokeAsync<bool>("confirm", msg1)) return;
+        if (!await JSRuntime.InvokeAsync<bool>("confirm", $"FINAL CONFIRMATION: Wipe operational data for {compName} ONLY?")) return;
+
+        isWiping = true;
+        try
+        {
+            var result = await BackupService.WipeOperationalDataOnlyAsync(tid);
+            if (result.Success)
+            {
+                try { await JSRuntime.InvokeVoidAsync("attendanceCache.clear"); } catch { }
+                toastService.ShowSuccess($"Operational data wiped for {compName} from Local DB and Firebase Cloud! (Settings & Employees preserved). Pre-wipe safety backup saved: {result.SafetyBackupFileName}");
+                await LoadAllSettings();
+                await LoadBackups();
+            }
+            else
+            {
+                toastService.ShowError($"Partial wipe failed: {result.ErrorMessage}");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Partial wipe failed for tenant {TenantId}", tid);
+            toastService.ShowError($"Partial wipe failed: {ex.Message}");
+        }
+        finally
+        {
+            isWiping = false;
+            StateHasChanged();
+        }
+    }
+
     private async Task ConfirmWipeData()
     {
-        if (!await JSRuntime.InvokeAsync<bool>("confirm", "WARNING: Wipe ALL data?")) return;
-        if (!await JSRuntime.InvokeAsync<bool>("confirm", "FINAL WARNING: This cannot be undone. Confirm?")) return;
-        try {
-            await CleanerService.WipeAllTransactionalDataAsync();
+        var compName = activeTenant?.CompanyName ?? "this company";
+        var tid = activeTenant?.TenantId ?? "default";
 
-            // Wipe uses direct SQL/TRUNCATE, so EF SaveChanges interception
-            // cannot publish the realtime invalidation. Publish explicitly
-            // after the transaction succeeds.
-            await AttendanceRefresh.NotifyGlobalRefreshAsync("SYSTEM_DATA_WIPED");
+        var msg1 = $"DANGER: Full Factory Wipe will permanently delete ALL employees, logs, GPS history, payroll, and transactional records for {compName} ({tid}) from BOTH Local Database and Firebase Cloud.\n\nSettings for {compName} and ALL OTHER COMPANIES will remain safe.\n\nA safety backup will be created automatically before wiping. Proceed?";
+        if (!await JSRuntime.InvokeAsync<bool>("confirm", msg1)) return;
+        if (!await JSRuntime.InvokeAsync<bool>("confirm", $"FINAL CONFIRMATION: Are you absolutely certain you want to wipe ALL employees and operational data for {compName} ONLY?")) return;
 
-            toastService.ShowSuccess("System reset.");
-        } catch (Exception ex) {
-             toastService.ShowError("Wipe failed.");
-            _logger.LogError(ex, "Wipe failed");
+        isWiping = true;
+        try
+        {
+            var result = await BackupService.WipeAllDataAsync(tid);
+            if (result.Success)
+            {
+                try { await JSRuntime.InvokeVoidAsync("attendanceCache.clear"); } catch { }
+                try { await JSRuntime.InvokeVoidAsync("employeeCache.clear", tid); } catch { }
+                toastService.ShowSuccess($"Full system wipe completed for {compName}! (Local DB and Firebase Cloud). Pre-wipe safety backup saved: {result.SafetyBackupFileName}");
+                await LoadAllSettings();
+                await LoadBackups();
+            }
+            else
+            {
+                toastService.ShowError($"Full wipe failed: {result.ErrorMessage}");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Full wipe failed for tenant {TenantId}", tid);
+            toastService.ShowError($"Full wipe failed: {ex.Message}");
+        }
+        finally
+        {
+            isWiping = false;
+            StateHasChanged();
         }
     }
 }

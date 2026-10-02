@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
@@ -12,7 +12,7 @@ namespace Payroll.Shared.Data
     public class CompanySetting
     {
         [Key]
-        public int SettingID { get; set; } = 1;
+        public int SettingID { get; set; } = 0;
 
         // --- Company Details ---
         public string CompanyName { get; set; } = "Your Company Name";
@@ -106,6 +106,24 @@ namespace Payroll.Shared.Data
 
         [Column("geo_radius_meters")]
         public int GeoRadiusMeters { get; set; } = 1000; 
-                                                       
+
+        // --- NEW: AUTO-BACKUP CONFIGURATION ---
+        [Column("auto_backup_interval_hours")]
+        public int AutoBackupIntervalHours { get; set; } = 24;
+
+        // --- NEW: STAY LOCATION DETECTION CONFIGURATION ---
+        [Column("stay_dwell_minutes")]
+        public int StayDwellMinutes { get; set; } = 10;
+
+        [Column("stay_cluster_radius_meters")]
+        public int StayClusterRadiusMeters { get; set; } = 50;
+
+        // --- MAP MARKER DISPLAY MODE ---
+        [Column("use_speed_based_markers")]
+        public bool UseSpeedBasedMarkers { get; set; } = false;
+
+        // --- WEB PAGE NAVIGATION TRANSITION EFFECT ---
+        [Column("page_transition_effect")]
+        public string PageTransitionEffect { get; set; } = "Fade"; // "Fade", "SlideLeft", "SlideUp", "Zoom", "Flip", "None"
     }
 }

@@ -1,43 +1,115 @@
-﻿@using global::Payroll.Shared.Data
+@using global::Payroll.Shared.Data
 
-<div class="row">
-    <div class="col-12 mb-3">
-        <div class="form-check form-switch">
-            <input class="form-check-input" type="checkbox" role="switch" @bind="Settings.EnableEmailNotifications" id="emailSwitch">
-            <label class="form-check-label fw-bold" for="emailSwitch">Enable Email Notifications</label>
+<div class="row g-4">
+    <div class="col-12">
+        <div class="card border rounded-4 shadow-sm">
+            <div class="card-header bg-transparent border-bottom py-3 px-4 d-flex align-items-center justify-content-between">
+                <div class="d-flex align-items-center gap-2">
+                    <span class="fs-5">📧</span>
+                    <div>
+                        <h6 class="mb-0 fw-bold text-primary">Automated Email Dispatch Service</h6>
+                        <small class="text-muted">Sends payslips, attendance alerts, and policy updates to employees.</small>
+                    </div>
+                </div>
+                <div class="d-flex align-items-center gap-2">
+                    <span class="badge @(Settings.EnableEmailNotifications ? "bg-success-subtle text-success border border-success-subtle" : "bg-secondary-subtle text-secondary border") px-3 py-2 rounded-pill small fw-bold">
+                        @(Settings.EnableEmailNotifications ? "✓ Dispatch Active" : "Disabled")
+                    </span>
+                    <div class="form-check form-switch mb-0">
+                        <input class="form-check-input" type="checkbox" role="switch" @bind="Settings.EnableEmailNotifications" id="emailSwitch">
+                    </div>
+                </div>
+            </div>
+
+            <div class="card-body p-4">
+                @if (Settings.EnableEmailNotifications)
+                {
+                    <div class="row g-4">
+                        @* SMTP Server Credentials Card *@
+                        <div class="col-lg-8">
+                            <div class="p-3 border rounded-3 bg-body-tertiary">
+                                <h6 class="fw-bold text-secondary mb-3 d-flex align-items-center gap-2">
+                                    <i class="bi bi-hdd-network-fill text-primary"></i> SMTP Outgoing Server Configuration
+                                </h6>
+                                <div class="row g-3">
+                                    <div class="col-md-8">
+                                        <label class="form-label small fw-bold text-secondary">SMTP Host Server</label>
+                                        <div class="input-group input-group-sm">
+                                            <span class="input-group-text bg-body">🌐</span>
+                                            <input type="text" class="form-control rounded-end-3" @bind="Settings.SmtpHost" placeholder="smtp.gmail.com" />
+                                        </div>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small fw-bold text-secondary">Port</label>
+                                        <div class="input-group input-group-sm">
+                                            <span class="input-group-text bg-body">🔌</span>
+                                            <input type="number" class="form-control rounded-end-3" @bind="Settings.SmtpPort" placeholder="587" />
+                                        </div>
+                                    </div>
+                                    <div class="col-md-12">
+                                        <label class="form-label small fw-bold text-secondary">Sender ("From") Email Address</label>
+                                        <div class="input-group input-group-sm">
+                                            <span class="input-group-text bg-body">✉️</span>
+                                            <input type="email" class="form-control rounded-end-3" @bind="Settings.SmtpFromEmail" placeholder="payroll@yourcompany.com" />
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label small fw-bold text-secondary">SMTP Username / Account</label>
+                                        <div class="input-group input-group-sm">
+                                            <span class="input-group-text bg-body">👤</span>
+                                            <input type="text" class="form-control rounded-end-3" @bind="Settings.SmtpUser" placeholder="username@gmail.com" />
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label small fw-bold text-secondary">SMTP Password / App Password</label>
+                                        <div class="input-group input-group-sm">
+                                            <span class="input-group-text bg-body">🔑</span>
+                                            <input type="password" class="form-control rounded-end-3" @bind="Settings.SmtpPass" placeholder="••••••••" />
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        @* Provider Guidance Sidecard *@
+                        <div class="col-lg-4">
+                            <div class="p-3 border rounded-3 bg-info-subtle bg-opacity-25 border-info-subtle h-100">
+                                <h6 class="fw-bold text-info mb-2 d-flex align-items-center gap-2">
+                                    <i class="bi bi-lightbulb-fill"></i> Provider Setup Guide
+                                </h6>
+                                <div class="small text-muted d-flex flex-column gap-2">
+                                    <div class="p-2 bg-body rounded-2 border">
+                                        <strong class="text-danger">🔴 Google Gmail:</strong>
+                                        <ul class="mb-0 ps-3 mt-1" style="font-size: 0.76rem;">
+                                            <li>Host: <code>smtp.gmail.com</code></li>
+                                            <li>Port: <code>587</code> (STARTTLS)</li>
+                                            <li>Requires <strong>App Password</strong> generated from Google Account Security.</li>
+                                        </ul>
+                                    </div>
+                                    <div class="p-2 bg-body rounded-2 border">
+                                        <strong class="text-primary">🔵 Microsoft 365:</strong>
+                                        <ul class="mb-0 ps-3 mt-1" style="font-size: 0.76rem;">
+                                            <li>Host: <code>smtp.office365.com</code></li>
+                                            <li>Port: <code>587</code></li>
+                                        </ul>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                }
+                else
+                {
+                    <div class="p-4 text-center text-muted bg-body-tertiary rounded-3 border">
+                        <i class="bi bi-envelope-x fs-3 text-secondary d-block mb-2"></i>
+                        <span class="fw-semibold">Email notification dispatch is turned off</span>
+                        <div class="small text-muted mt-1">Enable this switch to dispatch salary slips and attendance alerts directly to staff emails.</div>
+                    </div>
+                }
+            </div>
         </div>
     </div>
 </div>
-
-@if (Settings.EnableEmailNotifications)
-{
-    <div class="row g-3">
-        <div class="col-md-5">
-            <label class="form-label small fw-bold">SMTP Host</label>
-            <input type="text" class="form-control form-control-sm" @bind="Settings.SmtpHost" placeholder="smtp.gmail.com" />
-        </div>
-        <div class="col-md-2">
-            <label class="form-label small fw-bold">Port</label>
-            <input type="number" class="form-control form-control-sm" @bind="Settings.SmtpPort" />
-        </div>
-        <div class="col-md-5">
-            <label class="form-label small fw-bold">From Email Address</label>
-            <input type="email" class="form-control form-control-sm" @bind="Settings.SmtpFromEmail" placeholder="payroll@company.com" />
-        </div>
-        <div class="col-md-6">
-            <label class="form-label small fw-bold">SMTP Username</label>
-            <input type="text" class="form-control form-control-sm" @bind="Settings.SmtpUser" />
-        </div>
-        <div class="col-md-6">
-            <label class="form-label small fw-bold">SMTP Password (App Password)</label>
-            <input type="password" class="form-control form-control-sm" @bind="Settings.SmtpPass" placeholder="••••••••" />
-        </div>
-    </div>
-    <div class="alert alert-info mt-3 small">
-        <i class="bi bi-info-circle-fill me-2"></i>
-        If using <strong>Gmail</strong>: Use Port <strong>587</strong>. You MUST generate an <strong>App Password</strong>.
-    </div>
-}
 
 @code {
     [Parameter] public CompanySetting Settings { get; set; } = new();

@@ -10,10 +10,14 @@ namespace Payroll.Web.Controllers;
 public sealed class FirebaseAuthController : ControllerBase
 {
     private readonly FirebaseRealtimeService _firebase;
+    private readonly IConfiguration _configuration;
 
-    public FirebaseAuthController(FirebaseRealtimeService firebase)
+    public FirebaseAuthController(
+        FirebaseRealtimeService firebase,
+        IConfiguration configuration)
     {
         _firebase = firebase;
+        _configuration = configuration;
     }
 
     /// <summary>
@@ -72,7 +76,10 @@ public sealed class FirebaseAuthController : ControllerBase
             token,
             employeeId,
             role,
-            ownerUid = _firebase.ResolveOwnerUid(userId, role)
+            ownerUid = _firebase.ResolveOwnerUid(userId, role),
+            // Return the Web API key from server config so the browser JS does not
+            // need a hardcoded fallback. attendance-refresh.js reads authResult.apiKey.
+            apiKey = _configuration["Firebase:ApiKey"] ?? string.Empty
         });
     }
 }

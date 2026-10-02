@@ -12,6 +12,9 @@
 @inject IJSRuntime JSRuntime
 @inject ILogger<ManualPunchCorrection> _logger
 @inject IToastService toastService
+@inject Payroll.Web.Services.FirebaseEmployeeManagementService FirebaseEmployees
+@inject FirebaseAttendanceMutationService FirebaseAttendanceMutations
+@inject AttendanceProcessingCoordinator AttendanceProcessingCoordinator
 @inject AttendanceRefreshService AttendanceRefreshService
 @attribute [Authorize(Roles = "Admin, SuperAdmin")]
 
@@ -19,8 +22,24 @@
 
 <div class="d-flex justify-content-between align-items-center mb-3">
     <h3>Manual Punch Correction</h3>
-    <div>
-        <button class="btn btn-primary" @onclick="LoadProblematicDays" disabled="@isLoading">
+    <div class="d-flex gap-2">
+        @if (problematicDays != null && problematicDays.Any(d => d.Punches.Count == 0))
+        {
+            var missingCount = problematicDays.Count(d => d.Punches.Count == 0);
+            <button type="button" class="btn btn-success fw-semibold" @onclick="BulkQuickAddAllFullDays" disabled="@(isLoading || isBulkProcessing)">
+                @if (isBulkProcessing)
+                {
+                    <span class="spinner-border spinner-border-sm me-1"></span>
+                    <span>Adding (@bulkProcessedCount / @bulkTotalCount)...</span>
+                }
+                else
+                {
+                    <i class="bi bi-magic me-1"></i>
+                    <span>Quick Add All Full Days (@missingCount)</span>
+                }
+            </button>
+        }
+        <button type="button" class="btn btn-primary" @onclick="() => LoadProblematicDays(false)" disabled="@(isLoading || isBulkProcessing)">
             @if (isLoading)
             {
                 <span class="spinner-border spinner-border-sm"></span>
@@ -60,7 +79,7 @@
 </div>
 
 @* --- DISPLAY DAYS --- *@
-@if (isLoading)
+@if (isLoading && problematicDays == null)
 {
     <p><em>Searching for punch issues...</em></p>
 }
@@ -76,10 +95,36 @@ else if (!problematicDays.Any())
 }
 else
 {
+    @if (problematicDays.Any(d => d.Punches.Count == 0))
+    {
+        var missingCount = problematicDays.Count(d => d.Punches.Count == 0);
+        <div class="d-flex justify-content-between align-items-center mb-3 p-3 bg-success bg-opacity-10 border border-success rounded-3 shadow-sm">
+            <div class="d-flex align-items-center gap-2">
+                <span class="fs-4">🪄</span>
+                <div>
+                    <strong class="text-success d-block">@missingCount listed day@(missingCount > 1 ? "s are" : " is") missing all punches</strong>
+                    <small class="text-muted">Click to automatically generate shift start (IN) and shift end (OUT) punches for all listed rows at once.</small>
+                </div>
+            </div>
+            <button type="button" class="btn btn-success fw-bold px-3 py-2 text-nowrap" @onclick="BulkQuickAddAllFullDays" disabled="@(isLoading || isBulkProcessing)">
+                @if (isBulkProcessing)
+                {
+                    <span class="spinner-border spinner-border-sm me-1"></span>
+                    <span>Adding Punches (@bulkProcessedCount / @bulkTotalCount)...</span>
+                }
+                else
+                {
+                    <i class="bi bi-check-all me-1"></i>
+                    <span>Quick Add All Full Days (@missingCount)</span>
+                }
+            </button>
+        </div>
+    }
+
     <div class="list-group shadow-sm">
         @foreach (var dayInfo in problematicDays.OrderBy(d => d.Date).ThenBy(d => d.EmployeeName))
         {
-            <div class="list-group-item list-group-item-action mb-0 border-bottom">
+            <div @key="@($"{dayInfo.EmployeeID}_{dayInfo.Date:yyyyMMdd}")" class="list-group-item list-group-item-action mb-0 border-bottom">
                 <div class="d-flex w-100 justify-content-between align-items-center mb-2">
                     <div>
                         <h6 class="mb-0 fw-bold">@dayInfo.EmployeeName</h6>
@@ -119,7 +164,7 @@ else
                     <div class="manual-punch-empty-state border p-2 mb-2 small text-center">
                         <em>No punches recorded for this day.</em>
                         <div class="mt-2">
-                            <button class="btn btn-sm btn-success" @onclick="() => QuickAddFullDay(dayInfo)">
+                            <button type="button" class="btn btn-sm btn-success" @onclick="() => QuickAddFullDay(dayInfo)">
                                 <i class="bi bi-magic me-1"></i> Quick Add Full Day (Shift Start/End)
                             </button>
                         </div>
@@ -130,7 +175,7 @@ else
                 <div class="input-group input-group-sm mt-2" style="max-width: 300px;">
                     <span class="input-group-text">Add Single Punch</span>
                     <input type="time" class="form-control" @bind="dayInfo.NewPunchTime" />
-                    <button class="btn btn-outline-success" @onclick="() => AddPunch(dayInfo)" disabled="@(!dayInfo.NewPunchTime.HasValue)">
+                    <button type="button" class="btn btn-outline-success" @onclick="() => AddPunch(dayInfo)" disabled="@(!dayInfo.NewPunchTime.HasValue)">
                         <i class="bi bi-plus-lg"></i>
                     </button>
                 </div>
@@ -172,6 +217,9 @@ else
     private DateTime? startDate;
     private DateTime? endDate;
     private bool isLoading = false;
+    private bool isBulkProcessing = false;
+    private int bulkProcessedCount = 0;
+    private int bulkTotalCount = 0;
 
     private List<ProblemDayInfo>? problematicDays;
 
@@ -200,7 +248,7 @@ else
             await using var dbContext = await DbFactory.CreateDbContextAsync();
 
             // 1. Load context data for calculation
-            var emp = await dbContext.Employees.FindAsync(employeeId);
+            var emp = await FirebaseEmployees.GetEmployeeAsync(employeeId);
             var settings = await dbContext.CompanySettings.FirstOrDefaultAsync(s => s.SettingID == 1) ?? new CompanySetting();
             var features = await dbContext.FeatureSettings.FirstOrDefaultAsync(f => f.Id == 1) ?? new FeatureSettings(); // Required for Shift Allowance check
             var holidays = await dbContext.CompanyHolidays.ToListAsync();
@@ -240,6 +288,13 @@ else
 
             await dbContext.SaveChangesAsync();
 
+            var firebaseSummaryOk = await FirebaseAttendanceMutations.UpsertDailySummaryAsync(
+                existingSummary,
+                "MODIFIED");
+
+            if (!firebaseSummaryOk)
+                _logger.LogWarning("Attendance summary saved to SQL but Firebase projection failed for Emp {id} on {day}", employeeId, day.ToShortDateString());
+
             _logger.LogInformation("Recalculation complete for Emp {id} on {day}", employeeId, day.ToShortDateString());
 
         }
@@ -262,8 +317,7 @@ else
     {
         try
         {
-            await using var dbContext = await DbFactory.CreateDbContextAsync();
-            employeeList = await dbContext.Employees.OrderBy(e => e.Name).ToListAsync();
+            employeeList = await FirebaseEmployees.GetEmployeesAsync();
         }
         catch (Exception ex)
         {
@@ -272,16 +326,24 @@ else
         }
     }
 
-    private async Task LoadProblematicDays()
+    private async Task LoadProblematicDays(bool isBackground = false)
     {
-        isLoading = true;
-        problematicDays = null;
-        StateHasChanged();
+        if (!isBackground)
+        {
+            isLoading = true;
+            if (problematicDays == null)
+            {
+                StateHasChanged();
+            }
+        }
 
         if (!startDate.HasValue || !endDate.HasValue || startDate.Value > endDate.Value)
         {
-            toastService.ShowWarning("Please select a valid date range.");
-            isLoading = false;
+            if (!isBackground)
+            {
+                toastService.ShowWarning("Please select a valid date range.");
+                isLoading = false;
+            }
             return;
         }
 
@@ -331,6 +393,13 @@ else
                 .Select(leave => $"{leave.EmployeeID}_{leave.LeaveDate!.Value.Date:yyyyMMdd}")
                 .ToHashSet(StringComparer.Ordinal);
 
+            var holidayDates = (await dbContext.CompanyHolidays
+                .AsNoTracking()
+                .Where(h => h.HolidayDate >= DateOnly.FromDateTime(queryStartDate) && h.HolidayDate <= DateOnly.FromDateTime(queryEndDate))
+                .Select(h => h.HolidayDate)
+                .ToListAsync())
+                .ToHashSet();
+
             // 3. Get employees to check for missing/odd punches.
             var targetEmployees = selectedEmployeeId > 0
                 ? employeeList?.Where(e => e.EmployeeID == selectedEmployeeId).ToList()
@@ -343,7 +412,8 @@ else
             // 4. Iterate dates and employees to find genuine punch issues.
             for (var day = queryStartDate; day <= queryEndDate; day = day.AddDays(1))
             {
-                if (day.DayOfWeek == DayOfWeek.Sunday) continue; // Existing behavior preserved.
+                var dayDateOnly = DateOnly.FromDateTime(day);
+                var isHoliday = holidayDates.Contains(dayDateOnly);
 
                 foreach (var emp in targetEmployees)
                 {
@@ -351,19 +421,29 @@ else
                     if (emp.HireDate.HasValue && day < emp.HireDate.Value.ToDateTime(TimeOnly.MinValue)) continue;
                     if (emp.TerminationDate.HasValue && day > emp.TerminationDate.Value.ToDateTime(TimeOnly.MaxValue)) continue;
 
+                    // Weekly off check based on this specific employee's configured record (default to Sunday if unset)
+                    bool isWeeklyOff = emp.CompOffDayOfWeek.HasValue
+                        ? day.DayOfWeek == emp.CompOffDayOfWeek.Value
+                        : day.DayOfWeek == DayOfWeek.Sunday;
+
                     // IMPORTANT: An approved full-day leave is a valid attendance
                     // state, not a missing-punch problem.
                     var leaveKey = $"{emp.EmployeeID}_{day:yyyyMMdd}";
                     if (approvedFullDayLeaveKeys.Contains(leaveKey))
                         continue;
 
-                    var punches = allLogs
+                    var punches = DeduplicatePunchesForCorrection(allLogs
                         .Where(l => l.EmployeeID == emp.EmployeeID && l.PunchTime.Date == day)
                         .OrderBy(l => l.PunchTime)
-                        .ToList();
+                        .ToList());
+
+                    // If it is the employee's weekly off or a company holiday, having 0 punches is normal (not a missing punch issue)
+                    if ((isWeeklyOff || isHoliday) && punches.Count == 0)
+                        continue;
 
                     // Existing correction rules preserved:
                     // 0 punches = missing all punches
+                    // odd punches = incomplete/mismatch
                     // odd punches = incomplete/mismatch
                     if (punches.Count == 0 || punches.Count % 2 != 0)
                     {
@@ -388,12 +468,21 @@ else
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error loading problematic punch days.");
-            toastService.ShowError($"Error finding issues: {ex.Message}");
-            problematicDays = new List<ProblemDayInfo>();
+            if (!isBackground)
+            {
+                toastService.ShowError($"Error finding issues: {ex.Message}");
+            }
+            if (problematicDays == null)
+            {
+                problematicDays = new List<ProblemDayInfo>();
+            }
         }
         finally
         {
-            isLoading = false;
+            if (!isBackground)
+            {
+                isLoading = false;
+            }
             StateHasChanged();
         }
     }
@@ -418,7 +507,8 @@ else
                 EmployeeID = dayInfo.EmployeeID,
                 PunchTime = dayInfo.Date.Add(start.ToTimeSpan()),
                 DeviceID = "ManualCorrection",
-                LogType = "Manual Correction", // <-- UPDATED LogType
+                LogType = "IN",
+                BiometricID = $"MANUAL_{dayInfo.EmployeeID}_{dayInfo.Date:yyyyMMdd}_{start:HHmmss}_IN",
                 IsApproved = true // <-- NEW: Set to False
             };
 
@@ -427,12 +517,19 @@ else
                 EmployeeID = dayInfo.EmployeeID,
                 PunchTime = dayInfo.Date.Add(end.ToTimeSpan()),
                 DeviceID = "ManualCorrection",
-                LogType = "Manual Correction", // <-- UPDATED LogType
+                LogType = "OUT",
+                BiometricID = $"MANUAL_{dayInfo.EmployeeID}_{dayInfo.Date:yyyyMMdd}_{end:HHmmss}_OUT",
                 IsApproved = true // <-- NEW: Set to False
             };
 
+            var processingKey = $"{dayInfo.EmployeeID}:{dayInfo.Date:yyyy-MM-dd}";
+            using var processingLease = await AttendanceProcessingCoordinator.AcquireAsync(processingKey);
+
             dbContext.AttendanceLogs.AddRange(inLog, outLog);
             await dbContext.SaveChangesAsync();
+
+            var firebaseInOk = await FirebaseAttendanceMutations.UpsertPunchAsync(inLog, "CREATED");
+            var firebaseOutOk = await FirebaseAttendanceMutations.UpsertPunchAsync(outLog, "CREATED");
 
             // --- AUDIT LOG: QUICK ADD ---
             await AuditService.LogAsync("CREATE", "AttendanceLog", $"{inLog.LogID},{outLog.LogID}",
@@ -442,16 +539,162 @@ else
 
             await RecalculateAndSaveSummary(dayInfo.EmployeeID, dayInfo.Date);
 
+            AttendanceProcessingCoordinator.Invalidate(processingKey);
+
+            if (!firebaseInOk || !firebaseOutOk)
+                _logger.LogWarning("Manual full-day punches saved to SQL but Firebase projection was incomplete. EmployeeId={EmployeeId}, Date={Date}", dayInfo.EmployeeID, dayInfo.Date.Date);
+
+            // In-memory update: Day now has matching IN and OUT punches, so it's resolved!
+            dayInfo.Punches.Clear();
+            dayInfo.Punches.Add(inLog);
+            dayInfo.Punches.Add(outLog);
+            problematicDays?.Remove(dayInfo);
+            StateHasChanged();
+
+            _ignoreRealtimeUntil = DateTime.UtcNow.AddSeconds(4);
+
+            await AttendanceRefreshService.NotifyPunchChangedAsync(
+                dayInfo.EmployeeID,
+                DateOnly.FromDateTime(dayInfo.Date.Date),
+                "CREATED");
             await AttendanceRefreshService
                 .NotifyAttendanceChangedAsync(
                     dayInfo.EmployeeID,
                     DateOnly.FromDateTime(dayInfo.Date.Date));
-
-            await LoadProblematicDays();
         }
         catch (Exception ex)
         {
             toastService.ShowError($"Error adding full day: {ex.Message}");
+        }
+    }
+
+    private async Task BulkQuickAddAllFullDays()
+    {
+        if (problematicDays == null || !problematicDays.Any()) return;
+
+        var targetDays = problematicDays.Where(d => d.Punches.Count == 0).ToList();
+        if (!targetDays.Any())
+        {
+            toastService.ShowInfo("No rows with missing punches found to add.");
+            return;
+        }
+
+        isBulkProcessing = true;
+        bulkProcessedCount = 0;
+        bulkTotalCount = targetDays.Count;
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var addedCount = 0;
+            var skippedLockedCount = 0;
+
+            foreach (var dayInfo in targetDays)
+            {
+                // Lock check
+                if (await LockService.IsLockedAsync(dayInfo.EmployeeID, dayInfo.Date))
+                {
+                    skippedLockedCount++;
+                    bulkProcessedCount++;
+                    await InvokeAsync(StateHasChanged);
+                    continue;
+                }
+
+                var start = dayInfo.ShiftStart ?? new TimeOnly(9, 0);
+                var end = dayInfo.ShiftEnd ?? new TimeOnly(18, 0);
+
+                try
+                {
+                    await using var dbContext = await DbFactory.CreateDbContextAsync();
+
+                    var inLog = new AttendanceLog
+                    {
+                        EmployeeID = dayInfo.EmployeeID,
+                        PunchTime = dayInfo.Date.Add(start.ToTimeSpan()),
+                        DeviceID = "ManualCorrection",
+                        LogType = "IN",
+                        BiometricID = $"MANUAL_{dayInfo.EmployeeID}_{dayInfo.Date:yyyyMMdd}_{start:HHmmss}_IN",
+                        IsApproved = true
+                    };
+
+                    var outLog = new AttendanceLog
+                    {
+                        EmployeeID = dayInfo.EmployeeID,
+                        PunchTime = dayInfo.Date.Add(end.ToTimeSpan()),
+                        DeviceID = "ManualCorrection",
+                        LogType = "OUT",
+                        BiometricID = $"MANUAL_{dayInfo.EmployeeID}_{dayInfo.Date:yyyyMMdd}_{end:HHmmss}_OUT",
+                        IsApproved = true
+                    };
+
+                    var processingKey = $"{dayInfo.EmployeeID}:{dayInfo.Date:yyyy-MM-dd}";
+                    using var processingLease = await AttendanceProcessingCoordinator.AcquireAsync(processingKey);
+
+                    dbContext.AttendanceLogs.AddRange(inLog, outLog);
+                    await dbContext.SaveChangesAsync();
+
+                    // Upsert to Firebase SSOT
+                    var firebaseInOk = await FirebaseAttendanceMutations.UpsertPunchAsync(inLog, "CREATED");
+                    var firebaseOutOk = await FirebaseAttendanceMutations.UpsertPunchAsync(outLog, "CREATED");
+
+                    await AuditService.LogAsync("CREATE", "AttendanceLog", $"{inLog.LogID},{outLog.LogID}",
+                        $"Bulk Quick Added {start:hh:mm tt}-{end:hh:mm tt} punches for EmpID: {dayInfo.EmployeeID} on {dayInfo.Date:yyyy-MM-dd}");
+
+                    await RecalculateAndSaveSummary(dayInfo.EmployeeID, dayInfo.Date);
+                    AttendanceProcessingCoordinator.Invalidate(processingKey);
+
+                    if (!firebaseInOk || !firebaseOutOk)
+                    {
+                        _logger.LogWarning("Manual bulk full-day punches saved to SQL but Firebase projection was incomplete. EmployeeId={EmployeeId}, Date={Date}", dayInfo.EmployeeID, dayInfo.Date.Date);
+                    }
+
+                    dayInfo.Punches.Clear();
+                    dayInfo.Punches.Add(inLog);
+                    dayInfo.Punches.Add(outLog);
+                    problematicDays.Remove(dayInfo);
+
+                    addedCount++;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error bulk adding full day for EmpID: {EmployeeID} on {Date}", dayInfo.EmployeeID, dayInfo.Date);
+                }
+
+                bulkProcessedCount++;
+                await InvokeAsync(StateHasChanged);
+            }
+
+            _ignoreRealtimeUntil = DateTime.UtcNow.AddSeconds(5);
+
+            // Broadcast refresh for affected employees and dates
+            var distinctEmpDays = targetDays.Select(d => (d.EmployeeID, d.Date.Date)).Distinct();
+            foreach (var (empId, dt) in distinctEmpDays)
+            {
+                try
+                {
+                    await AttendanceRefreshService.NotifyPunchChangedAsync(empId, DateOnly.FromDateTime(dt), "CREATED");
+                    await AttendanceRefreshService.NotifyAttendanceChangedAsync(empId, DateOnly.FromDateTime(dt));
+                }
+                catch { }
+            }
+
+            if (addedCount > 0)
+            {
+                toastService.ShowSuccess($"Successfully bulk added full day punches for {addedCount} days! 🪄 ✅");
+            }
+            if (skippedLockedCount > 0)
+            {
+                toastService.ShowWarning($"{skippedLockedCount} days were skipped because payroll is finalized/locked.");
+            }
+        }
+        catch (Exception ex)
+        {
+            toastService.ShowError($"Error during bulk punch addition: {ex.Message}");
+        }
+        finally
+        {
+            isBulkProcessing = false;
+            await InvokeAsync(StateHasChanged);
         }
     }
 
@@ -467,35 +710,54 @@ else
         }
         // --- END LOCK CHECK ---
 
+        var punchDt = dayInfo.Date.Add(dayInfo.NewPunchTime.Value.ToTimeSpan());
         var newLog = new AttendanceLog
         {
             EmployeeID = dayInfo.EmployeeID,
-            PunchTime = dayInfo.Date.Add(dayInfo.NewPunchTime.Value.ToTimeSpan()),
+            PunchTime = punchDt,
             DeviceID = "ManualCorrection",
             LogType = "Manual Correction", // <-- UPDATED LogType
+            BiometricID = $"MANUAL_{dayInfo.EmployeeID}_{punchDt:yyyyMMdd_HHmmss}_{Guid.NewGuid():N}",
             IsApproved = true // <-- NEW: Set to False
         };
         try
         {
             await using var dbContext = await DbFactory.CreateDbContextAsync();
+            var processingKey = $"{dayInfo.EmployeeID}:{dayInfo.Date:yyyy-MM-dd}";
+            using var processingLease = await AttendanceProcessingCoordinator.AcquireAsync(processingKey);
+
             dbContext.AttendanceLogs.Add(newLog);
             await dbContext.SaveChangesAsync();
+
+            var firebasePunchOk = await FirebaseAttendanceMutations.UpsertPunchAsync(newLog, "CREATED");
 
             // --- AUDIT LOG: CREATE ---
             await AuditService.LogAsync("CREATE", "AttendanceLog", newLog.LogID.ToString(),
                 $"Manual punch added at {newLog.PunchTime:HH:mm:ss} for EmpID: {dayInfo.EmployeeID}");
             // -------------------------
 
-            toastService.ShowSuccess("Punch added.");
             dayInfo.NewPunchTime = null;
+            dayInfo.Punches.Add(newLog);
+            if (dayInfo.Punches.Count > 0 && dayInfo.Punches.Count % 2 == 0)
+            {
+                problematicDays?.Remove(dayInfo);
+            }
+            StateHasChanged();
+
             await RecalculateAndSaveSummary(dayInfo.EmployeeID, dayInfo.Date);
+            AttendanceProcessingCoordinator.Invalidate(processingKey);
+
+            if (!firebasePunchOk)
+                _logger.LogWarning("Manual punch saved to SQL but Firebase projection failed. EmployeeId={EmployeeId}, LogId={LogId}", dayInfo.EmployeeID, newLog.LogID);
+
+            toastService.ShowSuccess("Punch added.");
+
+            _ignoreRealtimeUntil = DateTime.UtcNow.AddSeconds(4);
 
             await AttendanceRefreshService
                 .NotifyAttendanceChangedAsync(
                     dayInfo.EmployeeID,
                     DateOnly.FromDateTime(dayInfo.Date.Date));
-
-            await LoadProblematicDays();
         }
         catch (Exception ex)
         {
@@ -519,6 +781,9 @@ else
 
         try
         {
+            var processingKey = $"{logToDelete.EmployeeID ?? 0}:{logToDelete.PunchTime.Date:yyyy-MM-dd}";
+            using var processingLease = await AttendanceProcessingCoordinator.AcquireAsync(processingKey);
+
             await using var dbContext = await DbFactory.CreateDbContextAsync();
             // Re-fetch to attach
             var dbLog = await dbContext.AttendanceLogs.FindAsync(logToDelete.LogID);
@@ -530,20 +795,37 @@ else
                 dbContext.AttendanceLogs.Remove(dbLog);
                 await dbContext.SaveChangesAsync();
 
+                var firebaseDeleteOk = await FirebaseAttendanceMutations.DeletePunchAsync(
+                    logId,
+                    logToDelete.EmployeeID ?? 0);
+
                 // --- AUDIT LOG: DELETE ---
                 await AuditService.LogAsync("DELETE", "AttendanceLog", logId.ToString(),
                     $"Punch deleted at {punchTime:HH:mm:ss} for EmpID: {logToDelete.EmployeeID}");
                 // -------------------------
 
-                toastService.ShowSuccess("Punch deleted.");
                 await RecalculateAndSaveSummary(logToDelete.EmployeeID ?? 0, logToDelete.PunchTime);
+                AttendanceProcessingCoordinator.Invalidate(processingKey);
+
+                if (!firebaseDeleteOk)
+                    _logger.LogWarning("Punch deleted from SQL but Firebase deletion failed. EmployeeId={EmployeeId}, LogId={LogId}", logToDelete.EmployeeID, logId);
+
+                var dayInfo = problematicDays?.FirstOrDefault(p => p.EmployeeID == (logToDelete.EmployeeID ?? 0) && p.Date.Date == logToDelete.PunchTime.Date);
+                dayInfo?.Punches.RemoveAll(x => x.LogID == logId);
+                if (dayInfo != null && dayInfo.Punches.Count > 0 && dayInfo.Punches.Count % 2 == 0)
+                {
+                    problematicDays?.Remove(dayInfo);
+                }
+                StateHasChanged();
+
+                toastService.ShowSuccess("Punch deleted.");
+
+                _ignoreRealtimeUntil = DateTime.UtcNow.AddSeconds(4);
 
                 await AttendanceRefreshService
                     .NotifyAttendanceChangedAsync(
                         logToDelete.EmployeeID ?? 0,
                         DateOnly.FromDateTime(logToDelete.PunchTime.Date));
-
-                await LoadProblematicDays();
             }
         }
         catch (Exception ex)
@@ -583,6 +865,8 @@ else
 
         try
         {
+            var processingKey = $"{punchToEdit.EmployeeID ?? 0}:{punchToEdit.PunchTime.Date:yyyy-MM-dd}";
+            using var processingLease = await AttendanceProcessingCoordinator.AcquireAsync(processingKey);
 
             await using var dbContext = await DbFactory.CreateDbContextAsync();
             var logInDb = await dbContext.AttendanceLogs.FindAsync(punchToEdit.LogID);
@@ -603,16 +887,40 @@ else
             logInDb.PunchTime = logInDb.PunchTime.Date.Add(editedPunchTime.Value.ToTimeSpan());
             await dbContext.SaveChangesAsync();
 
+            var firebasePunchOk = await FirebaseAttendanceMutations.UpsertPunchAsync(
+                logInDb,
+                "UPDATED");
+
+            var editedEmployeeId = logInDb.EmployeeID ?? 0;
+            var editedDay = logInDb.PunchTime.Date;
+
+            await RecalculateAndSaveSummary(editedEmployeeId, editedDay);
+            AttendanceProcessingCoordinator.Invalidate(processingKey);
+
+            if (!firebasePunchOk)
+                _logger.LogWarning("Punch updated in SQL but Firebase projection failed. EmployeeId={EmployeeId}, LogId={LogId}", editedEmployeeId, logInDb.LogID);
+
+            var dayInfo = problematicDays?.FirstOrDefault(p => p.EmployeeID == editedEmployeeId && p.Date.Date == editedDay.Date);
+            var punchInList = dayInfo?.Punches.FirstOrDefault(p => p.LogID == logInDb.LogID);
+            if (punchInList != null)
+            {
+                punchInList.PunchTime = logInDb.PunchTime;
+            }
+            StateHasChanged();
+
             toastService.ShowSuccess("Punch time updated.");
             CancelEdit();
-            await RecalculateAndSaveSummary(punchToEdit.EmployeeID ?? 0, punchToEdit.PunchTime);
 
+            _ignoreRealtimeUntil = DateTime.UtcNow.AddSeconds(4);
+
+            await AttendanceRefreshService.NotifyPunchChangedAsync(
+                editedEmployeeId,
+                DateOnly.FromDateTime(editedDay),
+                "UPDATED");
             await AttendanceRefreshService
                 .NotifyAttendanceChangedAsync(
-                    punchToEdit.EmployeeID ?? 0,
-                    DateOnly.FromDateTime(punchToEdit.PunchTime.Date));
-
-            await LoadProblematicDays();
+                    editedEmployeeId,
+                    DateOnly.FromDateTime(editedDay));
         }
         catch (Exception ex)
         {
@@ -620,16 +928,59 @@ else
         }
     }
 
+    private DateTime _ignoreRealtimeUntil = DateTime.MinValue;
+
     private async Task HandleRealtimeRefresh()
     {
+        if (DateTime.UtcNow < _ignoreRealtimeUntil)
+            return;
+
         try
         {
-            await LoadEmployeesAsync(); await LoadProblematicDays();
+            await LoadEmployeesAsync();
+            await LoadProblematicDays(isBackground: true);
             await InvokeAsync(StateHasChanged);
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"Realtime refresh failed: {ex}");
         }
+    }
+
+    private static List<AttendanceLog> DeduplicatePunchesForCorrection(List<AttendanceLog> list)
+    {
+        if (list == null || list.Count <= 1) return list ?? new List<AttendanceLog>();
+        var result = new List<AttendanceLog>();
+        foreach (var p in list)
+        {
+            bool isDup = false;
+            if (!string.IsNullOrWhiteSpace(p.BiometricID))
+            {
+                if (result.Any(x => x.EmployeeID == p.EmployeeID &&
+                                    string.Equals(x.BiometricID, p.BiometricID, StringComparison.OrdinalIgnoreCase)))
+                {
+                    isDup = true;
+                }
+            }
+
+            if (!isDup)
+            {
+                var match = result.FirstOrDefault(x => x.EmployeeID == p.EmployeeID &&
+                    Math.Abs((x.PunchTime - p.PunchTime).TotalSeconds) < 60);
+                if (match != null)
+                {
+                    var t1 = (match.LogType ?? "").ToUpperInvariant();
+                    var t2 = (p.LogType ?? "").ToUpperInvariant();
+                    bool isOut1 = t1.Contains("OUT");
+                    bool isOut2 = t2.Contains("OUT");
+                    if (isOut1 == isOut2)
+                        isDup = true;
+                }
+            }
+
+            if (!isDup)
+                result.Add(p);
+        }
+        return result;
     }
 }

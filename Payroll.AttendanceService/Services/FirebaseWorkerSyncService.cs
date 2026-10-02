@@ -17,6 +17,7 @@ public sealed class FirebaseWorkerSyncService
 {
     private const string CloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform";
     private const string DatabaseScope = "https://www.googleapis.com/auth/firebase.database";
+    private const string UserInfoEmailScope = "https://www.googleapis.com/auth/userinfo.email";
 
     private readonly IConfiguration _configuration;
     private readonly ILogger<FirebaseWorkerSyncService> _logger;
@@ -58,7 +59,12 @@ public sealed class FirebaseWorkerSyncService
             await UpsertFeatureSettingsAsync(db, await GetJsonAsync($"owners/{ownerUid}/feature_settings", cancellationToken), cancellationToken);
             await UpsertCompanySettingsAsync(db, await GetJsonAsync($"owners/{ownerUid}/company_settings", cancellationToken), cancellationToken);
             await UpsertEmployeesAsync(db, await GetJsonAsync($"owners/{ownerUid}/employees", cancellationToken), cancellationToken);
-            await UpsertAttendanceLogsAsync(db, await GetJsonAsync($"owners/{ownerUid}/attendance", cancellationToken), cancellationToken);
+
+            // Attendance is an unbounded biometric ledger. The worker's physical
+            // ZKTeco database remains its operational punch source and every new
+            // punch is published to Firebase. Never download the entire owner
+            // attendance tree during startup/hydration.
+            _logger.LogDebug("Skipping owner-wide Firebase attendance hydration; biometric punches remain local and are published incrementally.");
 
             await db.SaveChangesAsync(cancellationToken);
             return true;
@@ -100,17 +106,27 @@ public sealed class FirebaseWorkerSyncService
             var payload = new Dictionary<string, object?>
             {
                 ["attendanceId"] = log.LogID.ToString(CultureInfo.InvariantCulture),
+                ["punchId"] = log.LogID.ToString(CultureInfo.InvariantCulture),
                 ["employeeId"] = log.EmployeeID?.ToString(CultureInfo.InvariantCulture),
+                ["staffId"] = log.EmployeeID?.ToString(CultureInfo.InvariantCulture),
                 ["biometricId"] = log.BiometricID,
+                ["date"] = log.PunchTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
                 ["checkInTime"] = new DateTimeOffset(DateTime.SpecifyKind(log.PunchTime, DateTimeKind.Utc)).ToUnixTimeMilliseconds(),
+                ["timestamp"] = new DateTimeOffset(DateTime.SpecifyKind(log.PunchTime, DateTimeKind.Utc)).ToUnixTimeMilliseconds(),
                 ["createdAt"] = new DateTimeOffset(DateTime.SpecifyKind(log.PunchTime, DateTimeKind.Utc)).ToUnixTimeMilliseconds(),
                 ["note"] = log.LogType ?? "Punch",
+                ["type"] = log.LogType ?? "Punch",
                 ["synced"] = true,
                 ["source"] = "ZKTECO_WORKER",
+                ["deviceId"] = log.DeviceID ?? "ZKTECO",
+                ["status"] = "APPROVED",
                 ["updatedAtUtc"] = DateTime.UtcNow.ToString("O")
             };
 
-            updates[$"owners/{ownerUid}/attendance/{EscapeKey(log.LogID.ToString(CultureInfo.InvariantCulture))}"] = payload;
+            var recordId = EscapeKey(log.LogID.ToString(CultureInfo.InvariantCulture));
+            updates[$"owners/{ownerUid}/attendance/{recordId}"] = payload;
+            updates[$"owners/{ownerUid}/attendance_punches/{recordId}"] = payload;
+
             var eventId = Guid.NewGuid().ToString("N");
             updates[$"owner_events/{ownerUid}/{eventId}"] = new
             {
@@ -266,7 +282,21 @@ public sealed class FirebaseWorkerSyncService
         using var response = await _httpClient.SendAsync(request, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
-            _logger.LogWarning("Firebase worker read failed with HTTP {Status} for {Path}", (int)response.StatusCode, path);
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+            {
+                _logger.LogWarning(
+                    "Firebase worker REST 401 for {Path}. Ensure the Firebase service-account JSON is available " +
+                    "through Firebase:ServiceAccountPath or GOOGLE_APPLICATION_CREDENTIALS. Response: {Body}",
+                    path,
+                    body.Length > 300 ? body[..300] : body);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Firebase worker read failed with HTTP {Status} for {Path}: {Body}",
+                    (int)response.StatusCode, path, body.Length > 300 ? body[..300] : body);
+            }
             return null;
         }
 
@@ -313,8 +343,18 @@ public sealed class FirebaseWorkerSyncService
             var credentialsPath = _configuration["Firebase:ServiceAccountPath"]
                 ?? Environment.GetEnvironmentVariable("GOOGLE_APPLICATION_CREDENTIALS");
 
-            if (string.IsNullOrWhiteSpace(credentialsPath) && File.Exists(@"C:\FirebaseSecrets\firebase-service-account.json"))
-                credentialsPath = @"C:\FirebaseSecrets\firebase-service-account.json";
+            if (string.IsNullOrWhiteSpace(credentialsPath) || !File.Exists(credentialsPath))
+            {
+                var localAppPath = Path.Combine(AppContext.BaseDirectory, "firebase-service-account.json");
+                if (File.Exists(localAppPath))
+                {
+                    credentialsPath = localAppPath;
+                }
+                else if (File.Exists(@"C:\FirebaseSecrets\firebase-service-account.json"))
+                {
+                    credentialsPath = @"C:\FirebaseSecrets\firebase-service-account.json";
+                }
+            }
 
             GoogleCredential credential;
             if (!string.IsNullOrWhiteSpace(credentialsPath))
@@ -322,14 +362,15 @@ public sealed class FirebaseWorkerSyncService
                 if (!File.Exists(credentialsPath))
                     throw new FileNotFoundException($"Firebase service-account file was not found: {credentialsPath}");
 
-                credential = GoogleCredential
-                    .FromFile(credentialsPath)
-                    .CreateScoped(CloudPlatformScope, DatabaseScope);
+                credential = CredentialFactory
+                    .FromFile<ServiceAccountCredential>(credentialsPath)
+                    .ToGoogleCredential()
+                    .CreateScoped(CloudPlatformScope, DatabaseScope, UserInfoEmailScope);
             }
             else
             {
                 credential = (await GoogleCredential.GetApplicationDefaultAsync())
-                    .CreateScoped(CloudPlatformScope, DatabaseScope);
+                    .CreateScoped(CloudPlatformScope, DatabaseScope, UserInfoEmailScope);
             }
 
             var projectId = _configuration["Firebase:ProjectId"]
@@ -339,7 +380,9 @@ public sealed class FirebaseWorkerSyncService
                 ?? Environment.GetEnvironmentVariable("FIREBASE_DATABASE_URL")
                 ?? "https://biometricpayroll-default-rtdb.asia-southeast1.firebasedatabase.app";
 
-            _logger.LogInformation("Firebase worker bridge initialized for project {ProjectId}.", projectId);
+            _logger.LogInformation(
+                "Firebase worker bridge initialized for project {ProjectId}. RTDB OAuth scopes: firebase.database + cloud-platform + userinfo.email.",
+                projectId);
             return new FirebaseContext(databaseUrl, credential);
         }
         catch (Exception ex)

@@ -17,31 +17,67 @@
 @inject AuditService AuditService
 @inject Payroll.Web.Services.AttendanceRefreshService AttendanceRefresh
 @inject FirebaseRealtimeService FirebaseRealtime
+@inject Payroll.Web.Services.FirebaseEmployeeManagementService FirebaseEmployees
+@inject Payroll.Web.Services.FirebaseUserManagementService FirebaseUsers
+@inject ITenantContextService TenantContext
+@inject TenantManagementService TenantManager
 
-@attribute [Authorize(Roles = "SuperAdmin")]
+@attribute [Authorize(Roles = "SuperAdmin, Admin")]
 
-<PageTitle>User & Role Management</PageTitle>
+<PageTitle>👥 User & Role Management</PageTitle>
 
-<div class="d-flex justify-content-between align-items-center mb-3">
-    <h3>User & Role Management</h3>
-    <p class="lead mb-0">Manage users, assign roles, and link them to employee records.</p>
+<div class="page-header-container mb-4">
+    <div class="d-flex align-items-center gap-3">
+        <div class="emoji-icon-badge emoji-icon-badge-primary">
+            👥
+        </div>
+        <div>
+            <div class="d-flex align-items-center gap-2">
+                <h2 class="page-header-title">
+                    User &amp; Role Management
+                </h2>
+                @if (isSuperAdmin)
+                {
+                    <span class="badge bg-warning text-dark fw-bold rounded-pill px-3 py-1">👑 SuperAdmin Mode</span>
+                }
+                @if (activeTenant != null)
+                {
+                    <span class="badge bg-info text-dark fw-bold rounded-pill px-3 py-1">🏢 @activeTenant.CompanyName</span>
+                }
+            </div>
+            <p class="page-header-subtitle">
+                <span>🔐 Provision user accounts, assign role permissions, and link credentials to employee profiles</span>
+            </p>
+        </div>
+    </div>
+
+    <div class="d-flex align-items-center gap-2">
+        <span class="badge bg-primary bg-opacity-10 text-primary rounded-pill px-3 py-2 fw-semibold border border-primary border-opacity-25">
+            <span>🛡️ Identity & Access Control</span>
+        </span>
+    </div>
 </div>
 
 @if (isLoading)
 {
-    <p><em>Loading users & roles...</em></p>
+    <div class="text-center py-5">
+        <div class="spinner-border text-primary mb-3" style="width: 2.5rem; height: 2.5rem;" role="status"></div>
+        <p class="text-muted">Loading workspace users &amp; roles...</p>
+    </div>
 }
 else
 {
-    <div class="row">
-        <div class="col-md-5 mb-4">
+    <div class="row g-3">
+        <div class="col-12 col-xxl-3 col-xl-4 col-lg-4 mb-4">
             <UserCreationForm NewUserForm="newUserForm"
                               UnlinkedEmployees="unlinkedEmployees"
                               IsSaving="isSaving"
+                              IsSuperAdmin="isSuperAdmin"
+                              ActiveCompanyName="@(activeTenant?.CompanyName ?? "")"
                               OnCreateUser="CreateNewUser" />
         </div>
 
-        <div class="col-md-7 mb-4">
+        <div class="col-12 col-xxl-9 col-xl-8 col-lg-8 mb-4">
 
             @* ---- EVENT HANDLERS PASSED TO CHILD ---- *@
             @* ---- STATE BINDINGS PASSED TO CHILD ----- *@
@@ -49,7 +85,9 @@ else
             <UserListTable UserList="userList"
                            IsLoading="isLoading"
                            IsSaving="isSaving"
+                           IsSuperAdmin="isSuperAdmin"
                            OnEditRoleRequested="HandleEditRoleStart"
+                           OnResetPasswordRequested="HandlePasswordResetStart"
                            OnDeleteUser="ConfirmDeleteUser"
                            UpdateUserRole="UpdateUserRole"
                            ShowEditRoleModal="showEditRoleModal"
@@ -62,17 +100,58 @@ else
     </div>
 }
 
+@if (showPasswordModal && userToResetPassword != null)
+{
+    <div class="modal fade show" style="display:block;background:rgba(0,0,0,0.65);" aria-modal="true" role="dialog">
+        <div class="modal-dialog modal-sm modal-dialog-centered">
+            <div class="modal-content border-0 shadow-lg rounded-3">
+                <div class="modal-header bg-warning text-dark py-2">
+                    <h6 class="modal-title fw-bold mb-0">
+                        <i class="bi bi-key-fill me-2"></i>Change Password
+                    </h6>
+                    <button class="btn-close" @onclick="() => showPasswordModal = false" disabled="@isSaving"></button>
+                </div>
+                <div class="modal-body p-3">
+                    <div class="text-muted small mb-2 text-truncate" title="@userToResetPassword.Email">
+                        Account: <strong>@userToResetPassword.Email</strong>
+                    </div>
+                    <label class="form-label fw-bold small">New Password</label>
+                    <input type="password" class="form-control" @bind="newPasswordForUser" placeholder="Min 6 characters" />
+                </div>
+                <div class="modal-footer bg-light p-2">
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showPasswordModal = false" disabled="@isSaving">Cancel</button>
+                    <button class="btn btn-sm btn-warning text-dark fw-bold px-3" @onclick="ExecutePasswordReset" disabled="@isSaving">
+                        @if (isSaving)
+                        {
+                            <span class="spinner-border spinner-border-sm me-1"></span>
+                        }
+                        Save Password
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
 <AttendanceRefreshListener OnAttendanceChanged="HandleRefresh" />
 
 @code {
     private bool isLoading = true;
     private bool isSaving = false;
+    private bool isSuperAdmin = false;
+    private CompanyTenant? activeTenant;
+    private List<CompanyTenant> allTenants = new();
 
     private List<UserRoleViewModel> userList = new();
     private List<Employee> allEmployees = new();
 
     private List<Employee> unlinkedEmployees =>
-        allEmployees.Where(e => string.IsNullOrEmpty(e.AspNetUserId)).ToList();
+        allEmployees
+            .Where(e => !userList.Any(u =>
+                (u.EmployeeId.HasValue && u.EmployeeId.Value == e.EmployeeID) ||
+                (!string.IsNullOrWhiteSpace(e.Email) && !string.IsNullOrWhiteSpace(u.Email) && string.Equals(e.Email.Trim(), u.Email.Trim(), StringComparison.OrdinalIgnoreCase)) ||
+                (!string.IsNullOrWhiteSpace(e.AspNetUserId) && (u.UserId == e.AspNetUserId || u.FirebaseUid == e.AspNetUserId))))
+            .ToList();
 
     private NewUserFormModel newUserForm = new();
 
@@ -80,105 +159,87 @@ else
     private string newRoleForUser = "Employee";
     private bool showEditRoleModal = false;
 
+    private bool showPasswordModal = false;
+    private UserRoleViewModel? userToResetPassword;
+    private string newPasswordForUser = string.Empty;
+
     protected override async Task OnInitializedAsync()
     {
-        await using var dbContext = await DbFactory.CreateDbContextAsync();
-        await LoadUsersAndRoles(dbContext);
+        await LoadUsersAndRoles();
     }
 
-    private async Task LoadUsersAndRoles(AppDbContext dbContext)
+    private async Task LoadUsersAndRoles(AppDbContext? dbContext = null)
     {
         isLoading = true;
         try
         {
-            allEmployees = await dbContext.Employees.AsNoTracking().ToListAsync();
+            isSuperAdmin = await TenantContext.IsSuperAdminAsync();
+            activeTenant = await TenantContext.GetActiveTenantAsync();
+            allTenants = await TenantManager.GetAllTenantsAsync();
 
-            // Read Identity data through the same AppDbContext that is used
-            // by the SQLite compatibility store. This avoids one UserManager
-            // role query per user and keeps the list deterministic after a
-            // create/role update.
-            var users = await dbContext.Users
-                .AsNoTracking()
-                .ToListAsync();
+            allEmployees = await FirebaseEmployees.GetEmployeesAsync();
+            var rawUsers = await FirebaseUsers.GetAllUsersAsync(allEmployees);
 
-            var rolesById = await dbContext.Roles
-                .AsNoTracking()
-                .ToDictionaryAsync(r => r.Id, r => r.Name ?? "Employee");
-
-            var roleIdsByUserId = await dbContext.UserRoles
-                .AsNoTracking()
-                .GroupBy(ur => ur.UserId)
-                .ToDictionaryAsync(
-                    g => g.Key,
-                    g => g.Select(x => x.RoleId).ToList());
-
-            userList = new();
-
-            foreach (var u in users)
+            if (activeTenant != null)
             {
-                var role = "Employee";
+                // When inside a company workspace (either Company Admin OR SuperAdmin scoped to a company):
+                // 1. SuperAdmin sees SuperAdmin account
+                // 2. See active company's Admin account
+                // 3. See only employees belonging to this active company
+                // 4. Exclude all administrators and employees of other companies!
+                var otherAdmins = allTenants
+                    .Where(t => t.Id != activeTenant.Id)
+                    .Select(t => t.AdminEmail.Trim().ToLowerInvariant())
+                    .ToHashSet();
 
-                if (roleIdsByUserId.TryGetValue(u.Id, out var roleIds))
+                var activeAdminEmail = activeTenant.AdminEmail?.Trim().ToLowerInvariant();
+                var activeAdminUserId = activeTenant.AdminUserId;
+
+                var employeeIds = allEmployees.Select(e => e.EmployeeID).ToHashSet();
+                var employeeEmails = allEmployees.Where(e => !string.IsNullOrWhiteSpace(e.Email)).Select(e => e.Email!.Trim().ToLowerInvariant()).ToHashSet();
+                var employeeUserIds = allEmployees.Where(e => !string.IsNullOrWhiteSpace(e.AspNetUserId)).Select(e => e.AspNetUserId!.Trim()).ToHashSet();
+
+                userList = rawUsers.Where(u =>
                 {
-                    var roleName = roleIds
-                        .Select(id => rolesById.TryGetValue(id, out var name) ? name : null)
-                        .FirstOrDefault(name => !string.IsNullOrWhiteSpace(name));
+                    var isSuperAdminAccount = string.Equals(u.CurrentRole, "SuperAdmin", StringComparison.OrdinalIgnoreCase) ||
+                                              string.Equals(u.Email, FirebaseAuthSecurityConstants.CanonicalSuperAdminEmail, StringComparison.OrdinalIgnoreCase);
 
-                    if (!string.IsNullOrWhiteSpace(roleName))
-                        role = roleName!;
-                }
+                    if (isSuperAdminAccount)
+                    {
+                        // Show SuperAdmin account only if current logged-in user is SuperAdmin
+                        return isSuperAdmin;
+                    }
 
-                var isCanonicalSuperAdmin =
-                    string.Equals(
-                        u.Email ?? u.UserName,
-                        "prakashshiva368@gmail.com",
-                        StringComparison.OrdinalIgnoreCase);
+                    if (!string.IsNullOrWhiteSpace(u.Email) && otherAdmins.Contains(u.Email.Trim().ToLowerInvariant()))
+                        return false;
 
-                if (isCanonicalSuperAdmin)
-                    role = "SuperAdmin";
+                    // Current company admin
+                    var isCurrentCompanyAdmin = (!string.IsNullOrWhiteSpace(activeAdminEmail) && string.Equals(u.Email?.Trim(), activeAdminEmail, StringComparison.OrdinalIgnoreCase)) ||
+                                                (!string.IsNullOrWhiteSpace(activeAdminUserId) && u.UserId == activeAdminUserId);
+                    if (isCurrentCompanyAdmin)
+                        return true;
 
-                var linked = isCanonicalSuperAdmin
-                    ? null
-                    : allEmployees.FirstOrDefault(e => e.AspNetUserId == u.Id);
+                    // Linked to this company's employees
+                    if (u.EmployeeId.HasValue && employeeIds.Contains(u.EmployeeId.Value))
+                        return true;
+                    if (!string.IsNullOrWhiteSpace(u.Email) && employeeEmails.Contains(u.Email.Trim().ToLowerInvariant()))
+                        return true;
+                    if (!string.IsNullOrWhiteSpace(u.UserId) && employeeUserIds.Contains(u.UserId.Trim()))
+                        return true;
+                    if (!string.IsNullOrWhiteSpace(u.FirebaseUid) && employeeUserIds.Contains(u.FirebaseUid.Trim()))
+                        return true;
 
-                userList.Add(new UserRoleViewModel
-                {
-                    UserId = u.Id,
-                    Email = u.Email ?? u.UserName ?? string.Empty,
-                    UserName = u.UserName ?? u.Email ?? string.Empty,
-                    CurrentRole = role,
-                    EmployeeId = linked?.EmployeeID,
-                    EmployeeName = linked?.Name ?? "Unlinked",
-                });
+                    return false;
+                }).ToList();
             }
-
-            // Existing Firebase Auth users that were manually added in the
-            // Firebase Console do not automatically receive the application
-            // role/employee/owner claims. Synchronize claims for those users
-            // without touching their Firebase password. This is intentionally
-            // best-effort and does not block the User Management screen.
-            foreach (var item in userList.Where(x => !string.IsNullOrWhiteSpace(x.Email)))
+            else
             {
-                try
-                {
-                    await FirebaseRealtime.EnsureFirebaseUserAsync(
-                        item.Email,
-                        string.Empty,
-                        item.CurrentRole,
-                        item.EmployeeId ?? 0,
-                        item.EmployeeName,
-                        existingUid: null,
-                        updatePasswordIfExisting: false);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Firebase claim synchronization skipped for {Email}", item.Email);
-                }
+                userList = rawUsers.Where(u => !string.IsNullOrWhiteSpace(u.Email) && u.Email.Contains('@')).ToList();
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error loading user data from local Identity/SQLite store.");
+            _logger.LogError(ex, "Error loading user data.");
             toastService.ShowError("Error loading user data.");
         }
         finally
@@ -190,59 +251,46 @@ else
     private async Task CreateNewUser()
     {
         isSaving = true;
-        await using var dbContext = await DbFactory.CreateDbContextAsync();
-
         try
         {
-            var newUser = new IdentityUser { Email = newUserForm.Email, UserName = newUserForm.Email };
-            var result = await UserManager.CreateAsync(newUser, newUserForm.Password);
-
-            if (!result.Succeeded)
+            if (!isSuperAdmin)
             {
-                toastService.ShowError(string.Join(", ", result.Errors.Select(e => e.Description)));
+                newUserForm.InitialRole = "Employee";
+            }
+
+            if (newUserForm.InitialRole.Equals("Employee", StringComparison.OrdinalIgnoreCase) &&
+                !newUserForm.EmployeeId.HasValue)
+            {
+                toastService.ShowError("Select a saved Employee before creating an Employee account.");
                 return;
             }
 
-            await UserManager.AddToRoleAsync(newUser, newUserForm.InitialRole);
-
-            var linkedEmployeeId = 0;
-            if (newUserForm.EmployeeId.HasValue)
-            {
-                var emp = await dbContext.Employees.FindAsync(newUserForm.EmployeeId.Value);
-                if (emp != null)
-                {
-                    emp.Email = newUser.Email;
-                    emp.AspNetUserId = newUser.Id;
-                    linkedEmployeeId = emp.EmployeeID;
-                    dbContext.Update(emp);
-                    await dbContext.SaveChangesAsync();
-                }
-            }
-
-            // Provision the same account in Firebase so the native Android app
-            // can authenticate directly without Payroll.Web being online.
-            var firebaseUid = await FirebaseRealtime.EnsureFirebaseUserAsync(
-                newUser.Email ?? newUser.UserName ?? string.Empty,
+            var result = await FirebaseUsers.CreateAsync(
+                newUserForm.Email,
                 newUserForm.Password,
                 newUserForm.InitialRole,
-                linkedEmployeeId,
-                newUser.UserName);
+                newUserForm.EmployeeId ?? 0,
+                newUserForm.Email,
+                CancellationToken.None);
 
-            if (string.IsNullOrWhiteSpace(firebaseUid))
+            if (!result.Success)
             {
-                // Local Identity creation remains intact, but report the
-                // Firebase provisioning failure instead of silently claiming
-                // that the account is ready for standalone Android login.
-                toastService.ShowWarning("User created locally, but Firebase account provisioning failed.");
+                toastService.ShowError(result.Message);
+                return;
             }
 
             await AttendanceRefresh.NotifyGlobalRefreshAsync("USER_CREATED");
-            toastService.ShowSuccess("User created.");
+            toastService.ShowSuccess("User created and synchronized.");
             newUserForm = new();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error creating synchronized user.");
+            toastService.ShowError(ex.Message);
         }
         finally
         {
-            await LoadUsersAndRoles(dbContext);
+            await LoadUsersAndRoles();
             isSaving = false;
         }
     }
@@ -254,58 +302,81 @@ else
         showEditRoleModal = true;
     }
 
+    private void HandlePasswordResetStart(UserRoleViewModel user)
+    {
+        userToResetPassword = user;
+        newPasswordForUser = string.Empty;
+        showPasswordModal = true;
+    }
+
+    private async Task ExecutePasswordReset()
+    {
+        if (userToResetPassword == null) return;
+        if (string.IsNullOrWhiteSpace(newPasswordForUser) || newPasswordForUser.Length < 6)
+        {
+            toastService.ShowWarning("Password must be at least 6 characters.");
+            return;
+        }
+
+        isSaving = true;
+        try
+        {
+            var targetId = userToResetPassword.Email ?? userToResetPassword.UserId;
+            var result = await FirebaseUsers.ResetPasswordAsync(targetId, newPasswordForUser, CancellationToken.None);
+            if (result.Success)
+            {
+                toastService.ShowSuccess($"Password successfully changed for {userToResetPassword.Email}.");
+                showPasswordModal = false;
+            }
+            else
+            {
+                toastService.ShowError(result.Message);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error resetting password");
+            toastService.ShowError(ex.Message);
+        }
+        finally
+        {
+            isSaving = false;
+        }
+    }
+
     private async Task UpdateUserRole()
     {
         if (userToEditRole == null) return;
+
+        if (string.Equals(newRoleForUser, "SuperAdmin", StringComparison.OrdinalIgnoreCase))
+        {
+            toastService.ShowWarning("Only prakashshiva368@gmail.com can be SuperAdmin. No other account can be assigned SuperAdmin.");
+            return;
+        }
+
+        if (string.Equals(userToEditRole.Email, TenantManagementService.AuthorizedSuperAdminDeleteEmail, StringComparison.OrdinalIgnoreCase))
+        {
+            toastService.ShowWarning("The root SuperAdmin role cannot be changed.");
+            return;
+        }
+
+        if (!isSuperAdmin && !string.Equals(newRoleForUser, "Employee", StringComparison.OrdinalIgnoreCase))
+        {
+            toastService.ShowWarning("Only SuperAdmin can assign Admin roles.");
+            return;
+        }
+
         isSaving = true;
 
         try
         {
-            var user = await UserManager.FindByIdAsync(userToEditRole.UserId);
-            if (user == null)
+            var targetUid = userToEditRole.FirebaseUid ?? userToEditRole.UserId;
+            var result = await FirebaseUsers.ChangeRoleAsync(targetUid, newRoleForUser, CancellationToken.None);
+            if (!result.Success)
             {
-                toastService.ShowError("User not found.");
+                toastService.ShowError(result.Message);
                 return;
             }
-
-            // 1. Get ALL current roles
-            var currentRoles = await UserManager.GetRolesAsync(user);
-            
-            // 2. Remove ALL existing roles first (clean slate)
-            if (currentRoles.Any())
-            {
-                var removeResult = await UserManager.RemoveFromRolesAsync(user, currentRoles);
-                if (!removeResult.Succeeded)
-                {
-                    throw new Exception("Failed to remove existing roles: " + string.Join(", ", removeResult.Errors.Select(e => e.Description)));
-                }
-            }
-
-            // 3. Add the NEW single role
-            if (!string.IsNullOrEmpty(newRoleForUser))
-            {
-                var addResult = await UserManager.AddToRoleAsync(user, newRoleForUser);
-                if (!addResult.Succeeded)
-                {
-                    throw new Exception("Failed to add new role: " + string.Join(", ", addResult.Errors.Select(e => e.Description)));
-                }
-            }
-
-            var linkedEmployee = await (await DbFactory.CreateDbContextAsync())
-                .Employees
-                .AsNoTracking()
-                .FirstOrDefaultAsync(e => e.AspNetUserId == user.Id);
-
-            // Role changes are mirrored to Firebase custom claims. Existing
-            // Android sessions will pick up the new claims on their next token
-            // refresh without changing the application flow.
-            await FirebaseRealtime.EnsureFirebaseUserAsync(
-                user.Email ?? user.UserName ?? string.Empty,
-                string.Empty,
-                newRoleForUser,
-                linkedEmployee?.EmployeeID ?? 0,
-                user.UserName,
-                user.Id);
 
             await AttendanceRefresh.NotifyGlobalRefreshAsync("USER_ROLE_UPDATED");
             toastService.ShowSuccess($"Role updated to {newRoleForUser}.");
@@ -319,17 +390,14 @@ else
         finally
         {
             isSaving = false;
-            await using var db = await DbFactory.CreateDbContextAsync();
-            await LoadUsersAndRoles(db);
+            await LoadUsersAndRoles();
         }
     }
 
     private async Task HandleRefresh()
     {
-        await using var db = await DbFactory.CreateDbContextAsync();
-        await LoadUsersAndRoles(db);
+        await LoadUsersAndRoles();
     }
-
 
     private async Task ConfirmDeleteUser(UserRoleViewModel user)
     {
@@ -339,7 +407,13 @@ else
             return;
         }
 
-        if (!await JSRuntime.InvokeAsync<bool>("confirm", $"Delete {user.Email}?")) return;
+        if (!isSuperAdmin && user.CurrentRole != "Employee")
+        {
+            toastService.ShowWarning("Company administrators can only manage employee accounts.");
+            return;
+        }
+
+        if (!await JSRuntime.InvokeAsync<bool>("confirm", $"Delete account for {user.Email}?")) return;
 
         await DeleteUser(user);
     }
@@ -347,31 +421,27 @@ else
     private async Task DeleteUser(UserRoleViewModel user)
     {
         isSaving = true;
-        await using var dbContext = await DbFactory.CreateDbContextAsync();
-
         try
         {
-            var u = await UserManager.FindByIdAsync(user.UserId);
-            if (u != null)
+            var targetUid = user.FirebaseUid ?? user.UserId;
+            var result = await FirebaseUsers.DeleteAsync(targetUid, CancellationToken.None);
+            if (!result.Success)
             {
-                var emp = await dbContext.Employees.FirstOrDefaultAsync(e => e.AspNetUserId == u.Id);
-                if (emp != null)
-                {
-                    emp.AspNetUserId = null;
-                    emp.Email = null;
-                    dbContext.Update(emp);
-                    await dbContext.SaveChangesAsync();
-                }
-
-                await UserManager.DeleteAsync(u);
+                toastService.ShowError(result.Message);
+                return;
             }
 
             await AttendanceRefresh.NotifyGlobalRefreshAsync("USER_DELETED");
             toastService.ShowSuccess("User deleted.");
         }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error deleting user");
+            toastService.ShowError(ex.Message);
+        }
         finally
         {
-            await LoadUsersAndRoles(dbContext);
+            await LoadUsersAndRoles();
             isSaving = false;
         }
     }

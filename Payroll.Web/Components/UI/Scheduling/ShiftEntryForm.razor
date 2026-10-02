@@ -1,7 +1,8 @@
-﻿@using global::Payroll.Shared
+@using global::Payroll.Shared
 @using global::Payroll.Shared.Data
 @inject IToastService toastService
 @inject IDbContextFactory<AppDbContext> DbFactory
+@inject Payroll.Web.Services.FirebaseShiftScheduleService FirebaseShiftSchedules
 @inject ILogger<AttendanceLogViewer> _logger
 
 <details class="mb-4 border rounded p-3">
@@ -124,45 +125,20 @@
 
         try
         {
-            await using var dbContext = await DbFactory.CreateDbContextAsync();
-
-            // Check if we are inserting a new record (ID will be 0) or updating an existing one.
-            if (NewSchedule.ScheduleID == 0)
-            {
-                // Set ID to 0 to force an INSERT (auto-increment will assign new ID)
-                NewSchedule.ScheduleID = 0;
-
-                // --- NEW: Normalize ShiftDate for Recurring Patterns ---
-                if (NewSchedule.IsRecurringPattern)
-                {
-                    // FIX: Use .Value to safely unwrap the non-null DateOnly?
-                    DateTime date = NewSchedule.ShiftDate.ToDateTime(TimeOnly.MinValue); // Fixes CS1061
-
-                    // Calculate the difference in days to the preceding Sunday.
-                    // DayOfWeek.Sunday is 0.
-                    int daysToSubtract = (int)date.DayOfWeek;
-
-                    // Set the ShiftDate to the Sunday of the week corresponding to the selected date.
-                    NewSchedule.ShiftDate = DateOnly.FromDateTime(date.AddDays(-daysToSubtract));
-                }
-                // ------------------------------------------------------
-
-                dbContext.ShiftSchedules.Add(NewSchedule);
-            }
-            else
-            {
-                // Update existing record
-                dbContext.ShiftSchedules.Update(NewSchedule);
-            }
-
-            await dbContext.SaveChangesAsync();
+            // Firebase is the SSOT for shift scheduling. The existing
+            // ShiftSchedule model, validation and recurring-pattern behavior
+            // remain unchanged.
+            var ok = await FirebaseShiftSchedules.SaveAsync(NewSchedule);
+            if (!ok)
+                throw new InvalidOperationException("Firebase is unavailable or the shift could not be saved.");
 
             toastService.ShowSuccess("Shift schedule saved successfully!");
 
-            // Reset the form for a new entry
+            // Reset the form for a new entry.
             NewSchedule = new ShiftSchedule();
 
-            // Notify the parent component (ShiftScheduler.razor) to reload the list
+            // Notify the parent component. The Firebase change event will also
+            // refresh other open Web/Android clients.
             await OnSaved.InvokeAsync();
         }
         catch (Exception ex)

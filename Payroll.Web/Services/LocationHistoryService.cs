@@ -1,4 +1,4 @@
-﻿using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
 using Payroll.Shared.Data;
 
 namespace Payroll.Web.Services;
@@ -27,9 +27,9 @@ public sealed class LocationHistoryService
             .AsNoTracking()
             .Where(x =>
                 x.EmployeeId == employeeId &&
-                x.RecordedAtUtc >= start &&
-                x.RecordedAtUtc < end)
-            .OrderBy(x => x.RecordedAtUtc)
+                x.CapturedAtUtc >= start &&
+                x.CapturedAtUtc < end)
+            .OrderBy(x => x.CapturedAtUtc)
             .ToListAsync();
     }
 
@@ -87,9 +87,9 @@ public sealed class LocationHistoryService
             .AsNoTracking()
             .Where(x =>
                 x.EmployeeId == employeeId &&
-                x.RecordedAtUtc >= start &&
-                x.RecordedAtUtc < end)
-            .OrderBy(x => x.RecordedAtUtc)
+                x.CapturedAtUtc >= start &&
+                x.CapturedAtUtc < end)
+            .OrderBy(x => x.CapturedAtUtc)
             .ToListAsync();
     }
 
@@ -130,7 +130,7 @@ public sealed class LocationHistoryService
         await using var db =
             await _dbFactory.CreateDbContextAsync();
 
-        return await db.EmployeeGpsSessions
+        var sessions = await db.EmployeeGpsSessions
             .AsNoTracking()
             .Where(x =>
                 x.EmployeeId == employeeId &&
@@ -139,6 +139,54 @@ public sealed class LocationHistoryService
                  x.EndedAtUtc >= start))
             .OrderByDescending(x => x.StartedAtUtc)
             .ToListAsync();
+
+        var hasActive = false;
+        var needsPersistedFix = false;
+        foreach (var s in sessions)
+        {
+            if (s.EndedAtUtc == null)
+            {
+                if (!hasActive)
+                {
+                    hasActive = true;
+                }
+                else
+                {
+                    s.EndedAtUtc = s.LastUpdateAtUtc > DateTime.MinValue ? s.LastUpdateAtUtc : s.StartedAtUtc;
+                    s.EndReason = "SUPERSEDED";
+                    needsPersistedFix = true;
+                }
+            }
+        }
+
+        if (needsPersistedFix)
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await using var fixDb = await _dbFactory.CreateDbContextAsync();
+                    var activeList = await fixDb.EmployeeGpsSessions
+                        .Where(x => x.EmployeeId == employeeId && x.EndedAtUtc == null)
+                        .OrderByDescending(x => x.StartedAtUtc)
+                        .ToListAsync();
+
+                    if (activeList.Count > 1)
+                    {
+                        for (int i = 1; i < activeList.Count; i++)
+                        {
+                            var old = activeList[i];
+                            old.EndedAtUtc = old.LastUpdateAtUtc > DateTime.MinValue ? old.LastUpdateAtUtc : DateTime.UtcNow;
+                            old.EndReason = "SUPERSEDED";
+                        }
+                        await fixDb.SaveChangesAsync();
+                    }
+                }
+                catch { }
+            });
+        }
+
+        return sessions;
     }
 
     public async Task<EmployeeGpsSession?> GetGpsSessionAsync(

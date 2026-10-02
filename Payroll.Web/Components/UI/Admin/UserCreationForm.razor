@@ -1,53 +1,88 @@
-﻿@using Microsoft.AspNetCore.Components.Forms
+@using Microsoft.AspNetCore.Components.Forms
 @using global::Payroll.Web.Models
 @using global::Payroll.Shared.Data
 
-<div class="card shadow-sm user-creation-form">
-    <div class="card-body">
-        <h5 class="text-primary border-bottom pb-2 mb-3">Create New User</h5>
+<div class="card shadow-sm user-creation-form border-0 rounded-3">
+    <div class="card-body p-4">
+        <div class="d-flex align-items-center justify-content-between border-bottom pb-2 mb-3">
+            <h5 class="text-primary fw-bold mb-0">
+                <i class="bi bi-person-plus-fill me-2"></i>Create New User
+            </h5>
+            @if (!string.IsNullOrWhiteSpace(ActiveCompanyName))
+            {
+                <span class="badge bg-light text-primary border px-2 py-1">🏢 @ActiveCompanyName</span>
+            }
+        </div>
 
         <EditForm Model="NewUserForm" OnValidSubmit="OnCreateUser">
             <DataAnnotationsValidator />
 
             <div class="mb-3">
-                <label>Email / Username *</label>
-                <InputText class="form-control" @bind-Value="NewUserForm.Email" />
+                <label class="form-label fw-bold small">Email / Username <span class="text-danger">*</span></label>
+                <div class="input-group">
+                    <span class="input-group-text bg-light"><i class="bi bi-envelope text-muted"></i></span>
+                    <InputText class="form-control" @bind-Value="NewUserForm.Email" placeholder="employee@company.com" />
+                </div>
                 <ValidationMessage For="@(() => NewUserForm.Email)" />
             </div>
 
             <div class="mb-3">
-                <label>Password *</label>
-                <InputText type="password" class="form-control" @bind-Value="NewUserForm.Password" />
+                <label class="form-label fw-bold small">Password <span class="text-danger">*</span></label>
+                <div class="input-group">
+                    <span class="input-group-text bg-light"><i class="bi bi-key text-muted"></i></span>
+                    <InputText type="password" class="form-control" @bind-Value="NewUserForm.Password" placeholder="Minimum 6 characters" />
+                </div>
                 <ValidationMessage For="@(() => NewUserForm.Password)" />
             </div>
 
             <div class="mb-3">
-                <label>Link Employee (Optional)</label>
+                <label class="form-label fw-bold small">Link Employee <span class="text-danger">*</span></label>
                 <select class="form-select" @bind="NewUserForm.EmployeeId">
-                    <option value="@((int?)null)">-- Don't link now --</option>
+                    <option value="">-- Select saved Employee --</option>
 
                     @foreach (var emp in UnlinkedEmployees.OrderBy(e => e.Name))
                     {
-                        <option value="@emp.EmployeeID">@emp.Name (Bio: @emp.BiometricID)</option>
+                        <option value="@emp.EmployeeID">
+                            👤 @emp.Name (Bio: @emp.BiometricID) @(string.IsNullOrEmpty(emp.Email) ? "" : $" - {emp.Email}")
+                        </option>
                     }
                 </select>
+                <div class="form-text small text-muted">Select an unlinked employee record to associate with this login.</div>
             </div>
 
-            <div class="mb-3">
-                <label>Initial Role</label>
-                <select class="form-select" @bind="NewUserForm.InitialRole">
-                    <option value="Employee">Employee</option>
-                    <option value="Admin">Admin</option>
-                    <option value="SuperAdmin">SuperAdmin</option>
-                </select>
-            </div>
+            @if (IsSuperAdmin)
+            {
+                <div class="mb-3">
+                    <label class="form-label fw-bold small">Initial Role</label>
+                    <select class="form-select" @bind="NewUserForm.InitialRole">
+                        <option value="Employee">👤 Employee</option>
+                        <option value="Admin">🛡️ Admin</option>
+                    </select>
+                </div>
+            }
+            else
+            {
+                <input type="hidden" @bind="NewUserForm.InitialRole" />
+                <div class="mb-3">
+                    <label class="form-label fw-bold small">Assigned Role</label>
+                    <div class="form-control bg-light text-muted d-flex align-items-center">
+                        <span class="badge bg-primary me-2">👤 Employee</span>
+                        <span class="small">Company Staff Member</span>
+                    </div>
+                </div>
+            }
 
-            <button type="submit" class="btn btn-success w-100" disabled="@IsSaving">
+            <button type="submit" class="btn btn-success fw-bold w-100 py-2 mt-2 shadow-sm" disabled="@IsSaving">
                 @if (IsSaving)
                 {
                     <span class="spinner-border spinner-border-sm me-2"></span>
+                    <span>Creating Account...</span>
                 }
-                Create User
+                else
+                {
+                    <i class="bi bi-check-circle-fill me-1"></i>
+                    <span>✨ Create User Account</span>
+                }
             </button>
         </EditForm>
     </div>
@@ -58,4 +93,14 @@
     [Parameter] public List<Employee> UnlinkedEmployees { get; set; } = new();
     [Parameter] public bool IsSaving { get; set; }
     [Parameter] public EventCallback OnCreateUser { get; set; }
+    [Parameter] public bool IsSuperAdmin { get; set; } = false;
+    [Parameter] public string ActiveCompanyName { get; set; } = string.Empty;
+
+    protected override void OnParametersSet()
+    {
+        if (!IsSuperAdmin)
+        {
+            NewUserForm.InitialRole = "Employee";
+        }
+    }
 }

@@ -1,0 +1,859 @@
+@page "/admin/company-setup"
+@rendermode InteractiveServer
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.AspNetCore.Identity
+@using Microsoft.EntityFrameworkCore
+@using global::Payroll.Shared.Data
+@using global::Payroll.Web.Services
+@using Blazored.Toast.Services
+
+@attribute [Authorize(Roles = "SuperAdmin, Admin")]
+
+@inject IDbContextFactory<AppDbContext> DbFactory
+@inject UserManager<IdentityUser> UserManager
+@inject RoleManager<IdentityRole> RoleManager
+@inject ITenantContextService TenantContext
+@inject TenantManagementService TenantManager
+@inject IAppModeService AppMode
+@inject AttendanceRefreshService RefreshService
+@inject FirebaseRealtimeService Firebase
+@inject IToastService ToastService
+@inject NavigationManager Navigation
+@inject AuthenticationStateProvider AuthState
+@inject IJSRuntime JSRuntime
+@inject ILogger<CompanySetup> Logger
+
+<PageTitle>🏢 Company & System Setup</PageTitle>
+
+<div class="container-fluid px-3 px-md-4 py-4">
+    @* --- PAGE HEADER --- *@
+    <div class="page-header-container mb-4">
+        <div class="d-flex align-items-center gap-3">
+            <div class="emoji-icon-badge emoji-icon-badge-primary">
+                🏢
+            </div>
+            <div>
+                <h2 class="page-header-title">
+                    Company &amp; System Setup
+                </h2>
+                <p class="page-header-subtitle">
+                    <span>⚙️ Configure company profile, administrator credentials, office geofence &amp; feature switches</span>
+                </p>
+            </div>
+        </div>
+
+        <div class="d-flex align-items-center gap-2">
+            <span class="badge @(isOfflineMode ? "bg-dark text-white border border-secondary" : "bg-primary-subtle text-primary border border-primary-subtle") rounded-pill px-3 py-2 fw-semibold">
+                @(isOfflineMode ? "📴 Standalone Built-in DB Mode" : "🌐 Online Cloud Mode")
+            </span>
+            <button class="action-pill-btn action-pill-btn-primary" @onclick="SaveSetupAsync" disabled="@isSaving">
+                @if (isSaving)
+                {
+                    <span class="spinner-border spinner-border-sm me-2"></span>
+                    <span>Saving Setup...</span>
+                }
+                else
+                {
+                    <span>💾 Save Company Setup</span>
+                }
+            </button>
+        </div>
+    </div>
+
+    @if (isLoading)
+    {
+        <div class="text-center py-5">
+            <div class="spinner-border text-primary mb-3" style="width: 3rem; height: 3rem;" role="status"></div>
+            <h5 class="text-muted fw-semibold">Loading company setup profile... 🏢</h5>
+        </div>
+    }
+    else
+    {
+        @if (!string.IsNullOrWhiteSpace(errorMessage))
+        {
+            <div class="alert alert-danger d-flex align-items-center mb-4 rounded-3 shadow-sm">
+                <i class="bi bi-exclamation-octagon-fill me-2 fs-5"></i>
+                <div>@errorMessage</div>
+            </div>
+        }
+
+        @if (!string.IsNullOrWhiteSpace(successMessage))
+        {
+            <div class="alert alert-success d-flex align-items-center mb-4 rounded-3 shadow-sm">
+                <i class="bi bi-check-circle-fill me-2 fs-5"></i>
+                <div>@successMessage</div>
+            </div>
+        }
+
+        <div class="row g-4">
+            @* --- SECTION 1: COMPANY PROFILE --- *@
+            <div class="col-12 col-xl-6">
+                <div class="card border-0 shadow-sm rounded-4 h-100">
+                    <div class="card-header bg-white border-0 pt-4 px-4 pb-2">
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="fs-4">1️⃣</span>
+                            <h5 class="fw-bold mb-0 text-primary">Company Identity &amp; Profile</h5>
+                        </div>
+                        <p class="text-muted small mb-0 mt-1">Basic company identifiers, display emoji, and operating hours cutoff.</p>
+                    </div>
+                    <div class="card-body px-4 pb-4">
+                        <div class="row g-3">
+                            <div class="col-12 col-md-8">
+                                <label class="form-label fw-bold small">Company Name <span class="text-danger">*</span></label>
+                                <input type="text" class="form-control rounded-3" placeholder="e.g. Acme Corporation" @bind="companyName" />
+                            </div>
+                            <div class="col-6 col-md-4">
+                                <label class="form-label fw-bold small">Company Code</label>
+                                <input type="text" class="form-control rounded-3 text-uppercase" placeholder="ACME" maxlength="10" @bind="companyCode" />
+                            </div>
+                            <div class="col-6 col-md-4">
+                                <label class="form-label fw-bold small">Display Emoji</label>
+                                <select class="form-select rounded-3" @bind="iconEmoji">
+                                    <option value="🏢">🏢 Corporate</option>
+                                    <option value="🏭">🏭 Industrial</option>
+                                    <option value="🏥">🏥 Hospital</option>
+                                    <option value="🏦">🏦 Financial</option>
+                                    <option value="🚀">🚀 Tech Startup</option>
+                                    <option value="💻">💻 IT Software</option>
+                                    <option value="🏪">🏪 Retail</option>
+                                    <option value="🏨">🏨 Hotel</option>
+                                    <option value="🏫">🏫 School/Edu</option>
+                                </select>
+                            </div>
+                            <div class="col-12 col-md-8">
+                                <label class="form-label fw-bold small">Address / Campus</label>
+                                <input type="text" class="form-control rounded-3" placeholder="Headquarters street address" @bind="addressLine1" />
+                            </div>
+                            <div class="col-12 col-md-6">
+                                <label class="form-label fw-bold small">City, State, Pincode</label>
+                                <input type="text" class="form-control rounded-3" placeholder="City, State - PIN" @bind="cityStatePincode" />
+                            </div>
+                            <div class="col-6 col-md-3">
+                                <label class="form-label fw-bold small">Work Day Cutoff (24h)</label>
+                                <input type="number" class="form-control rounded-3" min="0" max="23" @bind="workDayCutoffHour" />
+                                <div class="form-text small">Roll-over hour</div>
+                            </div>
+                            <div class="col-6 col-md-3">
+                                <label class="form-label fw-bold small">Salary Calc Method</label>
+                                <select class="form-select rounded-3" @bind="salaryCalcMethod">
+                                    <option value="Days in Month">Days in Month</option>
+                                    <option value="Fixed 30-Day">Fixed 30-Day</option>
+                                    <option value="Pro-Rata Hourly">Pro-Rata Hourly</option>
+                                </select>
+                            </div>
+
+                            @* Operation Mode Toggle *@
+                            <div class="col-12 mt-3 pt-3 border-top">
+                                <label class="form-label fw-bold small text-primary d-flex align-items-center gap-2">
+                                    <span>⚙️ Operation / Deployment Mode</span>
+                                </label>
+                                <div class="row g-2">
+                                    <div class="col-md-6">
+                                        <div class="card p-3 border-2 @(isOfflineMode ? "border-dark bg-dark text-white" : "border-light bg-light") cursor-pointer rounded-3"
+                                             @onclick="() => isOfflineMode = true">
+                                            <div class="d-flex align-items-center justify-content-between mb-1">
+                                                <strong class="d-flex align-items-center gap-2">
+                                                    <span>📴 Offline Standalone</span>
+                                                </strong>
+                                                @if (isOfflineMode)
+                                                {
+                                                    <i class="bi bi-check-circle-fill text-warning"></i>
+                                                }
+                                            </div>
+                                            <small class="@(isOfflineMode ? "text-white-50" : "text-muted")">
+                                                100% Standalone local SQLite DB. No internet or Firebase cloud needed.
+                                            </small>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <div class="card p-3 border-2 @(!isOfflineMode ? "border-primary bg-primary text-white" : "border-light bg-light") cursor-pointer rounded-3"
+                                             @onclick="() => isOfflineMode = false">
+                                            <div class="d-flex align-items-center justify-content-between mb-1">
+                                                <strong class="d-flex align-items-center gap-2">
+                                                    <span>🌐 Online Cloud</span>
+                                                </strong>
+                                                @if (!isOfflineMode)
+                                                {
+                                                    <i class="bi bi-check-circle-fill text-white"></i>
+                                                }
+                                            </div>
+                                            <small class="@(!isOfflineMode ? "text-white-50" : "text-muted")">
+                                                Firebase Realtime Database cloud sync and mobile tracking radar.
+                                            </small>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            @* --- SECTION 2: ADMINISTRATOR CREDENTIALS --- *@
+            <div class="col-12 col-xl-6">
+                <div class="card border-0 shadow-sm rounded-4 h-100">
+                    <div class="card-header bg-white border-0 pt-4 px-4 pb-2">
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="fs-4">2️⃣</span>
+                            <h5 class="fw-bold mb-0 text-primary">Administrator Credentials</h5>
+                        </div>
+                        <p class="text-muted small mb-0 mt-1">SuperAdmin login details to manage staff, run payroll, and configure policies.</p>
+                    </div>
+                    <div class="card-body px-4 pb-4">
+                        <div class="row g-3">
+                            <div class="col-12 col-md-6">
+                                <label class="form-label fw-bold small">Admin Email Address <span class="text-danger">*</span></label>
+                                <input type="email" class="form-control rounded-3" placeholder="admin@company.com" @bind="adminEmail" />
+                                <div class="form-text small">Used for application sign-in</div>
+                            </div>
+                            <div class="col-12 col-md-6">
+                                <label class="form-label fw-bold small">Admin Full Name</label>
+                                <input type="text" class="form-control rounded-3" placeholder="e.g. Administrator" @bind="adminName" />
+                            </div>
+                            <div class="col-12 col-md-6">
+                                <label class="form-label fw-bold small">New Password (Leave blank to keep existing)</label>
+                                <input type="password" class="form-control rounded-3" placeholder="••••••••" @bind="adminPassword" />
+                                <div class="form-text small">Min 6 characters if changing</div>
+                            </div>
+                            <div class="col-12 col-md-6">
+                                <label class="form-label fw-bold small">Confirm New Password</label>
+                                <input type="password" class="form-control rounded-3" placeholder="••••••••" @bind="adminPasswordConfirm" />
+                            </div>
+                            <div class="col-12 col-md-6">
+                                <label class="form-label fw-bold small">Admin Contact Phone</label>
+                                <input type="tel" class="form-control rounded-3" placeholder="+91 98765 43210" @bind="adminPhone" />
+                            </div>
+                            <div class="col-12">
+                                <div class="p-3 bg-light rounded-3 border">
+                                    <div class="d-flex align-items-center gap-2 text-muted small">
+                                        <i class="bi bi-shield-lock-fill text-primary fs-5"></i>
+                                        <div>
+                                            <strong>Security Notice:</strong> The Admin account has root permissions to manage staff rosters, run payroll formulas, and adjust attendance policies.
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            @* --- SECTION 3: OFFICE LOCATION & GEOFENCING --- *@
+            <div class="col-12 col-xl-6">
+                <div class="card border-0 shadow-sm rounded-4 h-100">
+                    <div class="card-header bg-white border-0 pt-4 px-4 pb-2">
+                        <div class="d-flex align-items-center justify-content-between">
+                            <div class="d-flex align-items-center gap-2">
+                                <span class="fs-4">3️⃣</span>
+                                <h5 class="fw-bold mb-0 text-primary">Office Location &amp; Geofencing</h5>
+                            </div>
+                            <a href="https://www.google.com/maps" target="_blank" class="btn btn-sm btn-outline-primary rounded-pill px-3">
+                                <i class="bi bi-geo-alt me-1"></i>Open Google Maps
+                            </a>
+                        </div>
+                        <p class="text-muted small mb-0 mt-1">Define geographical coordinates for biometric/mobile attendance validation.</p>
+                    </div>
+                    <div class="card-body px-4 pb-4">
+                        <div class="row g-3">
+                            <div class="col-12 col-md-4">
+                                <label class="form-label fw-bold small">Office Latitude</label>
+                                <input type="number" step="0.000001" class="form-control rounded-3" @bind="officeLatitude" />
+                            </div>
+                            <div class="col-12 col-md-4">
+                                <label class="form-label fw-bold small">Office Longitude</label>
+                                <input type="number" step="0.000001" class="form-control rounded-3" @bind="officeLongitude" />
+                            </div>
+                            <div class="col-12 col-md-4">
+                                <label class="form-label fw-bold small">Geofence Radius (Meters)</label>
+                                <input type="number" class="form-control rounded-3" min="20" max="5000" @bind="geoRadiusMeters" />
+                            </div>
+                            <div class="col-6 col-md-6">
+                                <label class="form-label fw-bold small">Late Arrival Grace (Minutes)</label>
+                                <input type="number" class="form-control rounded-3" min="0" max="120" @bind="lateGraceMinutes" />
+                            </div>
+                            <div class="col-6 col-md-6">
+                                <label class="form-label fw-bold small">Early Departure Grace (Minutes)</label>
+                                <input type="number" class="form-control rounded-3" min="0" max="120" @bind="endTimeGraceMinutes" />
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            @* --- SECTION 4: FEATURE SWITCHES & MODULE TOGGLES --- *@
+            <div class="col-12 col-xl-6">
+                <div class="card border-0 shadow-sm rounded-4 h-100">
+                    <div class="card-header bg-white border-0 pt-4 px-4 pb-2">
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="fs-4">4️⃣</span>
+                            <h5 class="fw-bold mb-0 text-primary">Feature Switches &amp; Module Toggles</h5>
+                        </div>
+                        <p class="text-muted small mb-0 mt-1">Enable or disable operational modules across the web application.</p>
+                    </div>
+                    <div class="card-body px-4 pb-4">
+                        <div class="row g-2">
+                            <div class="col-6 col-md-6">
+                                <div class="form-check form-switch p-2 rounded-2 border bg-light-subtle">
+                                    <input class="form-check-input ms-0 me-2" type="checkbox" id="f_payroll" @bind="features.EnablePayroll" />
+                                    <label class="form-check-label small fw-bold" for="f_payroll">💰 Payroll Engine</label>
+                                </div>
+                            </div>
+                            <div class="col-6 col-md-6">
+                                <div class="form-check form-switch p-2 rounded-2 border bg-light-subtle">
+                                    <input class="form-check-input ms-0 me-2" type="checkbox" id="f_geofence" @bind="features.EnableGeoFencing" />
+                                    <label class="form-check-label small fw-bold" for="f_geofence">📍 Geo-Fencing</label>
+                                </div>
+                            </div>
+                            <div class="col-6 col-md-6">
+                                <div class="form-check form-switch p-2 rounded-2 border bg-light-subtle">
+                                    <input class="form-check-input ms-0 me-2" type="checkbox" id="f_dual" @bind="features.EnableDualAttendance" />
+                                    <label class="form-check-label small fw-bold" for="f_dual">🔄 Dual Attendance</label>
+                                </div>
+                            </div>
+                            <div class="col-6 col-md-6">
+                                <div class="form-check form-switch p-2 rounded-2 border bg-light-subtle">
+                                    <input class="form-check-input ms-0 me-2" type="checkbox" id="f_advance" @bind="features.EnableSalaryAdvance" />
+                                    <label class="form-check-label small fw-bold" for="f_advance">💳 Salary Advances</label>
+                                </div>
+                            </div>
+                            <div class="col-6 col-md-6">
+                                <div class="form-check form-switch p-2 rounded-2 border bg-light-subtle">
+                                    <input class="form-check-input ms-0 me-2" type="checkbox" id="f_bonus" @bind="features.EnableBonusManagement" />
+                                    <label class="form-check-label small fw-bold" for="f_bonus">🎁 Bonus &amp; Ex-Gratia</label>
+                                </div>
+                            </div>
+                            <div class="col-6 col-md-6">
+                                <div class="form-check form-switch p-2 rounded-2 border bg-light-subtle">
+                                    <input class="form-check-input ms-0 me-2" type="checkbox" id="f_leave" @bind="features.EnableLeaveManagement" />
+                                    <label class="form-check-label small fw-bold" for="f_leave">🏖️ Leave Management</label>
+                                </div>
+                            </div>
+                            <div class="col-6 col-md-6">
+                                <div class="form-check form-switch p-2 rounded-2 border bg-light-subtle">
+                                    <input class="form-check-input ms-0 me-2" type="checkbox" id="f_shifts" @bind="features.EnableShiftScheduling" />
+                                    <label class="form-check-label small fw-bold" for="f_shifts">⏰ Shift Scheduling</label>
+                                </div>
+                            </div>
+                            <div class="col-6 col-md-6">
+                                <div class="form-check form-switch p-2 rounded-2 border bg-light-subtle">
+                                    <input class="form-check-input ms-0 me-2" type="checkbox" id="f_correction" @bind="features.EnablePunchCorrection" />
+                                    <label class="form-check-label small fw-bold" for="f_correction">🛠️ Punch Correction</label>
+                                </div>
+                            </div>
+                            <div class="col-6 col-md-6">
+                                <div class="form-check form-switch p-2 rounded-2 border bg-light-subtle">
+                                    <input class="form-check-input ms-0 me-2" type="checkbox" id="f_tax" @bind="features.EnableTaxDeclarations" />
+                                    <label class="form-check-label small fw-bold" for="f_tax">📑 Tax Declarations</label>
+                                </div>
+                            </div>
+                            <div class="col-6 col-md-6">
+                                <div class="form-check form-switch p-2 rounded-2 border bg-light-subtle">
+                                    <input class="form-check-input ms-0 me-2" type="checkbox" id="f_exit" @bind="features.EnableResignationModule" />
+                                    <label class="form-check-label small fw-bold" for="f_exit">🚪 Resignation &amp; Exit</label>
+                                </div>
+                            </div>
+                            <div class="col-6 col-md-6">
+                                <div class="form-check form-switch p-2 rounded-2 border bg-light-subtle">
+                                    <input class="form-check-input ms-0 me-2" type="checkbox" id="f_fbp" @bind="features.EnableFlexibleBenefits" />
+                                    <label class="form-check-label small fw-bold" for="f_fbp">🏛️ Flexible Benefits</label>
+                                </div>
+                            </div>
+                            <div class="col-6 col-md-6">
+                                <div class="form-check form-switch p-2 rounded-2 border bg-light-subtle">
+                                    <input class="form-check-input ms-0 me-2" type="checkbox" id="f_reports" @bind="features.EnableCompanyReports" />
+                                    <label class="form-check-label small fw-bold" for="f_reports">📊 Company Reports</label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        @* --- SECTION 5: DANGER ZONE (DELETE COMPANY) --- *@
+        @if (isAuthorizedDeleteSuperAdmin)
+        {
+            <div class="card border border-danger shadow-sm rounded-4 overflow-hidden mt-4">
+                <div class="card-header bg-danger text-white py-3 px-4 d-flex align-items-center justify-content-between">
+                    <div class="d-flex align-items-center gap-2">
+                        <i class="bi bi-exclamation-triangle-fill fs-5"></i>
+                        <h5 class="mb-0 fw-bold">Danger Zone: Permanent Company Deletion</h5>
+                    </div>
+                    <span class="badge bg-white text-danger fw-bold px-3 py-2 rounded-pill">
+                        SuperAdmin Only (@TenantManagementService.AuthorizedSuperAdminDeleteEmail)
+                    </span>
+                </div>
+                <div class="card-body p-4 bg-danger-subtle bg-opacity-25">
+                    <div class="row align-items-center">
+                        <div class="col-lg-8">
+                            <h6 class="fw-bold text-danger mb-1">
+                                Delete Entire Company &amp; All Associated Data
+                            </h6>
+                            <p class="small text-danger mb-0">
+                                Permanently wipe <strong>@companyName</strong> from BOTH Local SQLite Database and Firebase Cloud. All employee rosters, attendance history, GPS breadcrumbs, and payroll data will be deleted.
+                            </p>
+                            <p class="small text-muted mb-0 mt-1">
+                                Only your SuperAdmin login (<code>@TenantManagementService.AuthorizedSuperAdminDeleteEmail</code>) will be preserved.
+                            </p>
+                        </div>
+                        <div class="col-lg-4 text-lg-end mt-3 mt-lg-0">
+                            <button class="btn btn-danger fw-bold rounded-pill px-4 py-2 shadow-sm" @onclick="OpenDeleteCompanyModal">
+                                <i class="bi bi-trash3-fill me-1"></i> Delete Entire Company
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @* --- BOTTOM ACTION BAR --- *@
+        <div class="d-flex justify-content-between align-items-center mt-4 pt-3 border-top">
+            <a href="/" class="btn btn-outline-secondary rounded-pill px-4">
+                <i class="bi bi-arrow-left me-1"></i> Return to Dashboard
+            </a>
+
+            <button class="action-pill-btn action-pill-btn-primary px-5 py-2 fs-6 fw-bold" @onclick="SaveSetupAsync" disabled="@isSaving">
+                @if (isSaving)
+                {
+                    <span class="spinner-border spinner-border-sm me-2"></span>
+                    <span>Saving Setup Profile...</span>
+                }
+                else
+                {
+                    <span>🚀 Apply &amp; Save Setup</span>
+                }
+            </button>
+        </div>
+    }
+</div>
+
+@if (showDeleteCompanyModal)
+{
+    <div class="modal fade show d-block" tabindex="-1" style="background-color: rgba(0,0,0,0.65); z-index: 1060;" role="dialog">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content border-0 shadow-lg rounded-4 overflow-hidden">
+                <div class="modal-header bg-danger text-white px-4 py-3">
+                    <h5 class="modal-title fw-bold d-flex align-items-center gap-2">
+                        <i class="bi bi-shield-slash-fill"></i> Confirm Permanent Deletion
+                    </h5>
+                    <button type="button" class="btn-close btn-close-white" @onclick="CloseDeleteCompanyModal" disabled="@isDeletingCompany"></button>
+                </div>
+                <div class="modal-body p-4">
+                    <div class="alert alert-danger d-flex align-items-start gap-2 mb-3 rounded-3">
+                        <i class="bi bi-exclamation-octagon-fill fs-5 mt-1 flex-shrink-0"></i>
+                        <div>
+                            <strong>CRITICAL WARNING:</strong> You are about to permanently delete <strong>@companyName</strong>.
+                            <ul class="mb-0 mt-2 ps-3 small">
+                                <li>All staff profiles and employee accounts will be deleted.</li>
+                                <li>All punches, GPS tracking history, and daily attendance logs will be erased.</li>
+                                <li>All payroll runs, advances, and bonuses will be erased.</li>
+                                <li>Cloud records in Firebase Realtime Database will be erased.</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <p class="small text-secondary mb-2">
+                        To verify this action, please type <strong>DELETE</strong> in the box below:
+                    </p>
+                    <input type="text" class="form-control rounded-3 mb-3 fw-bold" placeholder="Type DELETE to confirm" @bind="deleteConfirmText" @bind:event="oninput" disabled="@isDeletingCompany" />
+
+                    @if (!string.IsNullOrWhiteSpace(deleteErrorMessage))
+                    {
+                        <div class="alert alert-warning py-2 px-3 small rounded-3 mb-0">
+                            @deleteErrorMessage
+                        </div>
+                    }
+                </div>
+                <div class="modal-footer bg-light px-4 py-3">
+                    <button type="button" class="btn btn-secondary rounded-pill px-4" @onclick="CloseDeleteCompanyModal" disabled="@isDeletingCompany">
+                        Cancel
+                    </button>
+                    <button type="button" class="btn btn-danger rounded-pill px-4 fw-bold" @onclick="ExecuteDeleteCompanyAsync" disabled="@(isDeletingCompany || deleteConfirmText?.Trim().ToUpperInvariant() != "DELETE")">
+                        @if (isDeletingCompany)
+                        {
+                            <span class="spinner-border spinner-border-sm me-2"></span>
+                            <span>Deleting Company...</span>
+                        }
+                        else
+                        {
+                            <span>Permanently Delete</span>
+                        }
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private bool isLoading = true;
+    private bool isSaving = false;
+    private string? errorMessage;
+    private string? successMessage;
+
+    // Company Identity
+    private string companyName = "BioMetric Payroll System";
+    private string companyCode = "PRIMARY";
+    private string iconEmoji = "🏢";
+    private string addressLine1 = "Headquarters Location";
+    private string cityStatePincode = "";
+    private int workDayCutoffHour = 22;
+    private string salaryCalcMethod = "Days in Month";
+    private bool isOfflineMode = false;
+
+    // Admin Credentials
+    private string adminEmail = "prakashshiva368@gmail.com";
+    private string adminName = "Super Administrator";
+    private string adminPhone = "";
+    private string adminPassword = "";
+    private string adminPasswordConfirm = "";
+
+    // Office Geofencing
+    private double officeLatitude = 11.9416;
+    private double officeLongitude = 79.8083;
+    private int geoRadiusMeters = 100;
+    private int lateGraceMinutes = 15;
+    private int endTimeGraceMinutes = 15;
+
+    // Features
+    private FeatureSettings features = new();
+
+    // Delete Company Security
+    private bool isAuthorizedDeleteSuperAdmin = false;
+    private string currentUserEmail = "";
+    private bool showDeleteCompanyModal = false;
+    private bool isDeletingCompany = false;
+    private string deleteConfirmText = "";
+    private string? deleteErrorMessage;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var auth = await AuthState.GetAuthenticationStateAsync();
+        var user = auth.User;
+        currentUserEmail = user.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value ?? user.Identity?.Name ?? "";
+        var isSuperAdmin = user.IsInRole("SuperAdmin");
+        isAuthorizedDeleteSuperAdmin = isSuperAdmin && (
+            string.Equals(currentUserEmail.Trim(), TenantManagementService.AuthorizedSuperAdminDeleteEmail, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(currentUserEmail.Trim(), FirebaseAuthSecurityConstants.CanonicalSuperAdminEmail, StringComparison.OrdinalIgnoreCase));
+
+        await LoadSetupDataAsync();
+    }
+
+    private void OpenDeleteCompanyModal()
+    {
+        deleteConfirmText = "";
+        deleteErrorMessage = null;
+        showDeleteCompanyModal = true;
+    }
+
+    private void CloseDeleteCompanyModal()
+    {
+        if (isDeletingCompany) return;
+        showDeleteCompanyModal = false;
+    }
+
+    private async Task ExecuteDeleteCompanyAsync()
+    {
+        if (deleteConfirmText?.Trim().ToUpperInvariant() != "DELETE")
+        {
+            deleteErrorMessage = "Please type DELETE in capital letters to confirm.";
+            return;
+        }
+
+        isDeletingCompany = true;
+        deleteErrorMessage = null;
+        try
+        {
+            var tenant = await TenantContext.GetActiveTenantAsync();
+            var targetTenantId = tenant?.TenantId ?? TenantContextService.DefaultTenantId;
+
+            var result = await TenantManager.DeleteEntireCompanyAsync(targetTenantId, currentUserEmail);
+            if (!result.Success)
+            {
+                deleteErrorMessage = result.ErrorMessage ?? "Failed to delete company.";
+                return;
+            }
+
+            try
+            {
+                await JSRuntime.InvokeVoidAsync("attendanceCache.clear");
+                await JSRuntime.InvokeVoidAsync("employeeCache.clear");
+            }
+            catch { }
+
+            await TenantContext.ClearActiveTenantAsync();
+
+            ToastService.ShowSuccess("✨ Company has been permanently deleted from Cloud and Local Database.");
+            showDeleteCompanyModal = false;
+            Navigation.NavigateTo("/company-setup", forceLoad: true);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error deleting company");
+            deleteErrorMessage = $"Deletion failed: {ex.Message}";
+        }
+        finally
+        {
+            isDeletingCompany = false;
+        }
+    }
+
+    private async Task LoadSetupDataAsync()
+    {
+        isLoading = true;
+        errorMessage = null;
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+
+            var tenant = await TenantContext.GetActiveTenantAsync();
+            var targetSettingId = tenant?.CompanySettingId > 0 ? tenant.CompanySettingId : 1;
+            var targetFeatureId = tenant?.FeatureSettingsId > 0 ? tenant.FeatureSettingsId : 1;
+
+            // 1. Load Company Setting
+            var cs = await db.CompanySettings.FirstOrDefaultAsync(c => c.SettingID == targetSettingId);
+            if (cs != null)
+            {
+                companyName = cs.CompanyName ?? (tenant?.CompanyName ?? "BioMetric Payroll System");
+                addressLine1 = cs.AddressLine1 ?? "";
+                cityStatePincode = cs.CityStatePincode ?? "";
+                officeLatitude = cs.OfficeLatitude;
+                officeLongitude = cs.OfficeLongitude;
+                geoRadiusMeters = cs.GeoRadiusMeters;
+                workDayCutoffHour = cs.WorkDayCutoffHour;
+                lateGraceMinutes = cs.LateGraceMinutes;
+                endTimeGraceMinutes = cs.EndTimeGraceMinutes;
+                salaryCalcMethod = cs.SalaryCalculationMethod ?? "Days in Month";
+            }
+
+            // 2. Load Feature Settings
+            var fs = await db.FeatureSettings.FirstOrDefaultAsync(f => f.Id == targetFeatureId);
+            if (fs != null)
+            {
+                features = fs;
+                isOfflineMode = fs.IsOfflineMode || string.Equals(fs.DeploymentMode, "Offline", StringComparison.OrdinalIgnoreCase);
+            }
+
+            // 3. Load Tenant metadata if present
+            if (tenant == null)
+            {
+                tenant = await db.CompanyTenants.FirstOrDefaultAsync(t => t.TenantId == TenantContextService.DefaultTenantId);
+            }
+            if (tenant != null)
+            {
+                companyCode = tenant.CompanyCode;
+                iconEmoji = tenant.IconEmoji;
+                if (!string.IsNullOrWhiteSpace(tenant.AdminEmail)) adminEmail = tenant.AdminEmail;
+                if (!string.IsNullOrWhiteSpace(tenant.AdminName)) adminName = tenant.AdminName;
+                if (!string.IsNullOrWhiteSpace(tenant.AdminPhone)) adminPhone = tenant.AdminPhone;
+                if (tenant.IsOfflineMode || string.Equals(tenant.DeploymentMode, "Offline", StringComparison.OrdinalIgnoreCase))
+                    isOfflineMode = true;
+            }
+
+            // 4. Check AppMode
+            if (await AppMode.IsOfflineModeAsync())
+            {
+                isOfflineMode = true;
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to load company setup.");
+            errorMessage = "Unable to load company setup profile.";
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private async Task SaveSetupAsync()
+    {
+        errorMessage = null;
+        successMessage = null;
+
+        if (string.IsNullOrWhiteSpace(companyName))
+        {
+            errorMessage = "Company Name is required.";
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(adminEmail))
+        {
+            errorMessage = "Admin Email is required.";
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(adminPassword))
+        {
+            if (adminPassword.Length < 6)
+            {
+                errorMessage = "Password must be at least 6 characters.";
+                return;
+            }
+
+            if (adminPassword != adminPasswordConfirm)
+            {
+                errorMessage = "Passwords do not match.";
+                return;
+            }
+        }
+
+        isSaving = true;
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+
+            var activeTenant = await TenantContext.GetActiveTenantAsync();
+            var targetSettingId = activeTenant?.CompanySettingId > 0 ? activeTenant.CompanySettingId : 1;
+            var targetFeatureId = activeTenant?.FeatureSettingsId > 0 ? activeTenant.FeatureSettingsId : 1;
+            var targetTenantId = activeTenant?.TenantId ?? TenantContextService.DefaultTenantId;
+
+            // 1. Save CompanySettings
+            var cs = await db.CompanySettings.FirstOrDefaultAsync(c => c.SettingID == targetSettingId);
+            if (cs == null)
+            {
+                cs = new CompanySetting { SettingID = targetSettingId };
+                db.CompanySettings.Add(cs);
+            }
+
+            cs.CompanyName = companyName.Trim();
+            cs.AddressLine1 = addressLine1?.Trim() ?? "";
+            cs.CityStatePincode = cityStatePincode?.Trim() ?? "";
+            cs.OfficeLatitude = officeLatitude;
+            cs.OfficeLongitude = officeLongitude;
+            cs.GeoRadiusMeters = geoRadiusMeters;
+            cs.WorkDayCutoffHour = workDayCutoffHour;
+            cs.LateGraceMinutes = lateGraceMinutes;
+            cs.EndTimeGraceMinutes = endTimeGraceMinutes;
+            cs.SalaryCalculationMethod = salaryCalcMethod;
+
+            // 2. Save FeatureSettings
+            var fs = await db.FeatureSettings.FirstOrDefaultAsync(f => f.Id == targetFeatureId);
+            if (fs == null)
+            {
+                fs = new FeatureSettings { Id = targetFeatureId };
+                db.FeatureSettings.Add(fs);
+            }
+
+            fs.EnablePayroll = features.EnablePayroll;
+            fs.EnableGeoFencing = features.EnableGeoFencing;
+            fs.EnableDualAttendance = features.EnableDualAttendance;
+            fs.EnableSalaryAdvance = features.EnableSalaryAdvance;
+            fs.EnableBonusManagement = features.EnableBonusManagement;
+            fs.EnableLeaveManagement = features.EnableLeaveManagement;
+            fs.EnableShiftScheduling = features.EnableShiftScheduling;
+            fs.EnablePunchCorrection = features.EnablePunchCorrection;
+            fs.EnableTaxDeclarations = features.EnableTaxDeclarations;
+            fs.EnableResignationModule = features.EnableResignationModule;
+            fs.EnableFlexibleBenefits = features.EnableFlexibleBenefits;
+            fs.EnableCompanyReports = features.EnableCompanyReports;
+            fs.IsOfflineMode = isOfflineMode;
+            fs.DeploymentMode = isOfflineMode ? "Offline" : "Online";
+
+            // 3. Save CompanyTenant record
+            var tenant = await db.CompanyTenants.FirstOrDefaultAsync(t => t.TenantId == targetTenantId);
+            if (tenant == null)
+            {
+                tenant = new CompanyTenant
+                {
+                    TenantId = targetTenantId,
+                    CreatedAtUtc = DateTime.UtcNow
+                };
+                db.CompanyTenants.Add(tenant);
+            }
+
+            tenant.CompanyName = companyName.Trim();
+            tenant.CompanyCode = string.IsNullOrWhiteSpace(companyCode) ? "PRIMARY" : companyCode.Trim().ToUpperInvariant();
+            tenant.IconEmoji = iconEmoji;
+            tenant.AdminEmail = adminEmail.Trim();
+            tenant.AdminName = adminName.Trim();
+            tenant.AdminPhone = adminPhone?.Trim();
+            tenant.IsOfflineMode = isOfflineMode;
+            tenant.DeploymentMode = isOfflineMode ? "Offline" : "Online";
+            tenant.IsActive = true;
+            tenant.CompanySettingId = targetSettingId;
+            tenant.FeatureSettingsId = targetFeatureId;
+
+            await db.SaveChangesAsync();
+
+            // 4. Update Admin User Credentials in Identity
+            var adminUser = await UserManager.FindByEmailAsync(adminEmail.Trim());
+            if (adminUser != null)
+            {
+                if (!string.IsNullOrWhiteSpace(adminPassword))
+                {
+                    var token = await UserManager.GeneratePasswordResetTokenAsync(adminUser);
+                    var resetRes = await UserManager.ResetPasswordAsync(adminUser, token, adminPassword);
+                    if (!resetRes.Succeeded)
+                    {
+                        await UserManager.RemovePasswordAsync(adminUser);
+                        await UserManager.AddPasswordAsync(adminUser, adminPassword);
+                    }
+                }
+            }
+            else
+            {
+                // Create user if not existing
+                if (!await RoleManager.RoleExistsAsync("SuperAdmin"))
+                    await RoleManager.CreateAsync(new IdentityRole("SuperAdmin"));
+                if (!await RoleManager.RoleExistsAsync("Admin"))
+                    await RoleManager.CreateAsync(new IdentityRole("Admin"));
+
+                adminUser = new IdentityUser
+                {
+                    UserName = adminEmail.Trim(),
+                    Email = adminEmail.Trim(),
+                    EmailConfirmed = true
+                };
+
+                var pwd = string.IsNullOrWhiteSpace(adminPassword) ? "Admin@123" : adminPassword;
+                var createRes = await UserManager.CreateAsync(adminUser, pwd);
+                if (createRes.Succeeded)
+                {
+                    await UserManager.AddToRoleAsync(adminUser, "SuperAdmin");
+                    await UserManager.AddToRoleAsync(adminUser, "Admin");
+                }
+            }
+
+            // 5. Update AppMode
+            await AppMode.SetOfflineModeAsync(isOfflineMode);
+
+            // 6. If online, sync to Firebase
+            if (!isOfflineMode)
+            {
+                try
+                {
+                    var compPayload = new Dictionary<string, object?>
+                    {
+                        ["companyName"] = tenant.CompanyName,
+                        ["officeLatitude"] = cs.OfficeLatitude,
+                        ["officeLongitude"] = cs.OfficeLongitude,
+                        ["geoRadiusMeters"] = cs.GeoRadiusMeters,
+                        ["workDayCutoffHour"] = cs.WorkDayCutoffHour
+                    };
+                    await Firebase.SetAsync($"owners/{tenant.TenantId}/company_settings/1", compPayload, default);
+                    await Firebase.SetAsync($"owners/{tenant.TenantId}/feature_settings/1", fs, default);
+                }
+                catch (Exception fbEx)
+                {
+                    Logger.LogWarning(fbEx, "Firebase cloud sync deferred during company setup.");
+                }
+            }
+
+            await RefreshService.NotifyGlobalRefreshAsync("COMPANY_SETUP_COMPLETED");
+            successMessage = "✨ Company setup saved successfully! All settings and administrator credentials have been updated.";
+            ToastService.ShowSuccess(successMessage);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to save company setup.");
+            errorMessage = $"Error saving company setup: {ex.Message}";
+            ToastService.ShowError(errorMessage);
+        }
+        finally
+        {
+            isSaving = false;
+        }
+    }
+}

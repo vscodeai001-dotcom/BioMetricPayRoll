@@ -1,4 +1,4 @@
-﻿using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 
 namespace Payroll.Shared
@@ -6,6 +6,9 @@ namespace Payroll.Shared
     [Table("salaryadvances")]
     public class SalaryAdvance
     {
+        // Firebase record key only. This is not persisted in the legacy SQL schema.
+        [NotMapped]
+        public string? FirebaseKey { get; set; }
         [Key]
         [Column("advanceid")]
         public int AdvanceID { get; set; }

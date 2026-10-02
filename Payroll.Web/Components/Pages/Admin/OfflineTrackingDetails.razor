@@ -5,6 +5,9 @@
 @using global::Payroll.Web.Services
 @implements IAsyncDisposable
 @inject IDbContextFactory<AppDbContext> DbFactory
+@inject FirebaseEmployeeManagementService FirebaseEmployees
+@inject AttendanceRefreshService AttendanceRefresh
+@inject ILogger<OfflineTrackingDetails> Logger
 @attribute [Authorize(Roles = "Admin, SuperAdmin")]
 
 <PageTitle>Offline GPS Tracking Details</PageTitle>
@@ -140,10 +143,131 @@
             </div>
         </div>
 
+        <!-- Offline Disconnection Intervals (Missing Window Reconciliation) -->
         <div class="card shadow-sm border-0 mb-4">
             <div class="card-header d-flex justify-content-between align-items-center">
-                <strong><i class="bi bi-map me-2"></i>Offline Route / Point Ledger</strong>
-                <span class="badge bg-primary-subtle text-primary">@points.Count points</span>
+                <div>
+                    <strong><i class="bi bi-clock-history me-2 text-warning"></i>Offline Disconnection Intervals (Missing Window Reconciliation)</strong>
+                    <div class="small text-muted">Time periods when employee mobile was offline (airplane mode, network disconnected) and re-integrated upon reconnection.</div>
+                </div>
+                <div class="d-flex align-items-center gap-2">
+                    @if (!string.IsNullOrEmpty(selectedPeriodId))
+                    {
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="ClearPeriodFilter">
+                            <i class="bi bi-x-circle me-1"></i>Show All Points
+                        </button>
+                    }
+                    <span class="badge bg-warning text-dark">@offlinePeriods.Count offline periods</span>
+                </div>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-sm table-hover align-middle mb-0">
+                        <thead>
+                            <tr>
+                                <th>Employee</th>
+                                <th>Offline Started (IST)</th>
+                                <th>Reconnected (IST)</th>
+                                <th>Duration</th>
+                                <th>Disconnect Reason</th>
+                                <th>Offline Punches in Gap</th>
+                                <th>Breadcrumbs</th>
+                                <th>Geofence</th>
+                                <th>Reconciliation Status</th>
+                                <th class="text-end">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        @foreach (var period in offlinePeriods)
+                        {
+                            var isSelected = period.Id == selectedPeriodId;
+                            <tr class="@(isSelected ? "table-warning fw-semibold" : "")">
+                                <td><strong>@period.EmployeeName</strong><div class="small text-muted">#@period.EmployeeId</div></td>
+                                <td class="nowrap"><i class="bi bi-wifi-off text-danger me-1"></i>@FormatIst(period.OfflineStartedUtc)</td>
+                                <td class="nowrap"><i class="bi bi-wifi text-success me-1"></i>@FormatIst(period.OfflineEndedUtc)</td>
+                                <td><span class="badge bg-dark-subtle text-dark">@FormatDuration(period.Duration)</span></td>
+                                <td><span class="badge bg-secondary-subtle text-secondary"><i class="bi bi-airplane me-1"></i>@period.DisconnectReason</span></td>
+                                <td>
+                                    @if (period.Punches.Any())
+                                    {
+                                        <div class="d-flex flex-column gap-1">
+                                        @foreach (var p in period.Punches)
+                                        {
+                                            var isOut = p.Type.Equals("OUT", StringComparison.OrdinalIgnoreCase);
+                                            <span class="badge @(isOut ? "bg-danger-subtle text-danger border border-danger-subtle" : "bg-success-subtle text-success border border-success-subtle") text-start">
+                                                @(isOut ? "🔴 OUT" : "🟢 IN") @FormatIst(p.PunchTimeUtc, "HH:mm")
+                                                <small class="d-block fw-normal text-muted">(Recorded Offline)</small>
+                                            </span>
+                                        }
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <span class="text-muted small"><i class="bi bi-dash-circle me-1"></i>None</span>
+                                    }
+                                </td>
+                                <td><span class="badge bg-info-subtle text-info-emphasis">@period.PointCount points</span> · @FormatDistance(period.TotalDistanceMeters)</td>
+                                <td>
+                                    <span class="badge bg-success-subtle text-success">@period.WithinRadiusCount IN</span>
+                                    @if (period.PointCount - period.WithinRadiusCount > 0)
+                                    {
+                                        <span class="badge bg-danger-subtle text-danger ms-1">@(period.PointCount - period.WithinRadiusCount) OUT</span>
+                                    }
+                                </td>
+                                <td>
+                                    @if (period.IsFullySynced)
+                                    {
+                                        <div>
+                                            <span class="badge bg-success"><i class="bi bi-check-circle-fill me-1"></i>Reconciled to Live</span>
+                                            <div class="small text-primary mt-1">
+                                                Pushed to cloud: @(period.Punches.Any() ? $"{period.Punches.Count} punches & " : "")@period.PointCount points merged
+                                            </div>
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <div>
+                                            <span class="badge bg-warning text-dark"><i class="bi bi-hourglass-split me-1"></i>Sync Pending</span>
+                                            <div class="small text-warning-emphasis mt-1">Buffered on device</div>
+                                        </div>
+                                    }
+                                </td>
+                                <td class="text-end">
+                                    <button class="btn btn-sm @(isSelected ? "btn-warning" : "btn-outline-primary")" @onclick="() => TogglePeriodFilter(period.Id)">
+                                        <i class="bi @(isSelected ? "bi-check2-circle" : "bi-eye") me-1"></i>@(isSelected ? "Active Filter" : "Inspect Route")
+                                    </button>
+                                </td>
+                            </tr>
+                        }
+                        </tbody>
+                    </table>
+                </div>
+                @if (!offlinePeriods.Any())
+                {
+                    <div class="p-4 text-center text-muted">
+                        <i class="bi bi-check-circle text-success fs-4 d-block mb-1"></i>
+                        No offline disconnect periods recorded in the selected date range. All tracking was captured online in real-time.
+                    </div>
+                }
+            </div>
+        </div>
+
+        <div class="card shadow-sm border-0 mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <div>
+                    <strong><i class="bi bi-map me-2"></i>Offline Route / Point Ledger</strong>
+                    @if (!string.IsNullOrEmpty(selectedPeriodId))
+                    {
+                        <span class="badge bg-warning text-dark ms-2">Filtered to selected offline period</span>
+                    }
+                </div>
+                <div class="d-flex align-items-center gap-2">
+                    @if (!string.IsNullOrEmpty(selectedPeriodId))
+                    {
+                        <button class="btn btn-sm btn-link text-decoration-none p-0" @onclick="ClearPeriodFilter">Clear Filter</button>
+                    }
+                    <span class="badge bg-primary-subtle text-primary">@DisplayedPoints.Count points</span>
+                </div>
             </div>
             <div class="card-body p-0">
                 <div class="table-responsive offline-ledger">
@@ -156,7 +280,7 @@
                             </tr>
                         </thead>
                         <tbody>
-                        @foreach (var p in points)
+                        @foreach (var p in DisplayedPoints)
                         {
                             <tr>
                                 <td class="nowrap">@FormatIst(p.CapturedAtUtc)</td>
@@ -176,7 +300,7 @@
                         </tbody>
                     </table>
                 </div>
-                @if (!points.Any())
+                @if (!DisplayedPoints.Any())
                 {
                     <div class="p-4 text-center text-muted">No GPS points match the selected filters.</div>
                 }
@@ -240,6 +364,8 @@
     }
 </div>
 
+<AttendanceRefreshListener OnAttendanceChanged="HandleAttendanceChanged" OnLocationChanged="HandleAttendanceChanged" />
+
 <style>
 .enterprise-offline-page { min-width: 0; }
 .enterprise-offline-page .card { border-radius: 14px; overflow: hidden; }
@@ -273,7 +399,7 @@
     private bool loading;
     private string? error;
     private int employeeFilter;
-    private string captureFilter = "OfflineSync";
+    private string captureFilter = "";
     private string sessionFilter = "";
     private DateTime fromDate = DateTime.Today.AddDays(-1);
     private DateTime toDate = DateTime.Today;
@@ -281,11 +407,82 @@
     private List<EmployeeOption> employees = new();
     private List<LiveRow> liveRows = new();
     private List<PointRow> points = new();
+    private List<OfflinePeriodRow> offlinePeriods = new();
     private List<SessionRow> sessions = new();
     private List<AuditRow> auditEvents = new();
     private Summary summary = new();
+    private string? selectedPeriodId;
 
-    protected override async Task OnInitializedAsync() => await LoadAsync();
+    private List<PointRow> DisplayedPoints =>
+        string.IsNullOrEmpty(selectedPeriodId)
+            ? points
+            : offlinePeriods.FirstOrDefault(p => p.Id == selectedPeriodId)?.Points ?? points;
+
+    private void TogglePeriodFilter(string periodId)
+    {
+        selectedPeriodId = selectedPeriodId == periodId ? null : periodId;
+    }
+
+    private void ClearPeriodFilter()
+    {
+        selectedPeriodId = null;
+    }
+
+    private static string FormatDuration(TimeSpan span)
+    {
+        if (span.TotalDays >= 1) return $"{(int)span.TotalDays}d {span.Hours}h {span.Minutes}m";
+        if (span.TotalHours >= 1) return $"{(int)span.TotalHours}h {span.Minutes}m {span.Seconds}s";
+        if (span.TotalMinutes >= 1) return $"{(int)span.TotalMinutes}m {span.Seconds}s";
+        return $"{Math.Max(1, span.Seconds)}s";
+    }
+
+    private CancellationTokenSource? cts;
+    private PeriodicTimer? timer;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        cts = new CancellationTokenSource();
+        timer = new PeriodicTimer(TimeSpan.FromSeconds(10));
+        _ = RefreshLoopAsync(cts.Token);
+    }
+
+    private async Task HandleAttendanceChanged()
+    {
+        try
+        {
+            await InvokeAsync(async () =>
+            {
+                await LoadAsync();
+                StateHasChanged();
+            });
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Error reacting to attendance/location event in OfflineTrackingDetails");
+        }
+    }
+
+    private async Task RefreshLoopAsync(CancellationToken token)
+    {
+        try
+        {
+            while (await timer!.WaitForNextTickAsync(token))
+            {
+                if (loading) continue;
+                await InvokeAsync(async () =>
+                {
+                    await LoadAsync();
+                    StateHasChanged();
+                });
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "Offline tracking background refresh loop stopped.");
+        }
+    }
 
     private async Task LoadAsync()
     {
@@ -295,11 +492,14 @@
         {
             await using var db = await DbFactory.CreateDbContextAsync();
 
-            employees = await db.Employees.AsNoTracking()
+            var allEmployees = (await FirebaseEmployees.GetEmployeesAsync())
                 .Where(x => !x.IsDeleted)
                 .OrderBy(x => x.Name)
                 .Select(x => new EmployeeOption { EmployeeID = x.EmployeeID, Name = x.Name })
-                .ToListAsync();
+                .ToList();
+
+            // Retain full employee list for the dropdown filter
+            employees = allEmployees;
 
             var fromUtc = IndiaToUtc(fromDate.Date);
             var toUtc = IndiaToUtc(toDate.Date.AddDays(1));
@@ -320,18 +520,21 @@
             if (Guid.TryParse(sessionFilter, out var sessionId))
                 historyQuery = historyQuery.Where(x => x.SessionId == sessionId);
 
-            var rawPoints = await (from p in historyQuery
-                                   join e in db.Employees.AsNoTracking() on p.EmployeeId equals e.EmployeeID
-                                   orderby p.CapturedAtUtc ascending
-                                   select new PointRow
-                                   {
-                                       EmployeeId = p.EmployeeId, EmployeeName = e.Name, SessionId = p.SessionId,
-                                       Latitude = p.Latitude, Longitude = p.Longitude, AccuracyMeters = p.AccuracyMeters,
-                                       DistanceMeters = p.DistanceFromOfficeMeters, RadiusMeters = p.AllowedRadiusMeters,
-                                       WithinRadius = p.IsWithinAllowedRadius, CapturedAtUtc = p.CapturedAtUtc,
-                                       CaptureSource = p.CaptureSource, SyncBatchId = p.SyncBatchId, SyncedAtUtc = p.SyncedAtUtc,
-                                       RecordedAtUtc = p.RecordedAtUtc
-                                   }).Take(2000).ToListAsync();
+            var rawPoints = await historyQuery
+                .OrderBy(p => p.CapturedAtUtc)
+                .Select(p => new PointRow
+                {
+                    EmployeeId = p.EmployeeId, SessionId = p.SessionId,
+                    Latitude = p.Latitude, Longitude = p.Longitude, AccuracyMeters = p.AccuracyMeters,
+                    DistanceMeters = p.DistanceFromOfficeMeters, RadiusMeters = p.AllowedRadiusMeters,
+                    WithinRadius = p.IsWithinAllowedRadius, CapturedAtUtc = p.CapturedAtUtc,
+                    CaptureSource = p.CaptureSource, SyncBatchId = p.SyncBatchId, SyncedAtUtc = p.SyncedAtUtc,
+                    RecordedAtUtc = p.RecordedAtUtc
+                }).Take(2000).ToListAsync();
+
+            var employeeNames = allEmployees.ToDictionary(x => x.EmployeeID, x => x.Name);
+            foreach (var row in rawPoints)
+                row.EmployeeName = employeeNames.TryGetValue(row.EmployeeId, out var n) ? n : $"Employee {row.EmployeeId}";
 
             points = BuildPointRows(rawPoints);
 
@@ -339,42 +542,91 @@
             if (employeeFilter > 0) sessionQuery = sessionQuery.Where(x => x.EmployeeId == employeeFilter);
             if (Guid.TryParse(sessionFilter, out var sessionId2)) sessionQuery = sessionQuery.Where(x => x.SessionId == sessionId2);
 
-            var rawSessions = await (from s in sessionQuery
-                                     join e in db.Employees.AsNoTracking() on s.EmployeeId equals e.EmployeeID
-                                     where s.StartedAtUtc < toUtc &&
-                                           (s.EndedAtUtc == null || s.EndedAtUtc >= fromUtc)
-                                     orderby s.StartedAtUtc descending
-                                     select new SessionRow
-                                     {
-                                         EmployeeId = s.EmployeeId, EmployeeName = e.Name, SessionId = s.SessionId,
-                                         StartedUtc = s.StartedAtUtc, LastUpdateUtc = s.LastUpdateAtUtc,
-                                         EndedUtc = s.EndedAtUtc, EndReason = s.EndReason,
-                                         TotalPoints = s.TotalPoints, TotalDistanceMeters = s.TotalDistanceMeters
-                                     }).Take(500).ToListAsync();
+            var rawSessions = await sessionQuery
+                .Where(s => s.StartedAtUtc < toUtc &&
+                            (s.EndedAtUtc == null || s.EndedAtUtc >= fromUtc))
+                .OrderByDescending(s => s.StartedAtUtc)
+                .Select(s => new SessionRow
+                {
+                    EmployeeId = s.EmployeeId, SessionId = s.SessionId,
+                    StartedUtc = s.StartedAtUtc, LastUpdateUtc = s.LastUpdateAtUtc,
+                    EndedUtc = s.EndedAtUtc, EndReason = s.EndReason,
+                    TotalPoints = s.TotalPoints, TotalDistanceMeters = s.TotalDistanceMeters
+                }).Take(500).ToListAsync();
+
+            foreach (var row in rawSessions)
+                row.EmployeeName = employeeNames.TryGetValue(row.EmployeeId, out var n) ? n : $"Employee {row.EmployeeId}";
 
             sessions = rawSessions;
 
-            var live = LiveLocationStore.GetAll();
-            var names = employees.ToDictionary(x => x.EmployeeID, x => x.Name);
-            liveRows = live
-                .Where(x => employeeFilter == 0 || x.EmployeeId == employeeFilter)
-                .Select(x => new LiveRow
-                {
-                    EmployeeId = x.EmployeeId,
-                    EmployeeName = names.TryGetValue(x.EmployeeId, out var n) ? n : $"Employee #{x.EmployeeId}",
-                    Status = LiveLocationStore.GetStatus(x).ToString(),
-                    LastUpdatedUtc = x.LastUpdatedUtc,
-                    Age = FormatAge(LiveLocationStore.GetAge(x)),
-                    Movement = x.MovementState,
-                    SpeedKmh = x.SpeedMps * 3.6,
-                    WithinRadius = x.IsWithinAllowedRadius
-                })
-                .OrderBy(x => x.Status == "Live" ? 0 : x.Status == "Stale" ? 1 : 2)
-                .ThenBy(x => x.EmployeeName)
-                .ToList();
+            var liveLocations = LiveLocationStore.GetAll().ToDictionary(x => x.EmployeeId);
+            var targetEmployees = employeeFilter > 0
+                ? allEmployees.Where(e => e.EmployeeID == employeeFilter).ToList()
+                : allEmployees;
 
-            // AUTH_SESSION and GPS/offline related audit entries. Details are
-            // retained verbatim so this screen explains recovery decisions.
+            var targetEmpIds = targetEmployees.Select(e => e.EmployeeID).ToList();
+
+            var recentHistory = await db.EmployeeLocationHistory.AsNoTracking()
+                .Where(x => targetEmpIds.Contains(x.EmployeeId))
+                .OrderByDescending(x => x.CapturedAtUtc)
+                .Take(500)
+                .ToListAsync();
+
+            var historyMap = recentHistory
+                .GroupBy(x => x.EmployeeId)
+                .ToDictionary(g => g.Key, g => g.First());
+
+            liveRows = targetEmployees.Select(e =>
+            {
+                if (liveLocations.TryGetValue(e.EmployeeID, out var liveLoc))
+                {
+                    var status = LiveLocationStore.GetStatus(liveLoc);
+                    return new LiveRow
+                    {
+                        EmployeeId = e.EmployeeID,
+                        EmployeeName = e.Name,
+                        Status = status.ToString(),
+                        LastUpdatedUtc = liveLoc.LastUpdatedUtc,
+                        Age = FormatAge(LiveLocationStore.GetAge(liveLoc)),
+                        Movement = liveLoc.MovementState,
+                        SpeedKmh = liveLoc.SpeedMps * 3.6,
+                        WithinRadius = liveLoc.IsWithinAllowedRadius
+                    };
+                }
+                else if (historyMap.TryGetValue(e.EmployeeID, out var hist))
+                {
+                    var age = DateTime.UtcNow - hist.CapturedAtUtc;
+                    return new LiveRow
+                    {
+                        EmployeeId = e.EmployeeID,
+                        EmployeeName = e.Name,
+                        Status = "Offline",
+                        LastUpdatedUtc = hist.CapturedAtUtc,
+                        Age = FormatAge(age),
+                        Movement = "No active session",
+                        SpeedKmh = 0,
+                        WithinRadius = hist.IsWithinAllowedRadius
+                    };
+                }
+                else
+                {
+                    return new LiveRow
+                    {
+                        EmployeeId = e.EmployeeID,
+                        EmployeeName = e.Name,
+                        Status = "Offline",
+                        LastUpdatedUtc = DateTime.MinValue,
+                        Age = "Never",
+                        Movement = "No GPS data",
+                        SpeedKmh = 0,
+                        WithinRadius = false
+                    };
+                }
+            })
+            .OrderBy(x => x.Status == "Live" ? 0 : x.Status == "Stale" ? 1 : 2)
+            .ThenBy(x => x.EmployeeName)
+            .ToList();
+
             var auditQuery = db.AuditLogs.AsNoTracking()
                 .Where(x => x.Timestamp >= fromUtc && x.Timestamp < toUtc)
                 .Where(x =>
@@ -384,9 +636,12 @@
                     x.ActionType.Contains("OFFLINE"));
 
             if (employeeFilter > 0)
-                auditQuery = auditQuery.Where(x => x.EntityID == employeeFilter.ToString());
+            {
+                var empStr = employeeFilter.ToString();
+                auditQuery = auditQuery.Where(x => x.EntityID == empStr);
+            }
 
-            auditEvents = (await auditQuery
+            auditEvents = await auditQuery
                 .OrderByDescending(x => x.Timestamp)
                 .Take(300)
                 .Select(x => new AuditRow
@@ -396,16 +651,29 @@
                     EntityID = x.EntityID,
                     EventType = x.ActionType + " / " + x.EntityType,
                     Details = x.Details ?? ""
-                }).ToListAsync());
+                }).ToListAsync();
+
+            DateTime? maxCaptureUtc = points.Count > 0 ? points.Max(x => x.CapturedAtUtc) : null;
+            if (!maxCaptureUtc.HasValue)
+            {
+                var liveMax = liveRows.Where(r => r.LastUpdatedUtc != DateTime.MinValue).Select(r => (DateTime?)r.LastUpdatedUtc).DefaultIfEmpty(null).Max();
+                maxCaptureUtc = liveMax;
+            }
+
+            var periodPunches = await db.AttendanceLogs.AsNoTracking()
+                .Where(p => p.PunchTime >= fromUtc && p.PunchTime < toUtc)
+                .ToListAsync();
+
+            offlinePeriods = BuildOfflinePeriods(points, auditEvents, periodPunches);
 
             summary = new Summary
             {
-                Employees = points.Select(x => x.EmployeeId).Distinct().Count(),
+                Employees = targetEmployees.Count,
                 OfflinePoints = points.Count(x => x.CaptureSource == "OfflineSync"),
                 OfflineSessions = sessions.Count(x => x.EndedUtc.HasValue && (x.EndReason ?? "").Contains("OFFLINE", StringComparison.OrdinalIgnoreCase)),
                 Unsynced = points.Count(x => !x.SyncedAtUtc.HasValue && x.CaptureSource == "OfflineSync"),
                 DistanceMeters = sessions.Sum(x => x.TotalDistanceMeters),
-                LastCaptureUtc = points.Count == 0 ? null : points.Max(x => x.CapturedAtUtc)
+                LastCaptureUtc = maxCaptureUtc
             };
         }
         catch (Exception ex)
@@ -413,6 +681,104 @@
             error = "Unable to load offline tracking details: " + ex.Message;
         }
         finally { loading = false; }
+    }
+
+    private static List<OfflinePeriodRow> BuildOfflinePeriods(List<PointRow> allPoints, List<AuditRow> audits, List<AttendanceLog> punches)
+    {
+        var offlinePoints = allPoints
+            .Where(p => p.CaptureSource == "OfflineSync")
+            .OrderBy(p => p.CapturedAtUtc)
+            .ToList();
+
+        var result = new List<OfflinePeriodRow>();
+        if (!offlinePoints.Any()) return result;
+
+        foreach (var empGroup in offlinePoints.GroupBy(p => p.EmployeeId))
+        {
+            var currentPoints = new List<PointRow>();
+            PointRow? lastPoint = null;
+
+            foreach (var pt in empGroup)
+            {
+                if (lastPoint == null ||
+                    (pt.CapturedAtUtc - lastPoint.CapturedAtUtc).TotalMinutes > 15 ||
+                    pt.SessionId != lastPoint.SessionId)
+                {
+                    if (currentPoints.Any())
+                    {
+                        result.Add(CreatePeriod(currentPoints, audits, punches));
+                        currentPoints = new List<PointRow>();
+                    }
+                }
+                currentPoints.Add(pt);
+                lastPoint = pt;
+            }
+
+            if (currentPoints.Any())
+            {
+                result.Add(CreatePeriod(currentPoints, audits, punches));
+            }
+        }
+
+        return result.OrderByDescending(x => x.OfflineStartedUtc).ToList();
+    }
+
+    private static OfflinePeriodRow CreatePeriod(List<PointRow> cluster, List<AuditRow> audits, List<AttendanceLog> punches)
+    {
+        var first = cluster.First();
+        var last = cluster.Last();
+        var empId = first.EmployeeId;
+        var empName = first.EmployeeName;
+
+        var relatedAudit = audits.FirstOrDefault(a =>
+            a.EntityID == empId.ToString() &&
+            Math.Abs((a.Timestamp - first.CapturedAtUtc).TotalMinutes) < 30);
+
+        var reason = "Network Disconnected / Signal Loss";
+        if (relatedAudit != null)
+        {
+            if (relatedAudit.Details.Contains("AIRPLANE", StringComparison.OrdinalIgnoreCase) ||
+                relatedAudit.EventType.Contains("AIRPLANE", StringComparison.OrdinalIgnoreCase))
+                reason = "Airplane Mode";
+            else if (relatedAudit.Details.Contains("MANUAL", StringComparison.OrdinalIgnoreCase))
+                reason = "Mobile Data / Wi-Fi Off";
+        }
+
+        var punchesInGap = punches
+            .Where(p => p.EmployeeID == empId &&
+                        p.PunchTime >= first.CapturedAtUtc.AddMinutes(-2) &&
+                        p.PunchTime <= last.CapturedAtUtc.AddMinutes(2))
+            .OrderBy(p => p.PunchTime)
+            .Select(p => new ReconciledPunch
+            {
+                Type = p.LogType ?? "PUNCH",
+                PunchTimeUtc = p.PunchTime,
+                IsApproved = p.IsApproved
+            })
+            .ToList();
+
+        double totalDist = 0;
+        for (int i = 1; i < cluster.Count; i++)
+        {
+            totalDist += CalculateDistance(cluster[i - 1].Latitude, cluster[i - 1].Longitude, cluster[i].Latitude, cluster[i].Longitude);
+        }
+
+        return new OfflinePeriodRow
+        {
+            EmployeeId = empId,
+            EmployeeName = empName,
+            SessionId = first.SessionId,
+            OfflineStartedUtc = first.CapturedAtUtc,
+            OfflineEndedUtc = last.CapturedAtUtc,
+            PointCount = cluster.Count,
+            TotalDistanceMeters = totalDist,
+            WithinRadiusCount = cluster.Count(c => c.WithinRadius),
+            DisconnectReason = reason,
+            IsFullySynced = cluster.All(c => c.SyncedAtUtc.HasValue),
+            SyncedAtUtc = cluster.Select(c => c.SyncedAtUtc).Max(),
+            Points = cluster,
+            Punches = punchesInGap
+        };
     }
 
     private static List<PointRow> BuildPointRows(List<PointRow> rows)
@@ -461,11 +827,11 @@
     private static string FormatDistance(double meters) =>
         meters >= 1000 ? $"{meters / 1000d:F2} km" : $"{meters:F0} m";
 
-    private static string FormatIst(DateTime? utc) =>
+    private static string FormatIst(DateTime? utc, string format = "dd-MMM-yyyy HH:mm:ss") =>
         utc.HasValue ? TimeZoneInfo.ConvertTimeFromUtc(
             DateTime.SpecifyKind(utc.Value, DateTimeKind.Utc),
             TimeZoneInfo.FindSystemTimeZoneById(OperatingSystem.IsWindows() ? "India Standard Time" : "Asia/Kolkata"))
-            .ToString("dd-MMM-yyyy HH:mm:ss") : "-";
+            .ToString(format) : "-";
 
     private static DateTime IndiaToUtc(DateTime india) =>
         TimeZoneInfo.ConvertTimeToUtc(
@@ -481,7 +847,13 @@
         _ => "bg-danger"
     };
 
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    public async ValueTask DisposeAsync()
+    {
+        try { cts?.Cancel(); } catch { }
+        cts?.Dispose();
+        timer?.Dispose();
+        await ValueTask.CompletedTask;
+    }
 
     private sealed class EmployeeOption { public int EmployeeID { get; set; } public string Name { get; set; } = ""; }
     private sealed class LiveRow { public int EmployeeId { get; set; } public string EmployeeName { get; set; } = ""; public string Status { get; set; } = ""; public DateTime LastUpdatedUtc { get; set; } public string Age { get; set; } = ""; public string Movement { get; set; } = ""; public double SpeedKmh { get; set; } public bool WithinRadius { get; set; } }
@@ -492,6 +864,30 @@
         public double DistanceMeters { get; set; } public int RadiusMeters { get; set; } public bool WithinRadius { get; set; }
         public DateTime CapturedAtUtc { get; set; } public string CaptureSource { get; set; } = ""; public Guid? SyncBatchId { get; set; }
         public DateTime? SyncedAtUtc { get; set; } public DateTime RecordedAtUtc { get; set; } public double SpeedKmh { get; set; } public string Movement { get; set; } = "Stopped";
+    }
+    private sealed class OfflinePeriodRow
+    {
+        public string Id { get; set; } = Guid.NewGuid().ToString("N");
+        public int EmployeeId { get; set; }
+        public string EmployeeName { get; set; } = "";
+        public Guid SessionId { get; set; }
+        public DateTime OfflineStartedUtc { get; set; }
+        public DateTime OfflineEndedUtc { get; set; }
+        public TimeSpan Duration => OfflineEndedUtc >= OfflineStartedUtc ? OfflineEndedUtc - OfflineStartedUtc : TimeSpan.Zero;
+        public int PointCount { get; set; }
+        public double TotalDistanceMeters { get; set; }
+        public int WithinRadiusCount { get; set; }
+        public string DisconnectReason { get; set; } = "Network Disconnected";
+        public bool IsFullySynced { get; set; }
+        public DateTime? SyncedAtUtc { get; set; }
+        public List<PointRow> Points { get; set; } = new();
+        public List<ReconciledPunch> Punches { get; set; } = new();
+    }
+    private sealed class ReconciledPunch
+    {
+        public string Type { get; set; } = "IN";
+        public DateTime PunchTimeUtc { get; set; }
+        public bool IsApproved { get; set; } = true;
     }
     private sealed class SessionRow
     {

@@ -11,6 +11,8 @@
 @inject IToastService toastService
 @inject NavigationManager Navigation
 @inject AuthenticationStateProvider AuthenticationStateProvider
+@inject Payroll.Web.Services.FirebaseEmployeeManagementService FirebaseEmployees
+@inject Payroll.Web.Services.FirebaseAttendanceCalendarMutationService FirebaseCalendar
 @attribute [Authorize(Roles = "Employee")]
 
 <PageTitle>Request Leave</PageTitle>
@@ -28,11 +30,33 @@
 }
 else
 {
-    <h3>Request New Leave</h3>
-    <p>Submit a request for paid leave, sick leave, or other time off. Your manager will be notified for approval.</p>
+    <div class="page-header-container">
+        <div class="d-flex align-items-center gap-3">
+            <div class="emoji-icon-badge emoji-icon-badge-warning">
+                🏖️
+            </div>
+            <div>
+                <h2 class="page-header-title">
+                    Apply for Leave & Time-Off
+                </h2>
+                <p class="page-header-subtitle">
+                    <span>🌴 Submit leave requests for manager approval & track status in real-time</span>
+                </p>
+            </div>
+        </div>
 
-    <div class="card shadow-sm">
-        <div class="card-body">
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+            <span class="badge bg-primary bg-opacity-10 text-primary rounded-pill px-3 py-2 fw-semibold">
+                🌴 Paid: @(linkedEmployee?.PaidLeaveBalance ?? 0) days
+            </span>
+            <span class="badge bg-success bg-opacity-10 text-success rounded-pill px-3 py-2 fw-semibold">
+                🤒 Sick: @(linkedEmployee?.SickLeaveBalance ?? 0) days
+            </span>
+        </div>
+    </div>
+
+    <div class="card shadow-sm border-0 rounded-4 mb-4">
+        <div class="card-body p-4">
             <EditForm Model="newLeaveRequest" OnValidSubmit="SubmitLeaveRequest">
                 <DataAnnotationsValidator />
                 <div class="row g-3">
@@ -88,8 +112,6 @@ else
     </div>
 }
 
-<AttendanceRefreshListener OnAttendanceChanged="HandleRealtimeRefresh" />
-
 @code {
     private LeaveRequest newLeaveRequest = new();
     private Employee? linkedEmployee;
@@ -139,9 +161,7 @@ else
 
         if (userEmail != null)
         {
-            linkedEmployee = await dbContext.Employees
-                .AsNoTracking()
-                .FirstOrDefaultAsync(e => e.Email == userEmail);
+            linkedEmployee = await FirebaseEmployees.GetEmployeeByEmailAsync(userEmail);
 
             if (linkedEmployee == null)
             {
@@ -177,6 +197,7 @@ else
             var firstLeaveDate = (DateTime?)null;
             var lastLeaveDate = (DateTime?)null;
 
+            var addedEntries = new List<LeaveRequest>();
             for (DateTime day = startDate; day <= endDate; day = day.AddDays(1))
             {
                 bool exists = await dbContext.LeaveRequests.AnyAsync(lr =>
@@ -192,10 +213,12 @@ else
                     LeaveDate = day,
                     LeaveType = newLeaveRequest.LeaveType,
                     IsApproved = false,
+                    Status = "Pending",
                     IsHalfDay = newLeaveRequest.IsHalfDay,
                     Notes = newLeaveRequest.Notes
                 };
                 dbContext.LeaveRequests.Add(newEntry);
+                addedEntries.Add(newEntry);
                 
                 if (firstLeaveDate == null)
                     firstLeaveDate = day;
@@ -208,8 +231,12 @@ else
             {
                 await dbContext.SaveChangesAsync();
 
-                var leaveEmployee = await dbContext.Employees.AsNoTracking()
-                    .FirstOrDefaultAsync(e => e.EmployeeID == linkedEmployee!.EmployeeID);
+                foreach (var entry in addedEntries)
+                {
+                    await FirebaseCalendar.UpsertLeaveAsync(entry, linkedEmployee.Name);
+                }
+
+                var leaveEmployee = await FirebaseEmployees.GetEmployeeAsync(linkedEmployee!.EmployeeID);
                 if (leaveEmployee != null)
                 {
                     await NotificationService.NotifyAdminsAsync(
@@ -256,19 +283,6 @@ else
         finally
         {
             isSubmitting = false;
-        }
-    }
-
-    private async Task HandleRealtimeRefresh()
-    {
-        try
-        {
-            await CheckPermissionsAndLoadData();
-            await InvokeAsync(StateHasChanged);
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"Realtime refresh failed: {ex}");
         }
     }
 }

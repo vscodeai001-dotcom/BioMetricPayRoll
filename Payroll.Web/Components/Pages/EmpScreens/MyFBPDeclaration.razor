@@ -8,6 +8,7 @@
 @inject IDbContextFactory<AppDbContext> DbFactory
 @inject FBPService FBPService
 @inject AuthenticationStateProvider AuthState
+@inject Payroll.Web.Services.FirebaseEmployeeManagementService FirebaseEmployees
 @inject IToastService toastService
 @inject NavigationManager Navigation
 @attribute [Authorize(Roles = "Employee, SuperAdmin")]
@@ -36,34 +37,60 @@ else if (linkedEmployee == null)
 else
 {
     <div class="d-flex flex-column h-100">
-        <h3 class="text-danger fw-bold mb-3 flex-shrink-0"><i class="bi bi-bank2 me-2"></i>Flexible Benefit Plan (FBP) Declaration</h3>
-        <p class="text-muted small mb-4 flex-shrink-0">
-            Allocate your annual FBP allowance to tax-exempt components. Allocations are locked for the financial year (@currentYear - @(currentYear + 1)).
-        </p>
+        <div class="page-header-container mb-4">
+            <div class="d-flex align-items-center gap-3">
+                <div class="emoji-icon-badge emoji-icon-badge-danger">
+                    🏛️
+                </div>
+                <div>
+                    <h2 class="page-header-title">
+                        Flexible Benefit Plan (FBP)
+                    </h2>
+                    <p class="page-header-subtitle">
+                        <span>💰 Allocate your annual allowance to tax-exempt benefit baskets for FY @currentYear - @(currentYear + 1)</span>
+                    </p>
+                </div>
+            </div>
+
+            <div class="d-flex align-items-center gap-2">
+                <span class="badge bg-danger bg-opacity-10 text-danger rounded-pill px-3 py-2 fw-semibold border border-danger border-opacity-25">
+                    <span>📑 Annual Salary Restructuring</span>
+                </span>
+            </div>
+        </div>
 
         @* --- TOP PANEL: SUMMARY & STATUS --- *@
         <div class="row g-3 mb-4 flex-shrink-0">
             <div class="col-md-4">
-                <div class="card bg-light border-0 py-2 h-100">
-                    <div class="card-body">
-                        <small class="text-muted d-block mb-1">Annual FBP Allowance</small>
-                        <h4 class="fw-bold mb-0 text-primary">₹ @AvailableAllowance.ToString("N0", InrCulture)</h4>
+                <div class="premium-stat-card border-start border-4 border-primary h-100">
+                    <div class="card-body p-3">
+                        <div class="d-flex align-items-center justify-content-between mb-2">
+                            <span class="stat-label">💼 Annual FBP Allowance</span>
+                            <span class="fs-4">💼</span>
+                        </div>
+                        <h4 class="stat-value text-primary mb-0">₹ @AvailableAllowance.ToString("N0", InrCulture)</h4>
                     </div>
                 </div>
             </div>
             <div class="col-md-4">
-                <div class="card bg-light border-0 py-2 h-100">
-                    <div class="card-body">
-                        <small class="text-muted d-block mb-1">Total Allocated</small>
-                        <h4 class="fw-bold mb-0 text-success">₹ @TotalAllocated.ToString("N0", InrCulture)</h4>
+                <div class="premium-stat-card border-start border-4 border-success h-100">
+                    <div class="card-body p-3">
+                        <div class="d-flex align-items-center justify-content-between mb-2">
+                            <span class="stat-label">✅ Total Allocated</span>
+                            <span class="fs-4">✅</span>
+                        </div>
+                        <h4 class="stat-value text-success mb-0">₹ @TotalAllocated.ToString("N0", InrCulture)</h4>
                     </div>
                 </div>
             </div>
             <div class="col-md-4">
-                <div class="card @(RemainingToAllocate < 0 ? "bg-danger text-white" : "bg-warning text-dark") border-0 py-2 h-100">
-                    <div class="card-body">
-                        <small class="d-block mb-1">Remaining Balance</small>
-                        <h4 class="fw-bold mb-0">₹ @RemainingToAllocate.ToString("N0", InrCulture)</h4>
+                <div class="premium-stat-card border-start border-4 @(RemainingToAllocate < 0 ? "border-danger" : "border-warning") h-100">
+                    <div class="card-body p-3">
+                        <div class="d-flex align-items-center justify-content-between mb-2">
+                            <span class="stat-label">⏳ Remaining Balance</span>
+                            <span class="fs-4">@(RemainingToAllocate < 0 ? "⚠️" : "⚖️")</span>
+                        </div>
+                        <h4 class="stat-value @(RemainingToAllocate < 0 ? "text-danger" : "text-warning") mb-0">₹ @RemainingToAllocate.ToString("N0", InrCulture)</h4>
                     </div>
                 </div>
             </div>
@@ -183,7 +210,7 @@ else
 
             var auth = await AuthState.GetAuthenticationStateAsync();
             var email = auth.User.Identity?.Name;
-            linkedEmployee = await db.Employees.AsNoTracking().FirstOrDefaultAsync(e => e.Email == email);
+            linkedEmployee = await FirebaseEmployees.GetEmployeeByEmailAsync(email);
 
             if (linkedEmployee != null)
             {

@@ -8,6 +8,8 @@
 @inject AuthenticationStateProvider AuthState
 @inject IToastService toastService
 @inject Payroll.Web.Services.AttendanceRefreshService AttendanceRefresh
+@inject Payroll.Web.Services.FirebaseAttendanceCalendarMutationService FirebaseCalendar
+@inject Payroll.Web.Services.AttendanceCalendarImpactService CalendarImpact
 @attribute [Authorize(Roles = "Admin, SuperAdmin")]
 
 <PageTitle>Holiday Management</PageTitle>
@@ -203,6 +205,9 @@ else
             
             dbContext.CompanyHolidays.Add(newHoliday);
             await dbContext.SaveChangesAsync();
+
+            await FirebaseCalendar.UpsertHolidayAsync(newHoliday);
+            await CalendarImpact.RecalculateHolidayDateAsync(newHoliday.HolidayDate);
             await AttendanceRefresh.NotifyGlobalRefreshAsync("HOLIDAY_CREATED");
 
             // --- NEW: Show success toast ---
@@ -235,8 +240,12 @@ else
         try
         {
             await using var dbContext = await DbFactory.CreateDbContextAsync();
+            var affectedDate = holidayToDelete.HolidayDate;
             dbContext.CompanyHolidays.Remove(holidayToDelete);
             await dbContext.SaveChangesAsync();
+
+            await FirebaseCalendar.DeleteHolidayAsync(holidayToDelete.HolidayID);
+            await CalendarImpact.RecalculateHolidayDateAsync(affectedDate);
             await AttendanceRefresh.NotifyGlobalRefreshAsync("HOLIDAY_DELETED");
             
             // --- NEW: Show success toast ---

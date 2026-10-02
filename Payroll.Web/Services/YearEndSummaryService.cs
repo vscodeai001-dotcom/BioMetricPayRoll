@@ -13,11 +13,13 @@ namespace Payroll.Web.Services
     {
         private readonly IDbContextFactory<AppDbContext> _dbFactory;
         private readonly ILogger<YearEndSummaryService> _logger;
+        private readonly FirebaseYearEndSummaryService _firebaseYearEnd;
 
-        public YearEndSummaryService(IDbContextFactory<AppDbContext> dbFactory, ILogger<YearEndSummaryService> logger)
+        public YearEndSummaryService(IDbContextFactory<AppDbContext> dbFactory, ILogger<YearEndSummaryService> logger, FirebaseYearEndSummaryService firebaseYearEnd)
         {
             _dbFactory = dbFactory;
             _logger = logger;
+            _firebaseYearEnd = firebaseYearEnd;
         }
 
         /// <summary>
@@ -77,7 +79,18 @@ namespace Payroll.Web.Services
             }
 
             await dbContext.SaveChangesAsync();
-            _logger.LogInformation("Year-End Consolidation complete. {Count} summaries saved.", summariesSaved);
+
+            // SQL remains the authoritative calculation boundary. Only after
+            // the transaction is committed do we publish the exact annual
+            // results to Firebase for Web/Android realtime visibility.
+            var publishedSummaries = await dbContext.YearEndSummaries
+                .AsNoTracking()
+                .Where(s => s.TaxYear == yearToProcess)
+                .OrderBy(s => s.EmployeeID)
+                .ToListAsync();
+
+            await _firebaseYearEnd.PublishAsync(publishedSummaries, yearToProcess);
+            _logger.LogInformation("Year-End Consolidation complete. {Count} summaries saved and projected to Firebase.", summariesSaved);
         }
     }
 }

@@ -1,4 +1,5 @@
-<AttendanceRefreshListener OnAttendanceChanged="HandleRealtimeRefresh" />
+<AttendanceRefreshListener OnAttendanceChanged="HandleRealtimeRefresh"
+                           OnGeoSettingsChanged="HandleRealtimeRefresh" />
 
 @using global::Payroll.Web.Services
 @using global::Payroll.Shared.Data
@@ -275,19 +276,19 @@
     .geo-map-wrapper {
         position: relative;
         width: 100%;
-        height: 190px;
-        min-height: 190px;
+        height: 360px;
+        min-height: 360px;
         overflow: hidden;
-        border-radius: 9px
+        border-radius: 12px
     }
 
     .geo-real-map {
         position: absolute;
         inset: 0;
         width: 100%;
-        height: 190px;
-        min-height: 190px;
-        border-radius: 9px;
+        height: 360px;
+        min-height: 360px;
+        border-radius: 12px;
         overflow: hidden;
         border: 1px solid rgba(13,110,253,.15);
         background: #e9ecef;
@@ -698,10 +699,21 @@
                         }
                     }
                 }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine(
-                        $"Automatic GPS attempt {automaticTrackingAttempts} failed: {ex}");
+                    if (ex is TaskCanceledException || ex.InnerException is TaskCanceledException)
+                    {
+                        locationMessage = "Waiting for device location...";
+                    }
+                    else
+                    {
+                        Console.Error.WriteLine(
+                            $"Automatic GPS attempt {automaticTrackingAttempts} failed: {ex.Message}");
+                    }
 
                     isLiveTracking = false;
 
@@ -777,7 +789,7 @@
         {
             var persistent = await JSRuntime.InvokeAsync<LocationData?>(
                 "getPersistentEmployeeGpsLocation",
-                30000);
+                300000);
 
             if (persistent != null &&
                 double.IsFinite(persistent.Latitude) &&
@@ -1032,6 +1044,61 @@
         lastLocationTime = DateTime.Now;
         locationMessage = null;
         mapNeedsUpdate = true;
+
+        await SyncLiveGpsToServiceAsync(coords);
+    }
+
+    private async Task SyncLiveGpsToServiceAsync(LocationData coords)
+    {
+        if (coords == null || EmployeeId <= 0 || !hasLocation)
+            return;
+
+        try
+        {
+            var liveLocation = LiveLocationStore.Get(EmployeeId);
+            Guid sessionId = liveLocation?.SessionId ?? Guid.Empty;
+
+            if (sessionId == Guid.Empty)
+            {
+                try
+                {
+                    var sIdStr = await JSRuntime.InvokeAsync<string>(
+                        "getOrCreateEmployeeGpsSessionId",
+                        "payroll_employee_gps_session_id",
+                        EmployeeId);
+
+                    if (Guid.TryParse(sIdStr, out var parsedGuid) && parsedGuid != Guid.Empty)
+                    {
+                        sessionId = parsedGuid;
+                    }
+                }
+                catch
+                {
+                    sessionId = Guid.NewGuid();
+                }
+            }
+
+            if (sessionId == Guid.Empty)
+            {
+                sessionId = Guid.NewGuid();
+            }
+
+            await GeoService.UpdateGpsSessionAsync(
+                EmployeeId,
+                sessionId,
+                coords.Latitude,
+                coords.Longitude,
+                NormalizeAccuracy(coords.Accuracy),
+                distanceMeters,
+                radius,
+                isWithinRadius,
+                DateTime.UtcNow,
+                allowSessionRecovery: true);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Failed to sync live GPS from widget: {ex.Message}");
+        }
     }
 
     private TimeSpan GetLiveDuration()

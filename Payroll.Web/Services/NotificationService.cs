@@ -17,17 +17,20 @@ namespace Payroll.Web.Services
         private readonly IHubContext<AttendanceRefreshHub> _hub;
         private readonly UserManager<IdentityUser> _userManager;
         private readonly ILogger<NotificationService> _logger;
+        private readonly FirebaseEmployeeManagementService _firebaseEmployees;
        
         public NotificationService(
             IDbContextFactory<AppDbContext> dbFactory,
             IHubContext<AttendanceRefreshHub> hub,
             UserManager<IdentityUser> userManager,
-            ILogger<NotificationService> logger)
+            ILogger<NotificationService> logger,
+            FirebaseEmployeeManagementService firebaseEmployees)
         {
             _dbFactory = dbFactory;
             _hub = hub;
             _userManager = userManager;
             _logger = logger;
+            _firebaseEmployees = firebaseEmployees;
         }
 
         public async Task SendNotificationAsync(string userId, string title, string message, string? url = null)
@@ -104,14 +107,12 @@ namespace Payroll.Web.Services
             string message,
             string? url = null)
         {
-            await using var db = await _dbFactory.CreateDbContextAsync();
-            var employee = await db.Employees
-                .AsNoTracking()
-                .FirstOrDefaultAsync(e => e.EmployeeID == employeeId);
-
+            var employee = await _firebaseEmployees.GetEmployeeAsync(employeeId);
             if (employee == null || string.IsNullOrWhiteSpace(employee.Email))
                 return;
 
+            // Identity account resolution remains on the server-side Identity
+            // boundary. Only the employee projection/name/email lookup moved to Firebase.
             var user = await _userManager.FindByEmailAsync(employee.Email);
             if (user == null)
                 return;

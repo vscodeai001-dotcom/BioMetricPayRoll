@@ -1,59 +1,247 @@
 @page "/admin/attendance-event-monitoring"
 @using Microsoft.AspNetCore.Authorization
 @using Microsoft.EntityFrameworkCore
+@using System.Text.Json
 @using global::Payroll.Shared.Data
 @inject IDbContextFactory<AppDbContext> DbFactory
+@inject FirebaseUserManagementService FirebaseUsers
+
 @attribute [Authorize(Roles = "Admin,SuperAdmin")]
 
-<PageTitle>Attendance Event Monitoring</PageTitle>
+<PageTitle>Attendance & Session Security Monitoring</PageTitle>
 
-<div class="d-flex justify-content-between align-items-center mb-3">
-    <div>
-        <h3 class="mb-1"><i class="bi bi-activity me-2"></i>Attendance Event Monitoring</h3>
-        <div class="text-muted small">Login, logout and single-device session lifecycle. Attendance priority/fallback rules are not changed here.</div>
+<AttendanceRefreshListener OnAttendanceChanged="LoadEvents" />
+<ApplicationRealtimeRefreshListener OnApplicationDataChanged="LoadEvents" />
+
+<div class="page-header-container mb-4">
+    <div class="d-flex align-items-center gap-3">
+        <div class="emoji-icon-badge emoji-icon-badge-info" style="font-size: 2rem; width: 56px; height: 56px; display: flex; align-items: center; justify-content: center; background: #e0f2fe; border-radius: 16px;">
+            🛰️
+        </div>
+        <div>
+            <h2 class="page-header-title mb-1 fw-bold text-dark">
+                Attendance & Session Security Monitoring
+            </h2>
+            <p class="page-header-subtitle mb-0 text-muted">
+                <span>📡 Real-time cross-platform session lifecycle, single-device policy enforcement & geofence telemetry</span>
+            </p>
+        </div>
     </div>
-    <button class="btn btn-outline-primary" @onclick="LoadEvents"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
+
+    <div class="d-flex align-items-center gap-2 mt-3 mt-md-0">
+        <button class="btn btn-outline-primary rounded-pill px-4 py-2 fw-semibold shadow-sm" @onclick="LoadEvents">
+            <span>🔄 Refresh Telemetry</span>
+        </button>
+    </div>
 </div>
 
-<div class="row g-2 p-3 mb-3 bg-light border rounded">
-    <div class="col-md-3"><label class="form-label small fw-bold">Start</label><input type="date" class="form-control" @bind="startDate" /></div>
-    <div class="col-md-3"><label class="form-label small fw-bold">End</label><input type="date" class="form-control" @bind="endDate" /></div>
-    <div class="col-md-3"><label class="form-label small fw-bold">Event</label>
-        <select class="form-select" @bind="eventFilter">
-            <option value="">All events</option>
-            <option>LOGIN_ATTEMPT</option><option>LOGIN_SUCCESS</option><option>LOGIN_FAILED</option>
-            <option>SECOND_DEVICE_ATTEMPT</option><option>FORCE_LOGOUT_REQUESTED</option><option>FORCED_SESSION_LOGOUT</option>
-            <option>LOGOUT_REQUESTED</option><option>DEVICE_LOCK_RELEASED</option><option>LOGOUT_COMPLETED</option>
-        </select>
+<div class="card border-0 shadow-sm rounded-4 mb-4 bg-white">
+    <div class="card-body p-3 p-md-4">
+        <div class="row g-3 align-items-end">
+            <div class="col-md-3">
+                <label class="form-label small fw-bold text-muted">📅 Start Date</label>
+                <input type="date" class="form-control rounded-3" @bind="startDate" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small fw-bold text-muted">📅 End Date</label>
+                <input type="date" class="form-control rounded-3" @bind="endDate" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small fw-bold text-muted">🔍 Event Type Filter</label>
+                <select class="form-select rounded-3" @bind="eventFilter">
+                    <option value="">All Security & Session Events</option>
+                    <option value="LOGIN_SUCCESS">Login Successful / Replaced</option>
+                    <option value="SECOND_DEVICE_ATTEMPT">Dual Device Blocked</option>
+                    <option value="FORCED_SESSION_LOGOUT">Forced Session Terminated</option>
+                    <option value="LOGOUT_COMPLETED">User Logged Out</option>
+                    <option value="LOGIN_ATTEMPT">Login Attempt</option>
+                    <option value="LOGIN_FAILED">Login Failed</option>
+                </select>
+            </div>
+            <div class="col-md-3">
+                <button class="btn btn-primary rounded-3 w-100 fw-semibold py-2 shadow-sm" @onclick="LoadEvents">
+                    🔍 Search Telemetry
+                </button>
+            </div>
+        </div>
     </div>
-    <div class="col-md-3 d-flex align-items-end"><button class="btn btn-primary w-100" @onclick="LoadEvents">Search</button></div>
 </div>
 
 @if (loading)
 {
-    <div class="alert alert-secondary">Loading monitored events...</div>
+    <div class="text-center p-5 bg-white rounded-4 border shadow-sm">
+        <div class="spinner-border text-primary" role="status"></div>
+        <p class="mt-3 text-muted fw-semibold">Loading security telemetry & device audit trail... 🛰️</p>
+    </div>
 }
 else if (!events.Any())
 {
-    <div class="alert alert-info">No monitored events found for the selected period.</div>
+    <div class="text-center p-5 bg-light rounded-4 border">
+        <span class="fs-1 d-block mb-2">🛡️</span>
+        <p class="mb-0 text-muted fw-semibold">No monitored security events found for the selected period.</p>
+    </div>
 }
 else
 {
-    <div class="table-responsive">
-        <table class="table table-sm table-striped table-hover border align-middle">
-            <thead class="table-dark"><tr><th>Time</th><th>User</th><th>Event</th><th>Details</th></tr></thead>
-            <tbody>
-            @foreach (var item in events)
-            {
-                <tr>
-                    <td style="white-space:nowrap">@ToIndiaTime(item.Timestamp).ToString("dd-MMM-yyyy HH:mm:ss")</td>
-                    <td><div class="fw-semibold">@item.UserEmail</div><div class="small text-muted">@item.EntityID</div></td>
-                    <td><span class="badge @Badge(item.EventType)">@item.EventType</span></td>
-                    <td><pre class="small mb-0" style="white-space:pre-wrap;max-width:900px">@item.Details</pre></td>
-                </tr>
-            }
-            </tbody>
-        </table>
+    <div class="d-flex flex-column gap-3">
+        @foreach (var item in events)
+        {
+            var detail = ParseTelemetry(item.Timestamp, item.Details, item.UserEmail, item.EntityID);
+            
+            <div class="card border-0 shadow-sm rounded-4 overflow-hidden mb-2 bg-white" style="border-left: 5px solid @GetBorderColor(detail.EventType) !important;">
+                <div class="card-body p-4">
+                    <!-- Top Event Header -->
+                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 pb-3 mb-3 border-bottom">
+                        <div class="d-flex align-items-center gap-2 flex-wrap">
+                            <span class="fs-4">@detail.Icon</span>
+                            <span class="fw-bold fs-5 text-dark">@detail.Title</span>
+                            <span class="badge @detail.BadgeClass rounded-pill px-3 py-1">@detail.EventType</span>
+                            <span class="badge @detail.PlatformBadge rounded-pill px-3 py-1">
+                                @(detail.Platform.Equals("Web", StringComparison.OrdinalIgnoreCase) ? "🌐 Web Browser" : "📱 Android Mobile")
+                            </span>
+                        </div>
+                        <div class="d-flex align-items-center gap-2 text-muted small">
+                            <span class="badge bg-light text-dark border px-2 py-1">⏱️ @detail.RelativeTime</span>
+                            <span class="fw-medium font-monospace">📅 @detail.WhenFormatted</span>
+                        </div>
+                    </div>
+
+                    <!-- User Identity Strip -->
+                    <div class="d-flex align-items-center gap-2 mb-3 bg-light p-2 rounded-3">
+                        <span class="text-secondary fw-semibold">👤 User:</span>
+                        <span class="fw-bold text-dark">@item.UserEmail</span>
+                        @if (!string.IsNullOrWhiteSpace(item.EntityID))
+                        {
+                            <span class="text-muted ms-2 small font-monospace">(@item.EntityID)</span>
+                        }
+                    </div>
+
+                    <!-- Core 3 Pillars: WHY, PURPOSE, HOW -->
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-4">
+                            <div class="p-3 rounded-3 bg-light h-100 border">
+                                <div class="fw-bold text-dark mb-1 small d-flex align-items-center gap-1">
+                                    <span>❓</span> <span>Why Did This Happen?</span>
+                                </div>
+                                <div class="text-secondary small" style="line-height: 1.45;">
+                                    @detail.Why
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="p-3 rounded-3 bg-light h-100 border">
+                                <div class="fw-bold text-dark mb-1 small d-flex align-items-center gap-1">
+                                    <span>🎯</span> <span>Security Purpose & Policy</span>
+                                </div>
+                                <div class="text-secondary small" style="line-height: 1.45;">
+                                    @detail.Purpose
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="p-3 rounded-3 bg-light h-100 border">
+                                <div class="fw-bold text-dark mb-1 small d-flex align-items-center gap-1">
+                                    <span>⚙️</span> <span>How The System Handled It</span>
+                                </div>
+                                <div class="text-secondary small" style="line-height: 1.45;">
+                                    @detail.How
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Device Details Cards -->
+                    <div class="row g-3 mb-2">
+                        <!-- Active / Current Device Card -->
+                        <div class="@(detail.DisplacedDevice != null ? "col-md-6" : "col-12")">
+                            <div class="card h-100 border border-success border-opacity-25 bg-success bg-opacity-10 rounded-3">
+                                <div class="card-body p-3">
+                                    <div class="d-flex align-items-center justify-content-between mb-2">
+                                        <div class="fw-bold text-success small d-flex align-items-center gap-1">
+                                            <span>🟢</span> <span>ACTIVE / INCOMING DEVICE</span>
+                                        </div>
+                                        <span class="badge bg-success rounded-pill px-2 py-1 small">
+                                            @(detail.ActiveDevice.Platform)
+                                        </span>
+                                    </div>
+                                    <div class="small text-dark">
+                                        <div class="mb-1"><strong>Device Name:</strong> @(string.IsNullOrWhiteSpace(detail.ActiveDevice.DeviceName) ? "Standard Client" : detail.ActiveDevice.DeviceName)</div>
+                                        <div class="mb-1 text-truncate"><strong>Device ID:</strong> <span class="font-monospace text-muted">@detail.ActiveDevice.DeviceId</span></div>
+                                        @if (!string.IsNullOrWhiteSpace(detail.ActiveDevice.IpAddress) && detail.ActiveDevice.IpAddress != "Unavailable")
+                                        {
+                                            <div class="mb-1"><strong>IP Address:</strong> <span class="font-monospace">@detail.ActiveDevice.IpAddress</span></div>
+                                        }
+                                        <div class="mt-2 text-success fw-semibold">
+                                            <span>✓ Status:</span> @detail.ActiveDevice.ActionTaken
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Displaced / Previous Device Card -->
+                        @if (detail.DisplacedDevice != null)
+                        {
+                            <div class="col-md-6">
+                                <div class="card h-100 border border-danger border-opacity-25 bg-danger bg-opacity-10 rounded-3">
+                                    <div class="card-body p-3">
+                                        <div class="d-flex align-items-center justify-content-between mb-2">
+                                            <div class="fw-bold text-danger small d-flex align-items-center gap-1">
+                                                <span>🔴</span> <span>DISPLACED / PREVIOUS DEVICE</span>
+                                            </div>
+                                            <span class="badge bg-danger rounded-pill px-2 py-1 small">
+                                                @(detail.DisplacedDevice.Platform)
+                                            </span>
+                                        </div>
+                                        <div class="small text-dark">
+                                            <div class="mb-1"><strong>Device Name:</strong> @(string.IsNullOrWhiteSpace(detail.DisplacedDevice.DeviceName) ? "Previous Device" : detail.DisplacedDevice.DeviceName)</div>
+                                            <div class="mb-1 text-truncate"><strong>Device ID:</strong> <span class="font-monospace text-muted">@detail.DisplacedDevice.DeviceId</span></div>
+                                            @if (!string.IsNullOrWhiteSpace(detail.DisplacedDevice.LastSeen))
+                                            {
+                                                <div class="mb-1"><strong>Last Active:</strong> @detail.DisplacedDevice.LastSeen</div>
+                                            }
+                                            @if (detail.DisplacedDevice.Latitude.HasValue && detail.DisplacedDevice.Latitude.Value != 0)
+                                            {
+                                                <div class="mb-1">
+                                                    <strong>Last Known GPS:</strong> 
+                                                    <span class="font-monospace">Lat @detail.DisplacedDevice.Latitude.Value.ToString("F5"), Lng @(detail.DisplacedDevice.Longitude?.ToString("F5") ?? "0.00000")</span>
+                                                </div>
+                                            }
+                                            @if (detail.DisplacedDevice.DistanceMeters.HasValue && detail.DisplacedDevice.DistanceMeters.Value > 0)
+                                            {
+                                                <div class="mb-1 d-flex align-items-center gap-2 flex-wrap">
+                                                    <strong>Distance from Office:</strong>
+                                                    <span>@detail.DisplacedDevice.DistanceMeters.Value.ToString("F0") meters</span>
+                                                    @if (detail.DisplacedDevice.WithinAllowedRadius.HasValue)
+                                                    {
+                                                        <span class="badge @(detail.DisplacedDevice.WithinAllowedRadius.Value ? "bg-success" : "bg-danger") rounded-pill px-2 py-1" style="font-size:0.7rem">
+                                                            @(detail.DisplacedDevice.WithinAllowedRadius.Value ? "Inside Allowed Geofence" : "Outside Allowed Geofence")
+                                                        </span>
+                                                    }
+                                                </div>
+                                            }
+                                            <div class="mt-2 text-danger fw-semibold">
+                                                <span>✕ Action:</span> @detail.DisplacedDevice.ActionTaken
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        }
+                    </div>
+
+                    <!-- Developer Technical Diagnostics Toggle (collapsed by default) -->
+                    <div class="mt-3 pt-2 border-top">
+                        <details class="text-muted">
+                            <summary class="small text-muted" style="cursor: pointer; font-size: 0.75rem;">
+                                ⚙️ Advanced Technical Diagnostic Payload (JSON)
+                            </summary>
+                            <pre class="small text-muted bg-light p-2 rounded mb-0 mt-2 font-monospace border" style="white-space: pre-wrap; max-width: 100%; font-size: 0.72rem; overflow-x: auto;">@item.Details</pre>
+                        </details>
+                    </div>
+                </div>
+            </div>
+        }
     </div>
 }
 
@@ -74,9 +262,11 @@ else
             await using var db = await DbFactory.CreateDbContextAsync();
             var from = IndiaToUtc(startDate.Date);
             var to = IndiaToUtc(endDate.Date.AddDays(1));
+
             var raw = await db.AuditLogs.AsNoTracking()
-                .Where(x => x.ActionType == "AUTH_SESSION" && x.EntityType == "EmployeeAttendanceSession" && x.Timestamp >= from && x.Timestamp < to)
+                .Where(x => x.ActionType == "AUTH_SESSION" && x.Timestamp >= from && x.Timestamp < to)
                 .OrderByDescending(x => x.Timestamp).Take(1000).ToListAsync();
+
             events = raw.Select(x => new Row(x.Timestamp, x.UserEmail, x.EntityID, ExtractEvent(x.Details), x.Details ?? string.Empty))
                 .Where(x => string.IsNullOrWhiteSpace(eventFilter) || x.EventType.Equals(eventFilter, StringComparison.OrdinalIgnoreCase)).ToList();
         }
@@ -99,17 +289,308 @@ else
     private static string ExtractEvent(string? details)
     {
         if (string.IsNullOrWhiteSpace(details)) return "UNKNOWN";
-        try { using var doc = System.Text.Json.JsonDocument.Parse(details); return doc.RootElement.TryGetProperty("EventType", out var p) ? p.GetString() ?? "UNKNOWN" : "UNKNOWN"; }
+        try
+        {
+            using var doc = JsonDocument.Parse(details);
+            if (doc.RootElement.TryGetProperty("EventType", out var p) || doc.RootElement.TryGetProperty("eventType", out p))
+                return p.GetString() ?? "UNKNOWN";
+            return "UNKNOWN";
+        }
         catch { return "UNKNOWN"; }
     }
 
-    private static string Badge(string e) => e switch
+    private static string GetBorderColor(string eventType) => eventType switch
     {
-        "LOGIN_SUCCESS" or "LOGOUT_COMPLETED" => "bg-success",
-        "SECOND_DEVICE_ATTEMPT" or "FORCE_LOGOUT_REQUESTED" => "bg-warning text-dark",
-        "FORCED_SESSION_LOGOUT" or "LOGIN_FAILED" => "bg-danger",
-        _ => "bg-secondary"
+        "LOGIN_SUCCESS" => "#198754",
+        "SECOND_DEVICE_ATTEMPT" or "LOGIN_BLOCKED_EXISTING_SESSION" or "FORCE_LOGOUT_REQUESTED" => "#fd7e14",
+        "FORCED_SESSION_LOGOUT" or "LOGIN_FAILED" or "LOGIN_PASSWORD_FAILED" or "SESSION_DISCONNECTED_BY_SERVER" => "#dc3545",
+        "LOGOUT_COMPLETED" => "#0dcaf0",
+        _ => "#6c757d"
     };
+
+    private static string GetRelativeTime(DateTime eventUtc)
+    {
+        var span = DateTime.UtcNow - eventUtc;
+        if (span.TotalSeconds < 45) return "Just now";
+        if (span.TotalMinutes < 60) return $"{(int)span.TotalMinutes}m ago";
+        if (span.TotalHours < 24) return $"{(int)span.TotalHours}h ago";
+        if (span.TotalDays < 7) return $"{(int)span.TotalDays}d ago";
+        return eventUtc.ToString("dd-MMM");
+    }
+
+    public sealed class ParsedEventModel
+    {
+        public string EventType { get; set; } = "UNKNOWN";
+        public string Title { get; set; } = "Security Event";
+        public string Icon { get; set; } = "🛡️";
+        public string BadgeClass { get; set; } = "bg-secondary";
+        public string Platform { get; set; } = "Web";
+        public string PlatformBadge { get; set; } = "bg-primary";
+        public string WhenFormatted { get; set; } = "";
+        public string RelativeTime { get; set; } = "";
+        
+        public string Why { get; set; } = "";
+        public string Purpose { get; set; } = "";
+        public string How { get; set; } = "";
+        
+        public DeviceModel ActiveDevice { get; set; } = new();
+        public DeviceModel? DisplacedDevice { get; set; }
+    }
+
+    public sealed class DeviceModel
+    {
+        public string Platform { get; set; } = "";
+        public string DeviceName { get; set; } = "";
+        public string DeviceId { get; set; } = "";
+        public string IpAddress { get; set; } = "";
+        public string LastSeen { get; set; } = "";
+        public double? Latitude { get; set; }
+        public double? Longitude { get; set; }
+        public double? DistanceMeters { get; set; }
+        public bool? WithinAllowedRadius { get; set; }
+        public string ActionTaken { get; set; } = "";
+    }
+
+    private static ParsedEventModel ParseTelemetry(DateTime timestamp, string? details, string userEmail, string? entityId)
+    {
+        var localTime = ToIndiaTime(timestamp);
+        var model = new ParsedEventModel
+        {
+            WhenFormatted = localTime.ToString("dd-MMM-yyyy hh:mm:ss tt"),
+            RelativeTime = GetRelativeTime(timestamp)
+        };
+
+        if (string.IsNullOrWhiteSpace(details))
+        {
+            model.Why = "Authentication activity logged without diagnostic payload.";
+            model.Purpose = "Verify employee access.";
+            model.How = "Processed through standard identity pipeline.";
+            return model;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(details);
+            var root = doc.RootElement;
+
+            // Extract core fields
+            var eventType = root.TryGetProperty("EventType", out var et) ? et.GetString() : (root.TryGetProperty("eventType", out et) ? et.GetString() : "AUTH_SESSION");
+            var platform = root.TryGetProperty("Platform", out var pl) ? pl.GetString() : (root.TryGetProperty("platform", out pl) ? pl.GetString() : "Web");
+            var deviceId = root.TryGetProperty("DeviceId", out var di) ? di.GetString() : (root.TryGetProperty("deviceId", out di) ? di.GetString() : "");
+            var reason = root.TryGetProperty("Reason", out var re) ? re.GetString() : (root.TryGetProperty("reason", out re) ? re.GetString() : "");
+            var relatedDeviceId = root.TryGetProperty("RelatedDeviceId", out var rd) ? rd.GetString() : null;
+
+            model.EventType = eventType ?? "AUTH_SESSION";
+            model.Platform = platform ?? "Web";
+            model.PlatformBadge = model.Platform.Equals("Web", StringComparison.OrdinalIgnoreCase) ? "bg-primary" : "bg-success";
+
+            // Extract Context if present
+            JsonElement? contextObj = null;
+            if (root.TryGetProperty("Context", out var ctx) && ctx.ValueKind == JsonValueKind.Object)
+                contextObj = ctx;
+
+            var forceLogoutExisting = false;
+            if (contextObj.HasValue && contextObj.Value.TryGetProperty("ForceLogoutExisting", out var fle) && (fle.ValueKind == JsonValueKind.True || fle.ValueKind == JsonValueKind.False))
+                forceLogoutExisting = fle.GetBoolean();
+            else if (root.TryGetProperty("forceLogoutExisting", out var fle2) && (fle2.ValueKind == JsonValueKind.True || fle2.ValueKind == JsonValueKind.False))
+                forceLogoutExisting = fle2.GetBoolean();
+
+            // Active Device
+            model.ActiveDevice.Platform = model.Platform;
+            model.ActiveDevice.DeviceId = deviceId ?? "";
+            
+            var ip = "";
+            if (contextObj.HasValue && contextObj.Value.TryGetProperty("IpAddress", out var ipProp)) ip = ipProp.GetString() ?? "";
+            else if (root.TryGetProperty("IpAddress", out ipProp) || root.TryGetProperty("ipAddress", out ipProp)) ip = ipProp.GetString() ?? "";
+            model.ActiveDevice.IpAddress = string.IsNullOrWhiteSpace(ip) ? "Unavailable" : ip;
+
+            var devName = "";
+            if (contextObj.HasValue && contextObj.Value.TryGetProperty("DeviceName", out var dnProp)) devName = dnProp.GetString() ?? "";
+            else if (root.TryGetProperty("DeviceName", out dnProp) || root.TryGetProperty("deviceName", out dnProp)) devName = dnProp.GetString() ?? "";
+            model.ActiveDevice.DeviceName = !string.IsNullOrWhiteSpace(devName) ? devName : (model.Platform.Equals("Web", StringComparison.OrdinalIgnoreCase) ? "Web Browser" : "Android Device");
+
+            // Displaced Device Extraction
+            JsonElement? dispElem = null;
+            if (contextObj.HasValue && contextObj.Value.TryGetProperty("DisplacedDevice", out var dd) && dd.ValueKind == JsonValueKind.Object)
+                dispElem = dd;
+            else if (root.TryGetProperty("DisplacedDevice", out var dd2) && dd2.ValueKind == JsonValueKind.Object)
+                dispElem = dd2;
+
+            if (dispElem.HasValue)
+            {
+                var d = dispElem.Value;
+                model.DisplacedDevice = new DeviceModel
+                {
+                    Platform = d.TryGetProperty("Platform", out var dp) ? dp.GetString() ?? "Device" : "Device",
+                    DeviceName = d.TryGetProperty("DeviceName", out var dn) ? dn.GetString() ?? "" : "",
+                    DeviceId = d.TryGetProperty("DeviceId", out var ddi) ? ddi.GetString() ?? "" : "",
+                    LastSeen = d.TryGetProperty("LastSeen", out var ds) ? ds.GetString() ?? "" : "",
+                    Latitude = d.TryGetProperty("LastLatitude", out var dlt) ? dlt.GetDouble() : null,
+                    Longitude = d.TryGetProperty("LastLongitude", out var dlg) ? dlg.GetDouble() : null,
+                    DistanceMeters = d.TryGetProperty("LastDistanceMeters", out var ddm) ? ddm.GetDouble() : null,
+                    WithinAllowedRadius = d.TryGetProperty("WithinAllowedRadius", out var dw) ? dw.GetBoolean() : null,
+                    ActionTaken = "Session Disconnected & GPS Tracking Terminated"
+                };
+            }
+            else if (root.TryGetProperty("displacedPlatform", out var dPlatProp))
+            {
+                var dDev = root.TryGetProperty("displacedDeviceName", out var dn) ? dn.GetString() : (root.TryGetProperty("displacedDeviceId", out var di2) ? di2.GetString() : "");
+                model.DisplacedDevice = new DeviceModel
+                {
+                    Platform = dPlatProp.GetString() ?? "Unknown",
+                    DeviceName = dDev ?? "Previous Device",
+                    DeviceId = root.TryGetProperty("displacedDeviceId", out var di3) ? di3.GetString() ?? "" : "",
+                    ActionTaken = "Session Terminated by Remote Login"
+                };
+            }
+            else if (!string.IsNullOrWhiteSpace(relatedDeviceId))
+            {
+                model.DisplacedDevice = new DeviceModel
+                {
+                    Platform = relatedDeviceId.StartsWith("WEB_BROWSER_", StringComparison.OrdinalIgnoreCase) ? "Web" : "Android",
+                    DeviceName = relatedDeviceId.StartsWith("WEB_BROWSER_", StringComparison.OrdinalIgnoreCase) ? "Web Browser" : "Mobile Device",
+                    DeviceId = relatedDeviceId,
+                    ActionTaken = "Session Replaced"
+                };
+            }
+            else if (forceLogoutExisting || string.Equals(reason, "NEW_DEVICE_AFTER_FORCE_REPLACE", StringComparison.OrdinalIgnoreCase))
+            {
+                model.DisplacedDevice = new DeviceModel
+                {
+                    Platform = model.Platform.Equals("Web", StringComparison.OrdinalIgnoreCase) ? "Android" : "Web",
+                    DeviceName = model.Platform.Equals("Web", StringComparison.OrdinalIgnoreCase) ? "Previous Android Phone" : "Previous Web Session",
+                    DeviceId = "Session Locked Previously",
+                    ActionTaken = "Disconnected & Tracking Halted"
+                };
+            }
+
+            // Synthesize Human-Readable WHY, PURPOSE, HOW based on EventType
+            switch (model.EventType.ToUpperInvariant())
+            {
+                case "LOGIN_SUCCESS":
+                    if (forceLogoutExisting || string.Equals(reason, "NEW_DEVICE_AFTER_FORCE_REPLACE", StringComparison.OrdinalIgnoreCase) || model.DisplacedDevice != null)
+                    {
+                        model.Title = "Device Switched & Session Activated";
+                        model.Icon = "🔄";
+                        model.BadgeClass = "bg-primary text-white";
+                        model.ActiveDevice.ActionTaken = "Granted Authoritative Session Lock";
+                        
+                        var prevName = model.DisplacedDevice?.DeviceName ?? model.DisplacedDevice?.Platform ?? "previous device";
+                        model.Why = $"The employee chose to log in on {model.Platform} and confirmed terminating their active session on {prevName}.";
+                        model.Purpose = "Strict Single-Device Policy: Ensures an employee can only punch and be tracked on ONE device at a time across Web and Android.";
+                        model.How = $"Updated active session lock in Firebase Realtime Database at employee_sessions. The real-time listener on the old {prevName} was notified to stop background GPS tracking immediately and log out.";
+                    }
+                    else
+                    {
+                        model.Title = "Session Authenticated Successfully";
+                        model.Icon = "🟢";
+                        model.BadgeClass = "bg-success text-white";
+                        model.ActiveDevice.ActionTaken = "Granted Active Session Lock";
+                        model.Why = $"Employee entered valid credentials and logged into {model.Platform} with no conflicting device.";
+                        model.Purpose = "Authenticate employee identity and establish authorized presence for attendance tracking.";
+                        model.How = $"Verified credentials against Identity store, claimed session lock in Firebase Realtime Database, and started attendance presence.";
+                    }
+                    break;
+
+                case "SECOND_DEVICE_ATTEMPT":
+                case "LOGIN_BLOCKED_EXISTING_SESSION":
+                    model.Title = "Dual Login Blocked (Active Session on Another Device)";
+                    model.Icon = "⛔";
+                    model.BadgeClass = "bg-warning text-dark";
+                    model.ActiveDevice.ActionTaken = "Blocked Pending Confirmation";
+                    if (model.DisplacedDevice != null) model.DisplacedDevice.ActionTaken = "Holds Active Session Lock";
+                    
+                    var activeDev = model.DisplacedDevice?.DeviceName ?? model.DisplacedDevice?.Platform ?? "another device";
+                    model.Why = $"Employee entered valid credentials on {model.Platform}, but their account is already actively logged in on {activeDev}.";
+                    model.Purpose = "Prevent unauthorized simultaneous logins and dual-location attendance manipulation.";
+                    model.How = $"Authentication was placed on hold. A security warning was displayed showing the active device's location and last seen time, requiring explicit confirmation before switching.";
+                    break;
+
+                case "FORCED_SESSION_LOGOUT":
+                case "FORCE_LOGOUT_REQUESTED":
+                    model.Title = "Previous Device Forcefully Displaced";
+                    model.Icon = "⚡";
+                    model.BadgeClass = "bg-danger text-white";
+                    model.ActiveDevice.ActionTaken = "Replaced Previous Session";
+                    if (model.DisplacedDevice != null) model.DisplacedDevice.ActionTaken = "Forcefully Disconnected & Tracking Stopped";
+                    
+                    model.Why = $"A new login was confirmed on another device, triggering an immediate forced displacement of the previous session.";
+                    model.Purpose = "Maintain a Single Source of Truth (SSOT): Ensure only one active device can submit GPS tracking points and attendance punches.";
+                    model.How = "Terminated active database GPS sessions, revoked the previous device's session lock in Firebase RTDB, and notified the client application to cease background operations.";
+                    break;
+
+                case "LOGOUT_COMPLETED":
+                case "MANUAL_LOGOUT_COMPLETED":
+                    model.Title = "Normal User Sign-Out";
+                    model.Icon = "👋";
+                    model.BadgeClass = "bg-info text-dark";
+                    model.ActiveDevice.ActionTaken = "Session Ended & Device Lock Released";
+                    model.Why = $"Employee clicked log out to end their working session on {model.Platform}.";
+                    model.Purpose = "Clean session termination, release of device ownership locks, and cessation of location tracking.";
+                    model.How = "Ended GPS tracking session, deleted session presence from Firebase Realtime Database, and cleared authentication cookies.";
+                    break;
+
+                case "LOGOUT_REQUESTED":
+                    model.Title = "Sign-Out Initiated";
+                    model.Icon = "🚪";
+                    model.BadgeClass = "bg-secondary text-white";
+                    model.ActiveDevice.ActionTaken = "Logging Out";
+                    model.Why = $"Employee requested sign-out on {model.Platform}.";
+                    model.Purpose = "Initiate session cleanup procedure.";
+                    model.How = "Began teardown of GPS tracking and device session locks.";
+                    break;
+
+                case "SESSION_DISCONNECTED_BY_SERVER":
+                    model.Title = "Remote Session Termination";
+                    model.Icon = "🛑";
+                    model.BadgeClass = "bg-danger text-white";
+                    model.ActiveDevice.ActionTaken = "Terminated Remotely";
+                    model.Why = "This device was displaced because the employee logged in from another device/browser.";
+                    model.Purpose = "Prevent ghost location updates and eliminate orphaned background tracking services.";
+                    model.How = "The real-time session observer observed a new activeDeviceId in Firebase RTDB, stopped TrackingService, dismissed notifications, and navigated back to the Login screen.";
+                    break;
+
+                case "LOGIN_ATTEMPT":
+                    model.Title = "Login Credentials Submitted";
+                    model.Icon = "🔑";
+                    model.BadgeClass = "bg-secondary text-white";
+                    model.ActiveDevice.ActionTaken = "Credentials Validated";
+                    model.Why = $"Employee submitted credentials to sign in on {model.Platform}.";
+                    model.Purpose = "Authenticate user identity before checking active device rules.";
+                    model.How = "Validated password against ASP.NET Identity database.";
+                    break;
+
+                case "LOGIN_FAILED":
+                case "LOGIN_PASSWORD_FAILED":
+                    model.Title = "Authentication Failed";
+                    model.Icon = "❌";
+                    model.BadgeClass = "bg-danger text-white";
+                    model.ActiveDevice.ActionTaken = "Access Denied";
+                    model.Why = "Invalid credentials were provided during sign-in attempt.";
+                    model.Purpose = "Security protection against unauthorized access.";
+                    model.How = "Authentication rejected and security audit event recorded.";
+                    break;
+
+                default:
+                    model.Title = model.EventType.Replace("_", " ");
+                    model.Icon = "📋";
+                    model.BadgeClass = "bg-secondary text-white";
+                    model.ActiveDevice.ActionTaken = "Event Processed";
+                    model.Why = $"System processed a {model.EventType} event for {model.Platform}.";
+                    model.Purpose = "System audit trail.";
+                    model.How = "Recorded into database audit logs.";
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            model.Why = "Error interpreting security payload: " + ex.Message;
+            model.Purpose = "Audit recording.";
+            model.How = "Standard database persistence.";
+        }
+
+        return model;
+    }
 
     private sealed record Row(DateTime Timestamp, string UserEmail, string? EntityID, string EventType, string Details);
 }

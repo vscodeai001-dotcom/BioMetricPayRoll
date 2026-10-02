@@ -171,6 +171,12 @@ builder.Services.AddSingleton<FirebaseRealtimeService>();
 builder.Services.AddSingleton<
     AttendanceRefreshService>();
 
+// Coordinates automatic attendance recalculation across Web circuits.
+// One employee/date key is processed at a time and unchanged punch sets are
+// skipped using a deterministic fingerprint.
+builder.Services.AddSingleton<
+    AttendanceProcessingCoordinator>();
+
 // Application-wide realtime CRUD invalidation.
 // This publishes only after successful EF Core SaveChanges operations and
 // leaves existing domain-specific SignalR events untouched.

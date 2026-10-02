@@ -39,7 +39,10 @@ public sealed class MobileThemeController : ControllerBase
             ? "dark"
             : "light";
 
-        await _themeService.SaveThemeAsync(userId, theme);
+        var saved = await _themeService.SaveThemeAsync(userId, theme, cancellationToken);
+        if (!saved)
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new { message = "Firebase theme preference could not be saved." });
+
         return Ok(new MobileThemeDto(theme));
     }
 }

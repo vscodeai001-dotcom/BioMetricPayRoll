@@ -1,4 +1,4 @@
-﻿@using global::Payroll.Shared
+@using global::Payroll.Shared
 @using global::Payroll.Shared.Data
 @using Microsoft.AspNetCore.Components.Web
 
@@ -26,11 +26,13 @@ else
                 </tr>
             </thead>
             <tbody>
-                @foreach (var leave in Requests)
+                @foreach (var leave in (Requests ?? Enumerable.Empty<LeaveRequest>()).Where(l => l.EmployeeID > 0))
                 {
+                    var empName = Employees?.FirstOrDefault(e => e.EmployeeID == leave.EmployeeID)?.Name
+                        ?? $"Staff #{leave.EmployeeID}";
                     <tr>
                         <td class="fw-bold">
-                            @(Employees?.FirstOrDefault(e => e.EmployeeID == leave.EmployeeID)?.Name ?? "Unknown")
+                            @empName
                         </td>
                         <td>@leave.LeaveDate?.ToString("dd-MMM-yyyy (ddd)")</td>
                         <td>
@@ -55,6 +57,10 @@ else
                             {
                                 <span class="badge bg-success">Approved</span>
                             }
+                            else if (string.Equals(leave.Status, "Rejected", StringComparison.OrdinalIgnoreCase))
+                            {
+                                <span class="badge bg-danger">Rejected</span>
+                            }
                             else
                             {
                                 <span class="badge bg-warning text-dark">Pending</span>
@@ -72,6 +78,19 @@ else
                                     <i class="bi bi-trash"></i>
                                 </button>
                             }
+                            else if (string.Equals(leave.Status, "Rejected", StringComparison.OrdinalIgnoreCase))
+                            {
+                                <button class="btn btn-sm btn-outline-success me-1"
+                                        @onclick="() => OnApprove.InvokeAsync(leave)"
+                                        title="Approve">
+                                    <i class="bi bi-check-lg"></i>
+                                </button>
+                                <button class="btn btn-sm btn-outline-danger"
+                                        @onclick="() => OnDelete.InvokeAsync(leave)"
+                                        title="Delete Record">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            }
                             else if (!leave.IsApproved)
                             {
                                 <button class="btn btn-sm btn-success me-1"
@@ -79,18 +98,28 @@ else
                                         title="Approve">
                                     <i class="bi bi-check-lg"></i>
                                 </button>
-                                <button class="btn btn-sm btn-danger"
+                                <button class="btn btn-sm btn-danger me-1"
                                         @onclick="() => OnDeny.InvokeAsync(leave)"
                                         title="Deny">
                                     <i class="bi bi-x-lg"></i>
                                 </button>
+                                <button class="btn btn-sm btn-outline-danger"
+                                        @onclick="() => OnDelete.InvokeAsync(leave)"
+                                        title="Delete Record">
+                                    <i class="bi bi-trash"></i>
+                                </button>
                             }
                             else
                             {
-                                <button class="btn btn-sm btn-outline-secondary"
+                                <button class="btn btn-sm btn-outline-secondary me-1"
                                         @onclick="() => OnCancel.InvokeAsync(leave)"
                                         title="Revoke Approval">
                                     <i class="bi bi-arrow-counterclockwise"></i>
+                                </button>
+                                <button class="btn btn-sm btn-outline-danger"
+                                        @onclick="() => OnDelete.InvokeAsync(leave)"
+                                        title="Delete Record">
+                                    <i class="bi bi-trash"></i>
                                 </button>
                             }
                         </td>

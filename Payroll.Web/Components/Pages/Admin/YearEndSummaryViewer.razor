@@ -4,6 +4,8 @@
 @using global::Payroll.Shared.Data
 @using System.Globalization
 @inject IDbContextFactory<AppDbContext> DbFactory
+@inject FirebaseYearEndSummaryService FirebaseYearEnd
+@inject Payroll.Web.Services.FirebaseEmployeeManagementService FirebaseEmployees
 @inject IToastService toastService
 @inject ILogger<YearEndSummaryViewer> _logger
 @attribute [Authorize(Roles = "Admin, SuperAdmin")]
@@ -94,9 +96,9 @@ else
 
     private async Task LoadEmployees()
     {
-        await using var dbContext = await DbFactory.CreateDbContextAsync();
-        // Load active and soft-deleted employees for history context
-        employeeList = await dbContext.Employees.AsNoTracking().ToListAsync(); 
+        // Employee identity is read from the Firebase SSOT projection.
+        // Year-end financial rows themselves also come from Firebase SSOT.
+        employeeList = await FirebaseEmployees.GetEmployeesAsync();
     }
 
     private string GetEmployeeName(int id)
@@ -110,12 +112,7 @@ else
         
         try
         {
-            await using var dbContext = await DbFactory.CreateDbContextAsync();
-            annualSummaries = await dbContext.YearEndSummaries
-                .AsNoTracking()
-                .Where(s => s.TaxYear == selectedYear)
-                .OrderBy(s => s.EmployeeID)
-                .ToListAsync();
+            annualSummaries = await FirebaseYearEnd.GetAsync(selectedYear);
         }
         catch (Exception ex)
         {

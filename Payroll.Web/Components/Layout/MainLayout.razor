@@ -12,8 +12,12 @@
 @inject IDbContextFactory<AppDbContext> DbFactory
 @inject ILogger<MainLayout> _logger
 @inject AuthenticationStateProvider AuthState
+@inject Payroll.Web.Services.FirebaseEmployeeManagementService FirebaseEmployees
+@inject ITenantContextService TenantContext
+@inject IAppModeService AppMode
 
 <div class="page">
+    <div id="payroll-top-progress-bar" class="payroll-top-progress-bar"></div>
     <div class="sidebar">
         <CascadingValue Value="settings" Name="Settings">
             <CascadingValue Value="userIsSuperAdmin" Name="IsSuperAdmin">
@@ -23,11 +27,80 @@
     </div>
 
     <main>
+        @if (!isOfflineMode)
+        {
+            <global::Payroll.Web.Components.UI.Layout.SuperAdminTenantBanner />
+        }
         <div class="top-row">
             <div class="header-content-wrapper">
-                <a class="navbar-brand" href="">Payroll.Web</a>
+                <div class="d-flex align-items-center gap-2">
+                    <a class="navbar-brand d-flex align-items-center gap-2 fw-bold" href="">
+                        <span class="fs-4">@(activeTenant?.IconEmoji ?? "🏢")</span>
+                        <span>BioMetric <span class="text-primary">+ Payroll</span></span>
+                    </a>
+                    @if (isOfflineMode)
+                    {
+                        <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle px-2 py-1 d-inline-flex align-items-center gap-1 shadow-sm" title="Offline Standalone Mode: Local SQLite Database active without cloud dependencies">
+                            <span>📴</span>
+                            <span class="fw-bold">Offline Standalone</span>
+                        </span>
+                    }
+                    <div id="payroll-header-loading-indicator" class="header-nav-loading-pill d-none align-items-center gap-1.5 px-2.5 py-1 rounded-pill shadow-sm">
+                        <span class="spinner-border spinner-border-sm text-primary" style="width: 0.82rem; height: 0.82rem; border-width: 0.15em;" role="status"></span>
+                        <span class="small fw-bold text-primary" style="font-size: 0.76rem;">Loading...</span>
+                    </div>
+                </div>
 
-                <div class="auth-section d-flex align-items-center">
+                <div class="auth-section d-flex align-items-center gap-2">
+                    @* --- ACTIVE COMPANY BADGE & SMART SWITCHER (BESIDE THEME CONTROL) --- *@
+                    @if (!isOfflineMode && activeTenant != null)
+                    {
+                        @if (userIsSuperAdmin)
+                        {
+                            <div class="d-flex align-items-center gap-1 me-1">
+                                @* Active Company Badge *@
+                                <div class="badge bg-primary-subtle text-primary border border-primary-subtle px-2.5 py-1.5 rounded-pill d-inline-flex align-items-center gap-1.5 shadow-sm fw-semibold"
+                                     title="Active Workspace: @activeTenant.CompanyName (@activeTenant.CompanyCode)">
+                                    <span class="fs-6">@activeTenant.IconEmoji</span>
+                                    <span class="d-none d-sm-inline text-truncate" style="max-width: 140px;">@activeTenant.CompanyName</span>
+                                    <span class="badge bg-primary text-white py-0.5 px-1.5 rounded-pill font-monospace small">@activeTenant.CompanyCode</span>
+                                </div>
+
+                                @* Smart Company Switcher (Rich Icon Only) *@
+                                @if (allTenants.Count == 2)
+                                {
+                                    @* Exactly 2 companies: 1-click instant direct toggle *@
+                                    var otherTenant = allTenants.FirstOrDefault(t => t.TenantId != activeTenant.TenantId) ?? allTenants.First();
+                                    <button class="btn btn-sm btn-outline-primary rounded-circle p-0 d-inline-flex align-items-center justify-content-center shadow-sm flex-shrink-0"
+                                            style="width: 32px; height: 32px; min-width: 32px;"
+                                            @onclick="() => SwitchTenantDirectly(otherTenant.TenantId)"
+                                            title="Switch directly to @otherTenant.CompanyName (@otherTenant.CompanyCode)">
+                                        <i class="bi bi-arrow-left-right fs-6"></i>
+                                    </button>
+                                }
+                                else if (allTenants.Count > 2)
+                                {
+                                    @* More than 2 companies: Rich Icon Button opens modal dialog *@
+                                    <button class="btn btn-sm btn-outline-primary rounded-circle p-0 d-inline-flex align-items-center justify-content-center shadow-sm flex-shrink-0"
+                                            style="width: 32px; height: 32px; min-width: 32px;"
+                                            type="button"
+                                            @onclick="OpenCompanySwitcherModal"
+                                            title="Switch Company Workspace (@allTenants.Count available)">
+                                        <i class="bi bi-arrow-left-right fs-6"></i>
+                                    </button>
+                                }
+                            </div>
+                        }
+                        else
+                        {
+                            <span class="badge bg-primary-subtle text-primary border border-primary-subtle px-2.5 py-1.5 rounded-pill d-inline-flex align-items-center gap-1.5 shadow-sm fw-semibold me-1"
+                                  title="@activeTenant.CompanyName">
+                                <span>@activeTenant.IconEmoji</span>
+                                <span class="d-none d-sm-inline text-truncate" style="max-width: 140px;">@activeTenant.CompanyName</span>
+                            </span>
+                        }
+                    }
+
                     @if (settings?.EnableInAppNotifications == true)
                     {
                         <AuthorizeView>
@@ -85,11 +158,13 @@
         </AuthorizeView>
 
         @* ============================================================
-           MAIN PAGE CONTENT
+           MAIN PAGE CONTENT (WITH USER-CONFIGURED TRANSITIONS)
            ============================================================ *@
 
         <article class="content">
-            @Body
+            <div @key="pageTransitionKey" class="page-transition-wrapper @GetTransitionClass()">
+                @Body
+            </div>
         </article>
 
         <BlazoredToasts Position="ToastPosition.BottomRight"
@@ -98,22 +173,101 @@
         @* Central realtime invalidation fallback for pages that do not
            have a domain-specific AttendanceRefreshListener. *@
         <global::Payroll.Web.Components.UI.Attendance.ApplicationRealtimeRefreshListener />
+
+        @* --- COMPANY WORKSPACE SWITCHER MODAL DIALOG (>2 COMPANIES) --- *@
+        @if (showCompanySwitcherModal)
+        {
+            <div class="modal fade show d-block" tabindex="-1" style="background-color: rgba(0,0,0,0.65); z-index: 3100;" role="dialog">
+                <div class="modal-dialog modal-dialog-centered modal-sm" style="max-width: 440px;">
+                    <div class="modal-content border-0 shadow-lg rounded-4 overflow-hidden">
+                        <div class="modal-header bg-primary text-white px-3 py-2.5">
+                            <h6 class="modal-title fw-bold d-flex align-items-center gap-2 mb-0">
+                                <span>🏢</span> Switch Company Workspace
+                            </h6>
+                            <button type="button" class="btn-close btn-close-white" @onclick="CloseCompanySwitcherModal"></button>
+                        </div>
+                        <div class="modal-body p-2" style="max-height: 60vh; overflow-y: auto;">
+                            <div class="list-group list-group-flush">
+                                @foreach (var tenant in allTenants)
+                                {
+                                    var isSelected = tenant.TenantId == activeTenant?.TenantId;
+                                    <button type="button" 
+                                            class="list-group-item list-group-item-action border-0 rounded-3 py-2.5 px-3 mb-1 d-flex align-items-center justify-content-between @(isSelected ? "bg-primary text-white shadow-sm" : "")"
+                                            @onclick="async () => { await SwitchTenantDirectly(tenant.TenantId); CloseCompanySwitcherModal(); }">
+                                        <div class="d-flex align-items-center gap-2.5 text-truncate me-2">
+                                            <span class="fs-4">@tenant.IconEmoji</span>
+                                            <div class="text-truncate text-start">
+                                                <div class="fw-bold text-truncate @(isSelected ? "text-white" : "text-dark")">@tenant.CompanyName</div>
+                                                <div class="small @(isSelected ? "text-white-50" : "text-muted") text-truncate">@tenant.AdminEmail</div>
+                                            </div>
+                                        </div>
+                                        <div class="d-flex align-items-center gap-1.5 flex-shrink-0">
+                                            <span class="badge @(isSelected ? "bg-white text-primary" : "bg-primary-subtle text-primary") rounded-pill font-monospace small">
+                                                @tenant.CompanyCode
+                                            </span>
+                                            @if (isSelected)
+                                            {
+                                                <i class="bi bi-check-circle-fill text-white fs-5 ms-1"></i>
+                                            }
+                                        </div>
+                                    </button>
+                                }
+                            </div>
+                        </div>
+                        <div class="modal-footer bg-light px-3 py-2 d-flex justify-content-between">
+                            <a href="/superadmin/tenants" class="btn btn-sm btn-link text-decoration-none text-primary fw-semibold p-0" @onclick="CloseCompanySwitcherModal">
+                                👑 Manage All Companies
+                            </a>
+                            <button type="button" class="btn btn-sm btn-secondary rounded-pill px-3" @onclick="CloseCompanySwitcherModal">
+                                Close
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        }
     </main>
 </div>
 
 @code {
+    private bool isOfflineMode;
     private FeatureSettings? settings;
+    private CompanySetting? companySetting;
+    private string pageTransitionKey = Guid.NewGuid().ToString();
     private NavMenu? navMenuRef;
     private bool userIsSuperAdmin;
+    private CompanyTenant? activeTenant;
+    private List<CompanyTenant> allTenants = new();
+    private bool showCompanySwitcherModal = false;
     private bool geoTrackingEnabled;
     private int employeeId;
     private string? themeUserId;
     private string? persistedTheme;
 
+    private string GetTransitionClass()
+    {
+        var effect = companySetting?.PageTransitionEffect?.ToLowerInvariant() ?? "fade";
+        return effect switch
+        {
+            "slideleft" or "slide" => "page-transition-slideleft",
+            "slideup" => "page-transition-slideup",
+            "zoom" => "page-transition-zoom",
+            "flip" => "page-transition-flip",
+            "none" => "page-transition-none",
+            _ => "page-transition-fade"
+        };
+    }
+
+    private void OpenCompanySwitcherModal() => showCompanySwitcherModal = true;
+    private void CloseCompanySwitcherModal() => showCompanySwitcherModal = false;
+
     protected override async Task OnInitializedAsync()
     {
         Theme.OnThemeChanged += StateHasChanged;
         Navigation.LocationChanged += HandleLocationChanged;
+
+        isOfflineMode = await AppMode.IsOfflineModeAsync();
+        AppMode.OnAppModeChanged += HandleAppModeChanged;
 
         var authState =
             await AuthState.GetAuthenticationStateAsync();
@@ -140,15 +294,67 @@
         }
 
         userIsSuperAdmin =
-            authState.User.IsInRole("SuperAdmin");
+            await TenantContext.IsSuperAdminAsync();
+
+        activeTenant =
+            await TenantContext.GetActiveTenantAsync();
+
+        if (userIsSuperAdmin)
+        {
+            allTenants = await TenantContext.GetAllTenantsAsync();
+        }
+
+        TenantContext.OnTenantChanged += HandleTenantChanged;
 
         await LoadFeatureSettings();
         await LoadCurrentEmployee();
     }
 
+    private async void HandleTenantChanged()
+    {
+        activeTenant = await TenantContext.GetActiveTenantAsync();
+        if (userIsSuperAdmin)
+        {
+            allTenants = await TenantContext.GetAllTenantsAsync();
+        }
+        await LoadFeatureSettings();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task SwitchTenantDirectly(string tenantId)
+    {
+        try
+        {
+            await TenantContext.SetActiveTenantIdAsync(tenantId);
+            try
+            {
+                await JSRuntime.InvokeVoidAsync("setTenantCookie", tenantId);
+            }
+            catch { }
+            Navigation.NavigateTo(Navigation.Uri, forceLoad: true);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to switch tenant workspace to {TenantId}", tenantId);
+        }
+    }
+
+    private async void HandleAppModeChanged()
+    {
+        isOfflineMode = await AppMode.IsOfflineModeAsync();
+        await LoadFeatureSettings();
+        await InvokeAsync(StateHasChanged);
+    }
+
     protected override async Task OnAfterRenderAsync(
         bool firstRender)
     {
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("finishNavigationProgress");
+        }
+        catch { }
+
         if (!firstRender)
             return;
 
@@ -246,6 +452,15 @@
                 return;
             }
 
+            var claimId = user.FindFirst("employee_id")?.Value
+                        ?? user.FindFirst("EmployeeID")?.Value;
+            if (int.TryParse(claimId, out var parsedId) && parsedId > 0)
+            {
+                employeeId = parsedId;
+                _logger.LogInformation("Employee layout loaded from claim. EmployeeId={EmployeeId}", employeeId);
+                return;
+            }
+
             var email =
                 user.Identity?.Name;
 
@@ -255,14 +470,9 @@
                 return;
             }
 
-            await using var dbContext =
-                await DbFactory.CreateDbContextAsync();
-
-            var employee =
-                await dbContext.Employees
-                    .AsNoTracking()
-                    .FirstOrDefaultAsync(
-                        e => e.Email == email);
+            var employees = await FirebaseEmployees.GetEmployeesAsync();
+            var employee = employees.FirstOrDefault(
+                e => string.Equals(e.Email, email, StringComparison.OrdinalIgnoreCase));
 
             employeeId =
                 employee?.EmployeeID ?? 0;
@@ -332,11 +542,15 @@
     {
         try
         {
+            pageTransitionKey = Guid.NewGuid().ToString();
             await InvokeAsync(async () =>
             {
                 await JSRuntime.InvokeVoidAsync(
                     "payrollDocumentTitle",
                     e.Location);
+                await JSRuntime.InvokeVoidAsync(
+                    "finishNavigationProgress");
+                StateHasChanged();
             });
         }
         catch (Exception ex)
@@ -352,36 +566,17 @@
     {
         Theme.OnThemeChanged -= StateHasChanged;
         Navigation.LocationChanged -= HandleLocationChanged;
+        TenantContext.OnTenantChanged -= HandleTenantChanged;
+        AppMode.OnAppModeChanged -= HandleAppModeChanged;
     }
 
     private async Task LoadFeatureSettings()
     {
         try
         {
-            await using var dbContext =
-                await DbFactory.CreateDbContextAsync();
-
-            settings =
-                await dbContext.FeatureSettings
-                    .AsNoTracking()
-                    .FirstOrDefaultAsync(
-                        s => s.Id == 1);
-
-            if (settings == null)
-            {
-                _logger.LogWarning(
-                    "FeatureSettings not found, inserting defaults.");
-
-                settings =
-                    new FeatureSettings();
-
-                dbContext.FeatureSettings.Add(settings);
-
-                await dbContext.SaveChangesAsync();
-            }
-
-            geoTrackingEnabled =
-                settings.EnableGeoFencing;
+            settings = await TenantContext.GetActiveFeatureSettingsAsync();
+            geoTrackingEnabled = settings.EnableGeoFencing;
+            companySetting = await TenantContext.GetActiveCompanySettingAsync();
         }
         catch (Exception ex)
         {

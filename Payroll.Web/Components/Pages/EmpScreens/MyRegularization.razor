@@ -8,7 +8,9 @@
 @using Microsoft.AspNetCore.Components.Forms
 @inject IDbContextFactory<AppDbContext> DbFactory
 @inject RegularizationService RegularizationService
+@inject FirebaseRegularizationService FirebaseRegularizationService
 @inject AuthenticationStateProvider AuthState
+@inject Payroll.Web.Services.FirebaseEmployeeManagementService FirebaseEmployees
 @inject IToastService toastService
 @attribute [Authorize(Roles = "Employee, SuperAdmin")]
 
@@ -36,10 +38,27 @@ else if (linkedEmployee == null)
 else
 {
     <div class="container-fluid d-flex flex-column h-100">
-        <h3 class="text-primary fw-bold mb-3 flex-shrink-0">Request Punch Correction</h3>
-        <p class="text-muted small mb-4 flex-shrink-0">
-            Missing punches from the current month are detected automatically. Select one on the right to pre-fill this request, or enter a manual correction.
-        </p>
+        <div class="page-header-container mb-4">
+            <div class="d-flex align-items-center gap-3">
+                <div class="emoji-icon-badge emoji-icon-badge-primary">
+                    🛠️
+                </div>
+                <div>
+                    <h2 class="page-header-title">
+                        Punch Regularization & Correction
+                    </h2>
+                    <p class="page-header-subtitle">
+                        <span>⏱️ Auto-detects missing biometric punches & submit swift correction requests for manager review</span>
+                    </p>
+                </div>
+            </div>
+
+            <div class="d-flex align-items-center gap-2">
+                <span class="badge bg-primary bg-opacity-10 text-primary rounded-pill px-3 py-2 fw-semibold border border-primary border-opacity-25">
+                    <span>⚡ Realtime Sync & Notification</span>
+                </span>
+            </div>
+        </div>
 
         <div class="row g-4 flex-grow-1 overflow-auto">
             @* --- LEFT: SUBMISSION FORM --- *@
@@ -240,19 +259,26 @@ else
             }
 
             var auth = await AuthState.GetAuthenticationStateAsync();
-            var email = auth.User.Identity?.Name;
-            linkedEmployee = await db.Employees.FirstOrDefaultAsync(e => e.Email == email);
+            var employeeClaim = auth.User.FindFirst("employee_id")?.Value
+                ?? auth.User.FindFirst("employeeId")?.Value;
+            if (int.TryParse(employeeClaim, out var claimEmployeeId) && claimEmployeeId > 0)
+                linkedEmployee = await FirebaseRegularizationService.GetEmployeeAsync(claimEmployeeId);
+
+            if (linkedEmployee == null)
+            {
+                var email = auth.User.Identity?.Name;
+                linkedEmployee = await FirebaseEmployees.GetEmployeeByEmailAsync(email);
+            }
             if (linkedEmployee != null)
             {
                 var now = DateTime.Now;
                 var monthStart = new DateOnly(now.Year, now.Month, 1);
                 var today = DateOnly.FromDateTime(now);
 
-                myRequests = await db.AttendanceRegularizations
-                    .Where(r => r.EmployeeId == linkedEmployee.EmployeeID)
+                myRequests = (await FirebaseRegularizationService.GetAsync(linkedEmployee.EmployeeID))
                     .OrderByDescending(r => r.SubmissionDate)
                     .Take(50)
-                    .ToListAsync();
+                    .ToList();
 
                 var logs = await db.AttendanceLogs.AsNoTracking()
                     .Where(l => l.EmployeeID == linkedEmployee.EmployeeID &&

@@ -8,6 +8,7 @@
 @inject Payroll.Web.Services.AttendanceRefreshService AttendanceRefresh
 @inject Payroll.Web.Services.NotificationService NotificationService
 @inject IToastService toastService
+@inject Payroll.Web.Services.FirebaseEmployeeManagementService FirebaseEmployees
 @inject IJSRuntime JSRuntime
 @attribute [Authorize(Roles = "Admin, SuperAdmin")]
 
@@ -179,7 +180,7 @@ else
             return;
         }
 
-        employees = await db.Employees.AsNoTracking().ToListAsync();
+        employees = await FirebaseEmployees.GetEmployeesAsync();
         allDeclarations = await db.TaxDeclarations
             .Where(t => t.FinancialYear == selectedYear)
             .OrderByDescending(t => t.SubmissionDate)

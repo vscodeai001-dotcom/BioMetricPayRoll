@@ -6,25 +6,52 @@
 @using global::Payroll.Shared
 @using global::Payroll.Shared.Data
 @using global::Payroll.Web.Components.Pages.Employees
-@using Microsoft.EntityFrameworkCore
+@using Microsoft.JSInterop
+@implements IAsyncDisposable
 @inject AuthenticationStateProvider AuthState
-@inject IDbContextFactory<AppDbContext> DbFactory
-@inject Payroll.Web.Services.AuditService AuditService
-@inject Payroll.Web.Services.EmployeeDeletionService DeletionService
+@inject Payroll.Web.Services.FirebaseEmployeeDeletionService DeletionService
 @inject Payroll.Web.Services.AttendanceRefreshService AttendanceRefresh
+@inject Payroll.Web.Services.FirebaseEmployeeManagementService FirebaseEmployees
 @inject IJSRuntime JSRuntime
 @inject ILogger<EmployeeList> _logger
 @inject IToastService toastService
-@attribute [Authorize(Roles = "Employee, SuperAdmin")]
+@attribute [Authorize(Roles = "Employee, Admin, SuperAdmin")]
 
 <PageTitle>Employee Management</PageTitle>
 
-<div class="d-flex justify-content-between align-items-center mb-3">
-    <h3>Employee Management</h3>
+@if (loadedFromOfflineCache)
+{
+    <div class="alert alert-warning py-2 d-flex align-items-center justify-content-between" role="status">
+        <span><i class="bi bi-cloud-slash me-2"></i>Showing the last cached employee list. Changes will reconcile automatically when Firebase reconnects.</span>
+        @if (cacheReconciliationInProgress)
+        {
+            <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+        }
+    </div>
+}
+
+<div class="page-header-container">
+    <div class="d-flex align-items-center gap-3">
+        <div class="emoji-icon-badge emoji-icon-badge-primary">
+            👥
+        </div>
+        <div>
+            <h2 class="page-header-title">
+                Employee Directory
+            </h2>
+            <p class="page-header-subtitle">
+                <span>🏢 Manage staff profiles, compensation structures & biometric bindings</span>
+                @if (employees != null)
+                {
+                    <span>• <strong class="text-primary">@employees.Count()</strong> Team Members</span>
+                }
+            </p>
+        </div>
+    </div>
     @if (!showForm)
     {
-        <button class="btn btn-primary" @onclick="OpenAddForm">
-            <span class="bi bi-plus-lg"></span> Add New Employee
+        <button class="btn btn-primary action-pill-btn" @onclick="OpenAddForm">
+            <span>➕</span> <span class="bi bi-person-plus-fill"></span> Add New Employee
         </button>
     }
 </div>
@@ -32,16 +59,17 @@
 @* --- UNIFIED FORM CARD (Used for Add & Edit) --- *@
 @if (showForm)
 {
-    <div class="card shadow-sm mb-4 border-primary">
-        <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center py-2">
-            <h5 class="mb-0">
-                <i class="bi @(currentEmployee.EmployeeID == 0 ? "bi-person-plus" : "bi-pencil-square") me-2"></i>
-                @(currentEmployee.EmployeeID == 0 ? "Add New Employee" : $"Edit {currentEmployee.Name}")
+    <div class="card shadow-sm mb-4 border-primary rounded-4 overflow-hidden">
+        <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center py-3 px-4">
+            <h5 class="mb-0 d-flex align-items-center gap-2">
+                <span>@(currentEmployee.EmployeeID == 0 ? "➕" : "✏️")</span>
+                <i class="bi @(currentEmployee.EmployeeID == 0 ? "bi-person-plus-fill" : "bi-pencil-square") me-1"></i>
+                @(currentEmployee.EmployeeID == 0 ? "Add New Employee Profile" : $"Edit Profile: {currentEmployee.Name}")
             </h5>
             <button type="button" class="btn-close btn-close-white" @onclick="CloseForm"></button>
         </div>
 
-        <div class="card-body">
+        <div class="card-body p-4">
             <EmployeeForm Employee="currentEmployee"
                           CompanySettings="companySettings"
                           FeatureSettings="featureSettings"
@@ -53,99 +81,172 @@
                           @bind-ShiftEndTime="modalShiftEndTime" />
         </div>
 
-        <div class="card-footer bg-light py-2 text-end">
-            <button type="button" class="btn btn-secondary me-2" @onclick="CloseForm">Cancel</button>
-            <button type="button" class="btn btn-success px-4" @onclick="SaveEmployee">
-                <span class="bi bi-check-lg"></span>
+        <div class="card-footer bg-light py-3 px-4 text-end d-flex justify-content-end gap-2">
+            <button type="button" class="btn btn-secondary action-pill-btn" @onclick="CloseForm">
+                <span>❌</span> Cancel
+            </button>
+            <button type="button" class="btn btn-success action-pill-btn px-4" @onclick="SaveEmployee">
+                <span>💾</span> <span class="bi bi-check-lg"></span>
                 @(currentEmployee.EmployeeID == 0 ? "Save Employee" : "Update Changes")
             </button>
         </div>
     </div>
 }
 
-@* --- EMPLOYEE LIST TABLE --- *@
+@* --- EMPLOYEE LIST TABLE (compact, no horizontal scroll) --- *@
 @if (employees == null)
 {
-    <p><em>Loading employees...</em></p>
+    <div class="text-center p-5">
+        <div class="spinner-border text-primary" role="status"></div>
+        <p class="mt-3 text-muted fw-semibold">Loading employees... 👥</p>
+    </div>
 }
 else
 {
-    <div class="table-responsive">
-        <table class="table table-striped table-hover table-sm" style="font-size: 0.9em;">
-            <thead class="table-dark" style="white-space: nowrap;">
-                <tr>
-                    <th>ID</th>
-                    <th>Bio ID</th>
-                    <th>Name</th>
-                    <th>Role</th>
-                    <th>Hire Date</th>
-                    <th>Term. Date</th>
-                    <th class="text-end">Pay Type</th>
-                    <th class="text-center">Shift Time</th>
-                    <th class="text-center">Break</th>
-                    <th class="text-center">Comp Off</th>
-                    <th>OT Rule</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-            <tbody>
-                @if (!employees.Any())
-                {
-                    <tr><td colspan="12"><p><em>No employees found. Click "Add New Employee".</em></p></td></tr>
-                }
-                else
-                {
-                    @foreach (var emp in employees)
+    <div class="card shadow-sm border-0 rounded-3">
+        <div class="card-body p-0">
+            <table class="table table-hover align-middle table-sm mb-0 w-100" style="table-layout: fixed;">
+                <colgroup>
+                    <col style="width:5%">    @* # *@
+                    <col style="width:22%">   @* Name + Bio ID *@
+                    <col style="width:13%">   @* Role *@
+                    <col style="width:14%">   @* Pay + Hire/Term *@
+                    <col style="width:20%">   @* Shift + Break *@
+                    <col style="width:14%">   @* Comp Off + OT *@
+                    <col style="width:12%">   @* Actions *@
+                </colgroup>
+                <thead class="table-light">
+                    <tr>
+                        <th class="small text-uppercase fw-bold ps-3">#</th>
+                        <th class="small text-uppercase fw-bold">👤 Employee</th>
+                        <th class="small text-uppercase fw-bold">💼 Role</th>
+                        <th class="small text-uppercase fw-bold">💵 Pay</th>
+                        <th class="small text-uppercase fw-bold text-center">⏰ Shift / Break</th>
+                        <th class="small text-uppercase fw-bold text-center">🏖️ Off / OT</th>
+                        <th class="small text-uppercase fw-bold text-center pe-3">⚙️ Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @if (!employees.Any())
                     {
-                        <tr class="@(currentEmployee?.EmployeeID == emp.EmployeeID ? "table-info" : "")">
-                            <td>@emp.EmployeeID</td>
-                            <td>@emp.BiometricID</td>
-                            <td>@emp.Name</td>
-                            <td>@emp.Role</td>
-                            <td>@emp.HireDate?.ToString("dd-MMM-yyyy")</td>
-                            <td>@(emp.TerminationDate.HasValue? emp.TerminationDate.Value.ToString("dd-MMM-yyyy") : "--")</td>
-                            <td class="text-end">
-                                @if (emp.DirectHourlyWage.HasValue && emp.DirectHourlyWage > 0)
-                                {
-                                    <span>@emp.DirectHourlyWage.Value.ToString("N2", inrCulture) / hr</span>
-                                }
-                                else
-                                {
-                                    <span>@emp.MonthlySalary.ToString("N0", inrCulture) / mo</span>
-                                }
-                            </td>
-                            <td class="text-center" style="white-space: nowrap;">@(emp.ShiftStartTime?.ToString("hh:mm tt") ?? "--") - @(emp.ShiftEndTime?.ToString("hh:mm tt") ?? "--")</td>
-                            <td class="text-center">@emp.StandardBreakMinutes m</td>
-                            <td class="text-center">@(emp.CompOffDayOfWeek?.ToString() ?? "None")</td>
-                            <td>
-                                @emp.OT_Rule
-                                @if (emp.OT_Rule == "Flat" && emp.OT_FlatRate > 0)
-                                {
-                                    <span class="text-muted">(@emp.OT_FlatRate.ToString("N0", inrCulture))</span>
-                                }
-                            </td>
-                            <td style="white-space: nowrap;">
-                                <button class="btn btn-sm btn-outline-info me-1" @onclick="() => GoToDetails(emp.EmployeeID)" title="Details">
-                                    <span class="bi bi-info-circle"></span>
-                                </button>
-
-                                <button class="btn btn-sm btn-outline-primary me-1" @onclick="() => OpenEditForm(emp)" title="Edit">
-                                    <span class="bi bi-pencil-square"></span>
-                                </button>
-
-                                <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteEmployee(emp)" title="Delete">
-                                    <span class="bi bi-trash"></span>
+                        <tr>
+                            <td colspan="7" class="text-center py-5 text-muted">
+                                <span class="fs-1 d-block mb-2">👥</span>
+                                <p class="mb-2 fw-semibold">No employees found in directory.</p>
+                                <button class="btn btn-primary action-pill-btn btn-sm" @onclick="OpenAddForm">
+                                    <span>➕</span> Add First Employee
                                 </button>
                             </td>
                         </tr>
                     }
-                }
-            </tbody>
-        </table>
+                    else
+                    {
+                        @foreach (var emp in employees)
+                        {
+                            <tr class="@(currentEmployee?.EmployeeID == emp.EmployeeID ? "table-info" : "")">
+
+                                @* ID *@
+                                <td class="fw-bold text-muted ps-3 small">#@emp.EmployeeID</td>
+
+                                @* Name + Bio ID *@
+                                <td>
+                                    <div class="d-flex align-items-center gap-2">
+                                        <div class="avatar-circle rounded-circle bg-primary bg-opacity-10 text-primary fw-bold d-flex align-items-center justify-content-center flex-shrink-0"
+                                             style="width:30px; height:30px; font-size:0.8rem;">
+                                            @(string.IsNullOrWhiteSpace(emp.Name) ? "?" : emp.Name.Substring(0, 1).ToUpper())
+                                        </div>
+                                        <div class="overflow-hidden">
+                                            <div class="fw-semibold text-truncate" style="max-width:130px;" title="@emp.Name">@emp.Name</div>
+                                            <div class="text-muted" style="font-size:0.72rem;">
+                                                🧬 @(string.IsNullOrWhiteSpace(emp.BiometricID) ? "--" : emp.BiometricID)
+                                            </div>
+                                        </div>
+                                    </div>
+                                </td>
+
+                                @* Role *@
+                                <td>
+                                    <span class="badge bg-primary bg-opacity-10 text-primary rounded-pill px-2 py-1 small text-truncate d-inline-block" style="max-width:100%;" title="@emp.Role">
+                                        @(string.IsNullOrWhiteSpace(emp.Role) ? "Staff" : emp.Role)
+                                    </span>
+                                </td>
+
+                                @* Pay + Hire / Term dates *@
+                                <td>
+                                    <div class="fw-semibold small">
+                                        @if (emp.DirectHourlyWage.HasValue && emp.DirectHourlyWage > 0)
+                                        {
+                                            <span class="text-success">@emp.DirectHourlyWage.Value.ToString("C2", inrCulture)<span class="text-muted fw-normal">/hr</span></span>
+                                        }
+                                        else
+                                        {
+                                            <span class="text-primary">@emp.MonthlySalary.ToString("C0", inrCulture)<span class="text-muted fw-normal">/mo</span></span>
+                                        }
+                                    </div>
+                                    <div class="text-muted" style="font-size:0.7rem;">
+                                        📅 @(emp.HireDate?.ToString("dd-MMM-yy") ?? "--")
+                                        @if (emp.TerminationDate.HasValue)
+                                        {
+                                            <span class="text-danger"> → @emp.TerminationDate.Value.ToString("dd-MMM-yy")</span>
+                                        }
+                                    </div>
+                                </td>
+
+                                @* Shift + Break *@
+                                <td class="text-center">
+                                    <div class="badge bg-light text-dark border rounded-pill px-2 small text-truncate d-inline-block" style="max-width:100%;">
+                                        @(emp.ShiftStartTime?.ToString("hh:mm tt") ?? "--") – @(emp.ShiftEndTime?.ToString("hh:mm tt") ?? "--")
+                                    </div>
+                                    <div class="text-muted" style="font-size:0.7rem;">
+                                        ☕ @emp.StandardBreakMinutes min break
+                                        <span class="badge @(emp.ShiftMode == "CONTINUOUS" ? "bg-info text-white" : "bg-light text-secondary border") ms-1" style="font-size:0.65rem;">@(emp.ShiftMode == "CONTINUOUS" ? "Continuous" : "Single Day")</span>
+                                    </div>
+                                </td>
+
+                                @* Comp Off + OT *@
+                                <td class="text-center">
+                                    <div class="small">
+                                        <span class="badge bg-light text-dark border rounded-pill px-2">
+                                            🏖️ @(emp.CompOffDayOfWeek?.ToString() ?? "None")
+                                        </span>
+                                    </div>
+                                    <div class="text-muted" style="font-size:0.7rem;">
+                                        ⚡ @emp.OT_Rule
+                                        @if (emp.OT_Rule == "Flat" && emp.OT_FlatRate > 0)
+                                        {
+                                            <span>(@emp.OT_FlatRate.ToString("N0", inrCulture))</span>
+                                        }
+                                    </div>
+                                </td>
+
+                                @* Actions *@
+                                <td class="text-center pe-3">
+                                    <div class="d-inline-flex gap-1">
+                                        <a class="btn btn-sm btn-outline-success px-2 py-1" href="/employees/insights/@emp.EmployeeID" title="Employee Insights 📊">
+                                            <i class="bi bi-graph-up-arrow"></i>
+                                        </a>
+                                        <button class="btn btn-sm btn-outline-info px-2 py-1" @onclick="() => GoToDetails(emp.EmployeeID)" title="View Details">
+                                            <i class="bi bi-eye"></i>
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-primary px-2 py-1" @onclick="() => OpenEditForm(emp)" title="Edit">
+                                            <i class="bi bi-pencil-square"></i>
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-danger px-2 py-1" @onclick="() => DeleteEmployee(emp)" title="Delete">
+                                            <i class="bi bi-trash"></i>
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+        </div>
     </div>
 }
 
 <AttendanceRefreshListener OnAttendanceChanged="HandleDataRefresh" />
+<ApplicationRealtimeRefreshListener EntityFilter="Employee" OnApplicationDataChanged="HandleDataRefresh" />
 
 @* --- DELETION CONFIRMATION MODAL --- *@
 @if (showDeletionDialog && selectedEmployeeForDeletion != null)
@@ -260,11 +361,15 @@ private bool showDeletionDialog = false;
 private Employee? selectedEmployeeForDeletion;
 private bool isDeletionCheckLoading = false;
 private bool isProcessingDeletion = false;
-private EmployeeDeletionService.EmployeeDeletionDependencies? deletionDependencies;
+private FirebaseEmployeeDeletionService.EmployeeDeletionDependencies? deletionDependencies;
 
 // Helpers for Data Binding
 private DateTime? modalDob, modalHireDate, modalTerminationDate, modalShiftStartTime, modalShiftEndTime;
 private CultureInfo inrCulture = new CultureInfo("en-IN");
+private bool loadedFromOfflineCache;
+private bool cacheReconciliationInProgress;
+private bool firebaseReadFailed;
+private DotNetObjectReference<EmployeeList>? employeeCacheRef;
 
     protected override async Task OnInitializedAsync()
     {
@@ -289,41 +394,138 @@ private CultureInfo inrCulture = new CultureInfo("en-IN");
         }
     }
 
-    private async Task LoadEmployees()
+    protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        // FIX: Do NOT set employees = null here. It causes unnecessary re-renders.
-        // Only Invoke StateHasChanged if it's the first load.
-        if (employees == null)
-        {
-            await InvokeAsync(StateHasChanged);
-        }
+        if (!firstRender)
+            return;
 
+        // Blazor Server can prerender before JS is available. The cache is
+        // therefore hydrated after the first interactive render. Firebase is
+        // still the authoritative source and this only supplies a read fallback.
         try
         {
-            await using var dbContext = await DbFactory.CreateDbContextAsync();
-
-            // Load Feature Settings first
-            featureSettings = await dbContext.FeatureSettings.AsNoTracking().FirstOrDefaultAsync(f => f.Id == 1);
-
-            // Load Company Settings
-            companySettings = await dbContext.CompanySettings.AsNoTracking().FirstOrDefaultAsync(s => s.SettingID == 1);
-
-            // Load Employees
-            var list = await dbContext.Employees
-            .Where(e => !e.IsDeleted)
-            .OrderBy(e => e.Name).ToListAsync();
-            employees = list;
+            employeeCacheRef = DotNetObjectReference.Create(this);
+            await JSRuntime.InvokeVoidAsync("employeeCache.watchOnline", employeeCacheRef);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error loading employees.");
-
-            toastService.ShowError($"Error loading employees: {ex.Message}");
-            employees = new List<Employee>();
+            _logger.LogDebug(ex, "Employee browser online watcher could not be registered.");
         }
 
-        // One final UI update
+        if (firebaseReadFailed && (employees == null || employees.Count == 0))
+            await TryLoadEmployeeCacheAsync();
+    }
+
+    [JSInvokable("EmployeeBrowserOnline")]
+    public async Task EmployeeBrowserOnline()
+    {
+        // Browser connectivity returning is only a trigger. Firebase remains
+        // authoritative, and a successful read fully reconciles the cache.
+        await InvokeAsync(async () => await LoadEmployees());
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("employeeCache.unwatchOnline");
+        }
+        catch
+        {
+            // The Blazor circuit may already be disconnected.
+        }
+        finally
+        {
+            employeeCacheRef?.Dispose();
+            employeeCacheRef = null;
+        }
+    }
+
+    private async Task LoadEmployees()
+    {
+        if (employees == null)
+            await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            cacheReconciliationInProgress = true;
+            firebaseReadFailed = false;
+            // Firebase is the shared Web + Android SSOT for Employee Management.
+            // No EF/SQL read is used by this screen.
+            var settingsTask = FirebaseEmployees.GetCompanySettingsAsync();
+            var featuresTask = FirebaseEmployees.GetFeatureSettingsAsync();
+            var employeesTask = FirebaseEmployees.GetEmployeesAsync();
+
+            await Task.WhenAll(settingsTask, featuresTask, employeesTask);
+
+            companySettings = await settingsTask;
+            featureSettings = await featuresTask;
+            employees = await employeesTask;
+            loadedFromOfflineCache = false;
+
+            // Reconciliation rule: every successful Firebase read completely
+            // replaces the browser read cache. No local write is replayed.
+            try
+            {
+                await JSRuntime.InvokeVoidAsync("employeeCache.save", employees, FirebaseEmployees.OwnerUid);
+            }
+            catch (Exception cacheEx)
+            {
+                _logger.LogDebug(cacheEx, "Employee browser cache could not be updated.");
+            }
+
+            if (companySettings == null)
+                _logger.LogWarning("Firebase company_settings/1 is unavailable for Employee Management.");
+            if (featureSettings == null)
+                _logger.LogWarning("Firebase feature_settings/1 is unavailable for Employee Management.");
+        }
+        catch (Exception ex)
+        {
+            firebaseReadFailed = true;
+            _logger.LogWarning(ex, "Firebase employee read failed. Attempting browser read-model cache.");
+            if (!await TryLoadEmployeeCacheAsync())
+            {
+                toastService.ShowError($"Error loading employees from Firebase: {ex.Message}");
+                employees = new List<Employee>();
+            }
+        }
+        finally
+        {
+            cacheReconciliationInProgress = false;
+        }
+
         await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task<bool> TryLoadEmployeeCacheAsync()
+    {
+        try
+        {
+            var cached = await JSRuntime.InvokeAsync<EmployeeCacheEnvelope?>("employeeCache.load", FirebaseEmployees.OwnerUid);
+            if (cached?.payload == null || cached.payload.Count == 0)
+                return false;
+
+            employees = cached.payload;
+            loadedFromOfflineCache = true;
+            _logger.LogInformation(
+                "Employee list restored from browser read cache. Cache age: {AgeMinutes} minutes; stale={Stale}.",
+                cached.savedAt > 0 ? Math.Max(0, (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - cached.savedAt) / 60000) : -1,
+                cached.stale);
+            await InvokeAsync(StateHasChanged);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Employee browser read cache unavailable.");
+            return false;
+        }
+    }
+
+    private sealed class EmployeeCacheEnvelope
+    {
+        public List<Employee>? payload { get; set; }
+        public long savedAt { get; set; }
+        public bool stale { get; set; }
     }
 
     private void OpenAddForm()
@@ -353,8 +555,15 @@ private CultureInfo inrCulture = new CultureInfo("en-IN");
             HireDate = emp.HireDate,
             TerminationDate = emp.TerminationDate,
             MonthlySalary = emp.MonthlySalary,
+            BasicSalaryComponent = emp.BasicSalaryComponent,
+            HraComponent = emp.HraComponent,
+            DaComponent = emp.DaComponent,
+            StandardHours = emp.StandardHours,
             DirectHourlyWage = emp.DirectHourlyWage,
+            PayrollTypeOverride = emp.PayrollTypeOverride,
             SalaryCalculationMethod = emp.SalaryCalculationMethod,
+            PaidLeaveBalance = emp.PaidLeaveBalance,
+            SickLeaveBalance = emp.SickLeaveBalance,
             ShiftStartTime = emp.ShiftStartTime,
             ShiftEndTime = emp.ShiftEndTime,
             StandardBreakMinutes = emp.StandardBreakMinutes,
@@ -362,16 +571,29 @@ private CultureInfo inrCulture = new CultureInfo("en-IN");
             OT_Rule = emp.OT_Rule,
             OT_FlatRate = emp.OT_FlatRate,
             NightShiftAllowance = emp.NightShiftAllowance,
+            TdsRatePercent = emp.TdsRatePercent,
             Email = emp.Email,
             EnablePF = emp.EnablePF,
             UAN = emp.UAN,
             EnableESI = emp.EnableESI,
             ESINumber = emp.ESINumber,
+            BankAccountNumber = emp.BankAccountNumber,
+            BankIfscCode = emp.BankIfscCode,
+            BankName = emp.BankName,
+            LastRotatedDate = emp.LastRotatedDate,
             // --- NEW: ROTATION FIELDS ---
             EnableShiftRotation = emp.EnableShiftRotation,
             RotationGroup = emp.RotationGroup,
             ShiftRotationPattern = emp.ShiftRotationPattern,
             CurrentShiftIndex = emp.CurrentShiftIndex,
+            // --- NEW: ANDROID SYNCHRONIZATION ---
+            PhoneNumber = emp.PhoneNumber,
+            SalaryType = emp.SalaryType,
+            DailyAllowance = emp.DailyAllowance,
+            IsBonusEligible = emp.IsBonusEligible,
+            IsPaidLeaveEligible = emp.IsPaidLeaveEligible,
+            PaidLeaveOnWeekdays = emp.PaidLeaveOnWeekdays,
+            PaidLeaveOnWeekends = emp.PaidLeaveOnWeekends,
         };
         ResetHelpers();
         showForm = true;
@@ -410,32 +632,41 @@ private CultureInfo inrCulture = new CultureInfo("en-IN");
 
         try
         {
-            await using var dbContext = await DbFactory.CreateDbContextAsync();
-
-            if (currentEmployee.EmployeeID == 0)
+            var wasNew = currentEmployee.EmployeeID == 0;
+            var result = await FirebaseEmployees.SaveEmployeeAsync(currentEmployee);
+            if (!result.Success)
             {
-                dbContext.Employees.Add(currentEmployee);
+                toastService.ShowError(result.Message);
+                return;
+            }
+
+            var reconciliation = await FirebaseEmployees.ReconcileAuthAsync(result.Employee);
+
+            await AttendanceRefresh.NotifyEmployeeChangedAsync(
+                result.Employee.EmployeeID,
+                wasNew ? "CREATED" : "UPDATED");
+
+            if (!reconciliation.Success)
+            {
+                // The Firebase employee row is saved, but Auth/profile
+                // provisioning failed. Do not hide that state behind a
+                // misleading green success-only message.
+                toastService.ShowError(
+                    $"Employee saved, but Firebase provisioning failed: {reconciliation.Message}");
             }
             else
             {
-                var existing = await dbContext.Employees.FindAsync(currentEmployee.EmployeeID);
-                if (existing != null)
-                {
-                    dbContext.Entry(existing).CurrentValues.SetValues(currentEmployee);
-                }
+                toastService.ShowSuccess(
+                    reconciliation.Message.Contains("password setup email", StringComparison.OrdinalIgnoreCase)
+                        ? reconciliation.Message
+                        : "Employee saved and Firebase provisioning completed.");
             }
-
-            await dbContext.SaveChangesAsync();
-
-            await AttendanceRefresh.NotifyEmployeeChangedAsync(currentEmployee.EmployeeID == 0 ? null : currentEmployee.EmployeeID, currentEmployee.EmployeeID == 0 ? "CREATED" : "UPDATED");
-
-            toastService.ShowSuccess("Employee saved successfully.");
             CloseForm();
             await LoadEmployees();
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error saving employee.");
+            _logger.LogError(ex, "Error saving employee to Firebase.");
             toastService.ShowError($"Error: {ex.Message}");
         }
     }
@@ -463,7 +694,7 @@ private CultureInfo inrCulture = new CultureInfo("en-IN");
         {
             _logger.LogError(ex, "Error checking deletion dependencies");
             toastService.ShowError($"Error checking records: {ex.Message}");
-            deletionDependencies = new EmployeeDeletionService.EmployeeDeletionDependencies
+            deletionDependencies = new FirebaseEmployeeDeletionService.EmployeeDeletionDependencies
             {
                 EmployeeID = emp.EmployeeID,
                 EmployeeName = emp.Name,
@@ -492,23 +723,26 @@ private CultureInfo inrCulture = new CultureInfo("en-IN");
         isProcessingDeletion = true;
         try
         {
-            await using var dbContext = await DbFactory.CreateDbContextAsync();
-            var entity = await dbContext.Employees.FindAsync(selectedEmployeeForDeletion.EmployeeID);
-
-            if (entity != null)
+            var result = await FirebaseEmployees.SoftDeleteEmployeeAsync(selectedEmployeeForDeletion.EmployeeID);
+            if (!result.Success || result.Employee == null)
             {
-                entity.IsDeleted = true; // SOFT DELETE ACTION
-                dbContext.Update(entity);
-                await dbContext.SaveChangesAsync();
-
-                await AttendanceRefresh.NotifyEmployeeChangedAsync(entity.EmployeeID, "DELETED");
-
-                // AUDIT LOG
-                await AuditService.LogAsync("SOFT DELETE", "Employee", entity.EmployeeID.ToString(),
-                    $"Employee moved to Recycle Bin (Soft Deleted). Dependencies: {deletionDependencies.GetTotalDependencies()} related records preserved.");
+                toastService.ShowError(result.Message);
+                return;
             }
 
-            toastService.ShowSuccess($"'{selectedEmployeeForDeletion.Name}' moved to Recycle Bin. Related records preserved.");
+            var reconciliation = await FirebaseEmployees.ReconcileAuthAsync(result.Employee);
+            if (!reconciliation.Success)
+                toastService.ShowWarning(reconciliation.Message);
+
+            await AttendanceRefresh.NotifyEmployeeChangedAsync(result.Employee.EmployeeID, "DELETED");
+
+            await FirebaseEmployees.LogAuditAsync(
+                "SOFT DELETE",
+                "Employee",
+                result.Employee.EmployeeID.ToString(),
+                $"Employee moved to Recycle Bin (Soft Deleted). Dependencies: {deletionDependencies.GetTotalDependencies()} related records preserved.");
+
+            toastService.ShowSuccess($"'{result.Employee.Name}' moved to Recycle Bin. Related records preserved.");
             CloseDeletionDialog();
             await LoadEmployees();
         }

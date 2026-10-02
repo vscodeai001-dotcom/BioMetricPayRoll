@@ -1,59 +1,127 @@
-﻿@using global::Payroll.Web.Models
+@using global::Payroll.Web.Models
 @using Microsoft.AspNetCore.Components.Web
 
-<div class="card shadow-sm h-100">
-    <div class="card-body">
-        <h5 class="text-primary border-bottom pb-2 mb-3">Existing Users</h5>
+<div class="card shadow-sm h-100 border-0 rounded-3">
+    <div class="card-body p-3 p-md-4">
+        <div class="d-flex align-items-center justify-content-between border-bottom pb-2 mb-3">
+            <h5 class="text-primary fw-bold mb-0">
+                <i class="bi bi-people-fill me-2"></i>Existing Users &amp; Roles
+            </h5>
+            <span class="badge bg-primary-subtle text-primary border border-primary-subtle">
+                @UserList.Count Active Accounts
+            </span>
+        </div>
 
         @if (IsLoading)
         {
-            <p><em>Loading users...</em></p>
+            <div class="text-center py-4">
+                <div class="spinner-border text-primary spinner-border-sm me-2" role="status"></div>
+                <span class="text-muted">Loading user accounts...</span>
+            </div>
         }
         else
         {
-            <div class="table-responsive">
-                <table class="table table-sm table-striped table-hover">
-                    <thead class="table-dark">
+            <div class="table-responsive w-100">
+                <table class="table table-hover align-middle table-sm w-100 mb-0">
+                    <thead class="table-light">
                         <tr>
-                            <th>Email</th>
-                            <th>Employee</th>
-                            <th>Role</th>
-                            <th>Actions</th>
+                            <th class="small text-uppercase fw-bold" style="width: 32%;">User Account</th>
+                            <th class="small text-uppercase fw-bold" style="width: 26%;">Linked Staff Member</th>
+                            <th class="small text-uppercase fw-bold" style="width: 22%;">Assigned Role</th>
+                            <th class="small text-uppercase fw-bold text-end" style="width: 20%; min-width: 95px;">Actions</th>
                         </tr>
                     </thead>
 
                     <tbody>
                         @if (!UserList.Any())
                         {
-                            <tr><td colspan="4"><em>No users found.</em></td></tr>
+                            <tr>
+                                <td colspan="4" class="text-center py-4 text-muted">
+                                    <div class="fs-3 mb-1">👥</div>
+                                    <div>No users found in this workspace.</div>
+                                </td>
+                            </tr>
                         }
 
-                        @foreach (var user in UserList.OrderBy(u => u.Email))
+                        @foreach (var user in UserList.Where(u => !string.IsNullOrWhiteSpace(u.Email) && u.Email.Contains('@')).OrderBy(u => u.Email))
                         {
                             <tr>
-                                <td>@user.Email</td>
-                                <td>@user.EmployeeName</td>
                                 <td>
-                                    <span class="badge @(user.CurrentRole == "SuperAdmin" ? "bg-danger" :
-                                                                                                   user.CurrentRole == "Admin" ? "bg-info text-dark" :
-                                                                                                   "bg-primary")">
-                                        @user.CurrentRole
-                                    </span>
+                                    <div class="d-flex align-items-center">
+                                        <div class="avatar-circle me-2 bg-light border text-primary fw-bold d-flex align-items-center justify-content-center rounded-circle flex-shrink-0"
+                                             style="width: 28px; height: 28px; font-size: 0.8rem;">
+                                            @(string.IsNullOrWhiteSpace(user.Email) ? "?" : user.Email[0].ToString().ToUpperInvariant())
+                                        </div>
+                                        <div class="overflow-hidden">
+                                            <div class="fw-semibold text-truncate" style="max-width: 175px;" title="@user.Email">
+                                                @user.Email
+                                            </div>
+                                            @if (user.IsDisabled)
+                                            {
+                                                <span class="badge bg-danger-subtle text-danger" style="font-size: 0.65rem;">Suspended</span>
+                                            }
+                                        </div>
+                                    </div>
+                                </td>
+                                <td>
+                                    @if (!string.IsNullOrWhiteSpace(user.EmployeeName))
+                                    {
+                                        <div class="text-body-secondary text-truncate" style="max-width: 150px;" title="@user.EmployeeName">
+                                            👤 @user.EmployeeName
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <span class="text-muted fst-italic small">Unlinked</span>
+                                    }
+                                </td>
+                                <td>
+                                    @if (user.CurrentRole == "SuperAdmin")
+                                    {
+                                        <span class="badge bg-warning text-dark px-2 py-1 shadow-sm small">
+                                            <i class="bi bi-crown-fill me-1"></i>SuperAdmin
+                                        </span>
+                                    }
+                                    else if (user.CurrentRole == "Admin")
+                                    {
+                                        <span class="badge bg-info text-dark px-2 py-1 shadow-sm small">
+                                            <i class="bi bi-shield-fill-check me-1"></i>Company Admin
+                                        </span>
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-primary px-2 py-1 shadow-sm small">
+                                            <i class="bi bi-person-fill me-1"></i>Employee
+                                        </span>
+                                    }
                                 </td>
 
-                                <td style="white-space:nowrap;">
-                                    <button class="btn btn-sm btn-outline-primary me-1"
-                                            @onclick="() => HandleEditClick(user)" disabled="@IsSaving">
-                                        <i class="bi bi-person-badge"></i>
-                                    </button>
+                                <td class="text-end text-nowrap">
+                                    <div class="d-inline-flex gap-1 align-items-center justify-content-end">
+                                        @if (user.CurrentRole != "SuperAdmin" && (IsSuperAdmin || user.CurrentRole == "Employee"))
+                                        {
+                                            <button class="btn btn-sm btn-outline-primary px-2 py-1"
+                                                    title="Edit User Role"
+                                                    @onclick="() => HandleEditClick(user)" disabled="@IsSaving">
+                                                <i class="bi bi-person-badge"></i>
+                                            </button>
+                                        }
 
-                                    @if (user.CurrentRole != "SuperAdmin")
-                                    {
-                                        <button class="btn btn-sm btn-outline-danger"
-                                                @onclick="() => OnDeleteUser.InvokeAsync(user)" disabled="@IsSaving">
-                                            <i class="bi bi-trash"></i>
+                                        <button class="btn btn-sm btn-outline-warning px-2 py-1"
+                                                title="Change Password"
+                                                @onclick="() => OnResetPasswordRequested.InvokeAsync(user)" disabled="@IsSaving">
+                                            <i class="bi bi-key-fill"></i>
                                         </button>
-                                    }
+
+                                        @if ((IsSuperAdmin && user.CurrentRole != "SuperAdmin") || (!IsSuperAdmin && user.CurrentRole == "Employee"))
+                                        {
+                                            <button class="btn btn-sm btn-outline-danger px-2 py-1"
+                                                    title="Delete User"
+                                                    @onclick="() => OnDeleteUser.InvokeAsync(user)" disabled="@IsSaving">
+                                                <i class="bi bi-trash"></i>
+                                            </button>
+                                        }
+                                    </div>
                                 </td>
                             </tr>
                         }
@@ -66,42 +134,55 @@
 
 @if (ShowEditRoleModal && UserToEditRole != null)
 {
-    <div class="modal fade show" style="display:block;background:#00000088;">
+    <div class="modal fade show" style="display:block;background:rgba(0,0,0,0.65);" aria-modal="true" role="dialog">
         <div class="modal-dialog modal-sm modal-dialog-centered">
-            <div class="modal-content">
+            <div class="modal-content border-0 shadow-lg rounded-3">
 
-                <div class="modal-header">
-                    <h5>Edit Role – @UserToEditRole.Email</h5>
-                    <button class="btn-close" @onclick="OnCloseEditRole" disabled="@IsSaving"></button>
+                <div class="modal-header bg-primary text-white">
+                    <h6 class="modal-title fw-bold">
+                        <i class="bi bi-person-gear me-2"></i>Edit Role
+                    </h6>
+                    <button class="btn-close btn-close-white" @onclick="OnCloseEditRole" disabled="@IsSaving"></button>
                 </div>
 
-                <div class="modal-body">
-                    <label>New Role</label>
+                <div class="modal-body p-3">
+                    <div class="text-muted small mb-2 text-truncate" title="@UserToEditRole.Email">
+                        User: <strong>@UserToEditRole.Email</strong>
+                    </div>
+                    <label class="form-label fw-bold small">Assign New Role</label>
                     <select class="form-select" @bind="NewRoleForUser">
-                        <option>Employee</option>
-                        <option>Admin</option>
-                        <option>SuperAdmin</option>
+                        <option value="Employee">👤 Employee (Staff)</option>
+                        @if (IsSuperAdmin)
+                        {
+                            <option value="Admin">🛡️ Company Admin</option>
+                        }
                     </select>
                 </div>
 
-                <div class="modal-footer">
-                    <button class="btn btn-secondary" @onclick="OnCloseEditRole" disabled="@IsSaving">Cancel</button>
-                    <button class="btn btn-primary" @onclick="UpdateRole" disabled="@IsSaving">Update</button>
+                <div class="modal-footer bg-light p-2">
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="OnCloseEditRole" disabled="@IsSaving">Cancel</button>
+                    <button class="btn btn-sm btn-primary fw-bold px-3" @onclick="UpdateRole" disabled="@IsSaving">
+                        @if (IsSaving)
+                        {
+                            <span class="spinner-border spinner-border-sm me-1"></span>
+                        }
+                        Update Role
+                    </button>
                 </div>
 
             </div>
         </div>
     </div>
-
-    <div class="modal-backdrop fade show"></div>
 }
 
 @code {
     [Parameter] public List<UserRoleViewModel> UserList { get; set; } = new();
     [Parameter] public bool IsLoading { get; set; }
     [Parameter] public bool IsSaving { get; set; }
+    [Parameter] public bool IsSuperAdmin { get; set; } = false;
 
     [Parameter] public EventCallback<UserRoleViewModel> OnEditRoleRequested { get; set; }
+    [Parameter] public EventCallback<UserRoleViewModel> OnResetPasswordRequested { get; set; }
     [Parameter] public EventCallback<UserRoleViewModel> OnDeleteUser { get; set; }
     [Parameter] public EventCallback UpdateUserRole { get; set; }
 

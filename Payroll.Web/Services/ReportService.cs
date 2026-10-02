@@ -28,10 +28,9 @@ namespace Payroll.Web.Services
 
             // Batch fetch all related employees for details
             var empIds = payrolls.Select(p => p.EmployeeID).Distinct().ToList();
-            var employees = await db.Employees
+            var employees = (await _firebaseEmployees.GetEmployeesAsync())
                 .Where(e => empIds.Contains(e.EmployeeID))
-                .AsNoTracking()
-                .ToDictionaryAsync(e => e.EmployeeID);
+                .ToDictionary(e => e.EmployeeID);
 
             var report = new List<FinancialRegisterRow>();
 
@@ -86,10 +85,14 @@ namespace Payroll.Web.Services
             return report;
         }
         private readonly IDbContextFactory<AppDbContext> _dbFactory;
+        private readonly FirebaseEmployeeManagementService _firebaseEmployees;
 
-        public ReportService(IDbContextFactory<AppDbContext> dbFactory)
+        public ReportService(
+            IDbContextFactory<AppDbContext> dbFactory,
+            FirebaseEmployeeManagementService firebaseEmployees)
         {
             _dbFactory = dbFactory;
+            _firebaseEmployees = firebaseEmployees;
         }
 
         public async Task<List<DailySummary>> GetEmployeeDailySummary(AppDbContext db, DateOnly startDate, DateOnly endDate, int employeeId)
@@ -140,7 +143,7 @@ namespace Payroll.Web.Services
 
         // --- Inside ReportService.cs ---
 
-        private static async Task<List<ConsolidatedAttendanceRow>> GetConsolidatedAttendanceReport(AppDbContext db, DateOnly startDate, DateOnly endDate)
+        private async Task<List<ConsolidatedAttendanceRow>> GetConsolidatedAttendanceReport(AppDbContext db, DateOnly startDate, DateOnly endDate)
         {
             // 1. Fetch raw data to memory first (LINQ to Entities)
             var rawSummaries = await db.DailySummaries
@@ -164,7 +167,9 @@ namespace Payroll.Web.Services
 
             // 3. Fetch names and project final results (UNCHANGED)
             var empIds = summaries.Select(s => s.EmployeeID).ToList();
-            var employees = await db.Employees.Where(e => empIds.Contains(e.EmployeeID)).AsNoTracking().ToListAsync();
+            var employees = (await _firebaseEmployees.GetEmployeesAsync())
+                .Where(e => empIds.Contains(e.EmployeeID))
+                .ToList();
 
             var results = (
                 from s in summaries
@@ -183,7 +188,7 @@ namespace Payroll.Web.Services
         }
 
         // R2: PAYROLL VARIANCE REPORT (Compares month-over-month Net Pay)
-        private static async Task<List<PayrollVarianceRow>> GetPayrollVarianceReport(AppDbContext db, int currentYear, int currentMonth)
+        private async Task<List<PayrollVarianceRow>> GetPayrollVarianceReport(AppDbContext db, int currentYear, int currentMonth)
         {
             var prevDate = new DateTime(currentYear, currentMonth, 1).AddMonths(-1);
             int prevMonth = prevDate.Month;
@@ -199,7 +204,9 @@ namespace Payroll.Web.Services
                 .AsNoTracking().ToDictionaryAsync(p => p.EmployeeID);
 
             var empIds = currentPayrolls.Select(p => p.EmployeeID).ToList();
-            var employees = await db.Employees.Where(e => empIds.Contains(e.EmployeeID)).AsNoTracking().ToListAsync();
+            var employees = (await _firebaseEmployees.GetEmployeesAsync())
+                .Where(e => empIds.Contains(e.EmployeeID))
+                .ToList();
 
             var results = new List<PayrollVarianceRow>();
 

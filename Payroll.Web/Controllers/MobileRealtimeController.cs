@@ -13,7 +13,7 @@ namespace Payroll.Web.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/mobile/realtime")]
-[Authorize(AuthenticationSchemes = "MobileBearer")]
+[Authorize(AuthenticationSchemes = "MobileBearer", Roles = "Admin,SuperAdmin")]
 public sealed class MobileRealtimeController : ControllerBase
 {
     private readonly IHubContext<AttendanceRefreshHub> _hub;

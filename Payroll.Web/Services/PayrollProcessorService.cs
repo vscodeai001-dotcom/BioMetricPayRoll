@@ -18,19 +18,22 @@ namespace Payroll.Web.Services
         private readonly ILogger<PayrollProcessorService> _logger;
         private readonly AuditService _auditService;
         private readonly FBPService _fbpService;
+        private readonly PayrollFinalizationService _payrollFinalizationService;
 
         public PayrollProcessorService(
             AttendanceCalculatorService attendanceService,
             SalaryStructureService salaryService,
             ILogger<PayrollProcessorService> logger,
             AuditService auditService,
-            FBPService fbpService)
+            FBPService fbpService,
+            PayrollFinalizationService payrollFinalizationService)
         {
             _attendanceService = attendanceService;
             _salaryService = salaryService;
             _logger = logger;
             _auditService = auditService;
             _fbpService = fbpService;
+            _payrollFinalizationService = payrollFinalizationService;
         }
 
         // --- 1. PREVIEW GENERATION LOGIC ---
@@ -71,12 +74,34 @@ namespace Payroll.Web.Services
                 ptSlabs = await dbContext.ProfessionalTaxSlabs.AsNoTracking().ToListAsync();
             }
 
+            // High-scale pre-indexing for O(1) lookups across 5000+ employees
+            var summariesByEmp = relevantSummaries
+                .GroupBy(ds => ds.EmployeeID)
+                .ToDictionary(g => g.Key, g => g.ToDictionary(ds => ds.ShiftDate));
+
+            var schedulesByEmp = allSchedules
+                .GroupBy(s => s.EmployeeID)
+                .ToDictionary(g => g.Key, g => g.ToList());
+
+            var unpaidAdvancesByEmp = allUnpaidAdvances
+                .GroupBy(a => a.EmployeeID)
+                .ToDictionary(g => g.Key, g => g.Sum(a => a.Amount));
+
+            var unpaidBonusesByEmp = allUnpaidBonuses
+                .GroupBy(b => b.EmployeeID)
+                .ToDictionary(g => g.Key, g => g.Sum(b => b.Amount));
+
+            var fbpByEmp = allFBPDeclarations
+                .GroupBy(d => d.EmployeeId)
+                .ToDictionary(g => g.Key, g => g.Sum(d => d.MonthlyAllocatedAmount));
+
             foreach (var emp in currentEmployees)
             {
                 try
                 {
-                    var empSummaries = relevantSummaries.Where(ds => ds.EmployeeID == emp.EmployeeID).ToList();
-                    var empSchedules = allSchedules.Where(s => s.EmployeeID == emp.EmployeeID).ToList();
+                    summariesByEmp.TryGetValue(emp.EmployeeID, out var empSummaries);
+                    schedulesByEmp.TryGetValue(emp.EmployeeID, out var empSchedules);
+                    empSchedules ??= new List<ShiftSchedule>();
 
                     // Calculate Attendance Metrics
                     var rateResult = await _attendanceService.CalculateMonthlyRate(
@@ -110,7 +135,8 @@ namespace Payroll.Web.Services
                         if (emp.HireDate.HasValue && currentDayOnly < emp.HireDate) continue;
                         if (emp.TerminationDate.HasValue && currentDayOnly > emp.TerminationDate) continue;
 
-                        var summaryForDay = empSummaries.FirstOrDefault(ds => ds.ShiftDate == currentDayOnly);
+                        DailySummary? summaryForDay = null;
+                        empSummaries?.TryGetValue(currentDayOnly, out summaryForDay);
                         if (summaryForDay != null)
                         {
                             // CRITICAL FIX: Include ALL days including "Weekly Off (Worked)" days
@@ -216,25 +242,25 @@ namespace Payroll.Web.Services
 
                     // FEATURE CHECK: Salary Advance
                     decimal advanceDeduction = 0;
-                    if (featureSettings.EnableSalaryAdvance)
+                    if (featureSettings.EnableSalaryAdvance && unpaidAdvancesByEmp.TryGetValue(emp.EmployeeID, out var advAmt))
                     {
-                        advanceDeduction = allUnpaidAdvances.Where(adv => adv.EmployeeID == emp.EmployeeID).Sum(adv => adv.Amount);
+                        advanceDeduction = advAmt;
                     }
 
                     // FEATURE CHECK: Bonus
                     decimal unpaidBonusTotal = 0;
-                    if (featureSettings.EnableBonusManagement)
+                    if (featureSettings.EnableBonusManagement && unpaidBonusesByEmp.TryGetValue(emp.EmployeeID, out var bnsAmt))
                     {
-                        unpaidBonusTotal = allUnpaidBonuses.Where(b => b.EmployeeID == emp.EmployeeID).Sum(b => b.Amount);
+                        unpaidBonusTotal = bnsAmt;
                     }
 
                     decimal grossEarned = earnedPay + overtimePay + unpaidBonusTotal + shiftAllowanceTotal;
 
                     // FEATURE CHECK: FBP
                     decimal monthlyFbpAllocation = 0;
-                    if (featureSettings.EnableFlexibleBenefits)
+                    if (featureSettings.EnableFlexibleBenefits && fbpByEmp.TryGetValue(emp.EmployeeID, out var fbpAmt))
                     {
-                        monthlyFbpAllocation = allFBPDeclarations.Where(d => d.EmployeeId == emp.EmployeeID).Sum(d => d.MonthlyAllocatedAmount);
+                        monthlyFbpAllocation = fbpAmt;
                     }
 
                     decimal taxableGross = grossEarned - monthlyFbpAllocation;
@@ -274,8 +300,10 @@ namespace Payroll.Web.Services
                         EarnedStandardHours = (decimal)totalEarnedTime.TotalHours,
                         EarnedPay = earnedPay,
                         OvertimeDuration = totalOvertime,
+                        TotalOvertimeDuration = totalOvertime,
                         OvertimePay = overtimePay,
                         PenaltyDuration = totalPenalty,
+                        TotalPenaltyDuration = totalPenalty,
                         PenaltyDeduction = penaltyDeduction,
                         AdvanceDeduction = advanceDeduction,
                         Bonus = unpaidBonusTotal,
@@ -299,7 +327,9 @@ namespace Payroll.Web.Services
                     _logger.LogError(empEx, "Error processing {Name} during payroll preview.", emp.Name);
                 }
             }
-            return newPreviewList.OrderBy(r => r.EmployeeName).ToList();
+            var orderedPreview = newPreviewList.OrderBy(r => r.EmployeeName).ToList();
+            await _payrollFinalizationService.PublishPreviewAsync(orderedPreview, selectedYear, selectedMonth);
+            return orderedPreview;
         }
 
         // --- 2. FINALIZATION LOGIC (Updated for Compatibility) ---
@@ -355,7 +385,8 @@ namespace Payroll.Web.Services
                     .Where(b => b.PayrollID_Paid == null && b.BonusDate >= monthStart && b.BonusDate < monthStart.AddMonths(1))
                     .ToListAsync();
 
-                // 3. Save New Entries and Link Items
+                // 3. Batch Insert Payroll History Entries (Single save for all 5000+ employees)
+                var historyEntries = new List<(PayrollHistory History, PayrollDisplayRow Row)>(payrollPreviewList.Count);
                 foreach (var row in payrollPreviewList)
                 {
                     var history = new PayrollHistory
@@ -386,21 +417,29 @@ namespace Payroll.Web.Services
 
                         AbsentDays = row.AbsentDays,
                         ManualLeaveDays = row.LeaveDays,
-                        TotalPenaltyDuration = row.TotalPenaltyDuration,
-                        TotalOvertimeDuration = row.TotalOvertimeDuration
+                        TotalPenaltyDuration = row.TotalPenaltyDuration != TimeSpan.Zero ? row.TotalPenaltyDuration : row.PenaltyDuration,
+                        TotalOvertimeDuration = row.TotalOvertimeDuration != TimeSpan.Zero ? row.TotalOvertimeDuration : row.OvertimeDuration
                     };
+                    historyEntries.Add((history, row));
+                }
 
-                    dbContext.PayrollHistories.Add(history);
-                    await dbContext.SaveChangesAsync(); // Save to get PayrollID
+                dbContext.PayrollHistories.AddRange(historyEntries.Select(x => x.History));
+                await dbContext.SaveChangesAsync(); // Fast single batch insert! Generates all PayrollIDs
 
+                // 4. Link Advances and Bonuses with in-memory dictionaries
+                var unpaidAdvancesByEmpDict = unpaidAdvances
+                    .GroupBy(a => a.EmployeeID)
+                    .ToDictionary(g => g.Key, g => g.OrderBy(a => a.AdvanceDate).ToList());
+
+                var unpaidBonusesByEmpDict = unpaidBonuses
+                    .GroupBy(b => b.EmployeeID)
+                    .ToDictionary(g => g.Key, g => g.ToList());
+
+                foreach (var (history, row) in historyEntries)
+                {
                     // Link Advances (Only if we actually deducted something)
-                    if (row.AdvanceDeduction > 0)
+                    if (row.AdvanceDeduction > 0 && unpaidAdvancesByEmpDict.TryGetValue(row.EmployeeID, out var empAdvances))
                     {
-                        var empAdvances = unpaidAdvances
-                            .Where(a => a.EmployeeID == row.EmployeeID)
-                            .OrderBy(a => a.AdvanceDate)
-                            .ToList();
-
                         decimal remaining = row.AdvanceDeduction;
                         foreach (var adv in empAdvances)
                         {
@@ -413,13 +452,12 @@ namespace Payroll.Web.Services
                     }
 
                     // Link Bonuses (Only if we actually paid bonus)
-                    if (row.Bonus > 0)
+                    if (row.Bonus > 0 && unpaidBonusesByEmpDict.TryGetValue(row.EmployeeID, out var empBonuses))
                     {
-                        var empBonuses = unpaidBonuses
-                            .Where(b => b.EmployeeID == row.EmployeeID)
-                            .ToList();
-
-                        foreach (var b in empBonuses) b.PayrollID_Paid = history.PayrollID;
+                        foreach (var b in empBonuses)
+                        {
+                            b.PayrollID_Paid = history.PayrollID;
+                        }
                     }
                 }
 
@@ -429,6 +467,17 @@ namespace Payroll.Web.Services
                 await _auditService.LogAsync("FINALIZE", "Payroll",
                     $"Month: {selectedMonth}/{selectedYear}",
                     $"Finalized {payrollPreviewList.Count} payslips.");
+
+                // Read back the committed rows and verify the exact calculation
+                // payload against what was finalized before publishing Firebase state.
+                var committedRows = await dbContext.PayrollHistories
+                    .AsNoTracking()
+                    .Where(ph => ph.PayMonth == selectedMonth && ph.PayYear == selectedYear)
+                    .OrderBy(ph => ph.EmployeeID)
+                    .ToListAsync();
+                var previewHash = PayrollFinalizationService.ComputePreviewHash(payrollPreviewList, selectedYear, selectedMonth);
+                await _payrollFinalizationService.PublishFinalizedAsync(
+                    payrollPreviewList, committedRows, selectedYear, selectedMonth, previewHash);
             }
             catch (Exception ex)
             {

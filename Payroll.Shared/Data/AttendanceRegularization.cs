@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 
@@ -10,6 +10,12 @@ namespace Payroll.Shared.Data
         [Key]
         [Column("regularization_id")]
         public int RegularizationId { get; set; }
+
+        // Firebase transport identity. Not persisted to the legacy SQL schema.
+        // Numeric Firebase keys are used so the existing Web compatibility
+        // projection can reconcile Android-created requests safely.
+        [NotMapped]
+        public string? FirebaseKey { get; set; }
 
         [Required]
         [Column("employee_id")]

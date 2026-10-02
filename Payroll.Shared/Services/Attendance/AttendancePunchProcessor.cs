@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Payroll.Shared;
@@ -80,6 +80,85 @@ namespace Payroll.Shared.Services
                 .OrderBy(p => p.PunchTime)
                 .ThenBy(p => p.LogID)
                 .ToList();
+
+            if (ordered.Count == 0)
+            {
+                return (
+                    new List<AttendanceLog>(),
+                    null,
+                    null);
+            }
+
+            // --------------------------------------------------------
+            // Deduplicate punches:
+            // 1. By non-empty BiometricID (UUID / punch key)
+            // 2. By EmployeeID + Minute + Type orientation (IN vs OUT)
+            // This prevents duplicate sync events or multi-touch machine punches
+            // from collapsing IN/OUT pairs into zero-duration micro-pairs.
+            // --------------------------------------------------------
+            var deduplicated = new List<AttendanceLog>();
+            foreach (var p in ordered)
+            {
+                bool isDup = false;
+                if (!string.IsNullOrWhiteSpace(p.BiometricID))
+                {
+                    if (deduplicated.Any(x => x.EmployeeID == p.EmployeeID &&
+                                              string.Equals(x.BiometricID, p.BiometricID, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        isDup = true;
+                    }
+                }
+
+                if (!isDup)
+                {
+                    var match = deduplicated.FirstOrDefault(x =>
+                        x.EmployeeID == p.EmployeeID &&
+                        x.PunchTime == p.PunchTime);
+
+                    if (match != null)
+                    {
+                        var t1 = (match.LogType ?? "").ToUpperInvariant();
+                        var t2 = (p.LogType ?? "").ToUpperInvariant();
+                        bool isOut1 = t1.Contains("OUT");
+                        bool isOut2 = t2.Contains("OUT");
+                        if (isOut1 == isOut2)
+                        {
+                            // Same direction at same minute — clear duplicate, drop incoming.
+                            isDup = true;
+                        }
+                        else
+                        {
+                            // Opposite direction at same minute (e.g. geofence OUT + Android IN
+                            // arriving within seconds of each other due to sync race).
+                            // Keep the one whose direction matches the expected alternating
+                            // position (even index = IN, odd index = OUT).
+                            // The matched punch already occupies an index; the incoming punch
+                            // would extend by one. Determine which direction is expected at
+                            // the index the matched punch currently holds.
+                            int matchIndex = deduplicated.IndexOf(match);
+                            bool expectedOutAtMatch = (matchIndex % 2 != 0); // even=IN, odd=OUT
+                            if (expectedOutAtMatch == isOut1)
+                            {
+                                // The already-added punch is correctly positioned — drop incoming.
+                                isDup = true;
+                            }
+                            else
+                            {
+                                // The incoming punch is better positioned — replace the existing one.
+                                deduplicated[matchIndex] = p;
+                                isDup = true; // mark as dup so we don't Add again below
+                            }
+                        }
+                    }
+                }
+
+                if (!isDup)
+                {
+                    deduplicated.Add(p);
+                }
+            }
+
+            ordered = deduplicated;
 
             if (ordered.Count == 0)
             {

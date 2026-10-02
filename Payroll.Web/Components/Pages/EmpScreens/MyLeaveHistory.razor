@@ -11,6 +11,7 @@
 @inject ILogger<MyLeaveHistory> _logger
 @inject UserManager<IdentityUser> UserManager
 @inject AuthenticationStateProvider AuthenticationStateProvider
+@inject Payroll.Web.Services.FirebaseEmployeeManagementService FirebaseEmployees
 @inject IToastService toastService
 @inject NavigationManager Navigation
 
@@ -31,67 +32,94 @@
 }
 else
 {
-    <h3>My Leave History</h3>
-    <p>This log shows all your approved leave requests and automated "Loss of Pay" days.</p>
+    <div class="page-header-container">
+        <div class="d-flex align-items-center gap-3">
+            <div class="emoji-icon-badge emoji-icon-badge-purple">
+                🏖️
+            </div>
+            <div>
+                <h2 class="page-header-title">
+                    My Leave History & Time-Off
+                </h2>
+                <p class="page-header-subtitle">
+                    <span>📅 Complete ledger of approved leaves, pending requests, half-days & Loss-of-Pay (LOP)</span>
+                </p>
+            </div>
+        </div>
+
+        <div class="d-flex align-items-center gap-2">
+            <a href="/my-leave-request" class="action-pill-btn action-pill-btn-primary">
+                <span>➕ Apply New Leave</span>
+            </a>
+        </div>
+    </div>
 
     @if (isLoading)
     {
-        <p><em>Loading your leave history...</em></p>
+        <div class="text-center p-5">
+            <div class="spinner-border text-primary" role="status"></div>
+            <p class="mt-3 text-muted fw-semibold">Loading leave history... 🏖️</p>
+        </div>
     }
     else if (linkedEmployee == null)
     {
-        <p class="text-danger"><em>Your user account is not linked to an employee record. Cannot load data.</em></p>
+        <div class="alert alert-danger shadow-sm rounded-4">
+            <i class="bi bi-exclamation-triangle-fill me-2"></i> Your user account is not linked to an employee record. Cannot load data.
+        </div>
     }
     else if (!leaveHistory.Any())
     {
-        <div class="alert alert-info">
-            <i class="bi bi-info-circle me-2"></i> You do not have any leave records.
+        <div class="text-center p-5 bg-light rounded-4 border">
+            <span class="fs-1 d-block mb-2">🏖️</span>
+            <p class="mb-0 text-muted fw-semibold">No leave records found. You haven't taken any leaves yet!</p>
         </div>
     }
     else
     {
-        <div class="table-responsive leave-history-table">
-            <table class="table table-sm table-striped table-hover align-middle">
-                <thead class="table-dark">
-                    <tr>
-                        <th>Date</th>
-                        <th>Type</th>
-                        <th>Half Day?</th>
-                        <th>Status</th>
-                        <th>Notes</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    @foreach (var leave in leaveHistory.OrderByDescending(p => p.LeaveDate))
-                    {
-                        <tr class="@(leave.LeaveType == "Loss of Pay (Auto)" ? "auto-lop-row" : "")">
-                            <td>@leave.LeaveDate?.ToString("dd-MMM-yyyy")</td>
-                            <td>@leave.LeaveType</td>
-                            <td>@(leave.IsHalfDay ? "Yes" : "No")</td>
-                            <td>
-                                @if (leave.LeaveType == "Loss of Pay (Auto)")
-                                {
-                                    <span class="badge bg-danger">Auto LOP</span>
-                                }
-                                else if (leave.IsApproved)
-                                {
-                                    <span class="badge bg-success">Approved</span>
-                                }
-                                else
-                                {
-                                    <span class="badge bg-warning text-dark">Pending</span>
-                                }
-                            </td>
-                            <td>@leave.Notes</td>
+        <div class="table-responsive-card">
+            <div class="table-responsive leave-history-table">
+                <table class="table table-hover align-middle mb-0">
+                    <thead>
+                        <tr>
+                            <th>📅 Leave Date</th>
+                            <th>🏷️ Leave Type</th>
+                            <th>🌓 Half Day?</th>
+                            <th>📌 Status</th>
+                            <th>📝 Notes & Reason</th>
                         </tr>
-                    }
-                </tbody>
-            </table>
+                    </thead>
+                    <tbody>
+                        @foreach (var leave in leaveHistory.OrderByDescending(p => p.LeaveDate))
+                        {
+                            <tr class="@(leave.LeaveType == "Loss of Pay (Auto)" ? "auto-lop-row" : "")">
+                                <td>@leave.LeaveDate?.ToString("dd-MMM-yyyy")</td>
+                                <td>@leave.LeaveType</td>
+                                <td>@(leave.IsHalfDay ? "Yes" : "No")</td>
+                                <td>
+                                    @if (leave.LeaveType == "Loss of Pay (Auto)")
+                                    {
+                                        <span class="badge bg-danger rounded-pill">Auto LOP</span>
+                                    }
+                                    else if (leave.IsApproved)
+                                    {
+                                        <span class="badge bg-success rounded-pill">Approved</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-warning text-dark rounded-pill">Pending</span>
+                                    }
+                                </td>
+                                <td>@leave.Notes</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
         </div>
     }
 }
 
-<AttendanceRefreshListener OnAttendanceChanged="HandleRealtimeRefresh" />
+<AttendanceRefreshListener OnLeaveChanged="HandleRealtimeRefresh" />
 
 @code {
     private List<LeaveRequest> leaveHistory = new();
@@ -101,12 +129,16 @@ else
 
     protected override async Task OnInitializedAsync()
     {
-        await CheckPermissionsAndLoadData();
+        await CheckPermissionsAndLoadData(isSilent: false);
     }
 
-    private async Task CheckPermissionsAndLoadData()
+    private async Task CheckPermissionsAndLoadData(bool isSilent = false)
     {
-        isLoading = true;
+        if (!isSilent && (leaveHistory == null || !leaveHistory.Any()))
+        {
+            isLoading = true;
+            await InvokeAsync(StateHasChanged);
+        }
         try
         {
             await using var dbContext = await DbFactory.CreateDbContextAsync();
@@ -133,28 +165,34 @@ else
 
             if (user.Identity?.IsAuthenticated == true)
             {
-                var email = user.Identity.Name;
-                linkedEmployee = await dbContext.Employees
-                    .AsNoTracking()
-                    .FirstOrDefaultAsync(e => e.Email == email);
+                if (linkedEmployee == null)
+                {
+                    var email = user.Identity.Name;
+                    linkedEmployee = await FirebaseEmployees.GetEmployeeByEmailAsync(email);
+                }
 
                 if (linkedEmployee != null)
                 {
-                    leaveHistory = await dbContext.LeaveRequests
+                    var fresh = await dbContext.LeaveRequests
                         .Where(p => p.EmployeeID == linkedEmployee.EmployeeID)
                         .OrderByDescending(p => p.LeaveDate)
                         .ToListAsync();
+                    leaveHistory = fresh;
                 }
             }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error loading employee leave history.");
-            toastService.ShowError("An error occurred while loading your data.");
+            if (!isSilent)
+            {
+                toastService.ShowError("An error occurred while loading your data.");
+            }
         }
         finally
         {
             isLoading = false;
+            await InvokeAsync(StateHasChanged);
         }
     }
 
@@ -162,8 +200,7 @@ else
     {
         try
         {
-            await CheckPermissionsAndLoadData();
-            await InvokeAsync(StateHasChanged);
+            await CheckPermissionsAndLoadData(isSilent: true);
         }
         catch (Exception ex)
         {

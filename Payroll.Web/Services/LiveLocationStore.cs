@@ -6,14 +6,12 @@ public static class LiveLocationStore
 {
     private static readonly ConcurrentDictionary<int, LiveEmployeeLocation> Locations = new();
 
-    // Keep employees reported as "Live"/"Stale" for a very long period so
-    // that an admin dashboard does not show "No live staff" simply because
-    // a browser tab was backgrounded or temporarily paused by the OS.
-    //
-    // These values effectively ensure a session remains considered live
-    // for years unless explicitly removed (e.g., on logout or session end).
-    public const int LiveTimeoutSeconds = 60 * 60 * 24 * 365 * 10; // ~10 years
-    public const int StaleTimeoutSeconds = 60 * 60 * 24 * 365 * 20; // ~20 years
+    // A live marker represents a current GPS session, not merely an old
+    // historical fix. Logout/session end removes it immediately; a missing
+    // GPS heartbeat expires it automatically so old employees cannot remain
+    // on the Admin map indefinitely.
+    public const int LiveTimeoutSeconds = 300; // 5 minutes, aligned with background GPS cadence
+    public const int StaleTimeoutSeconds = 900; // 15 minutes before a live marker disappears
 
     /*
      * ============================================================
@@ -426,11 +424,11 @@ public sealed class LiveEmployeeLocation
 
     public double AccuracyMeters { get; init; }
 
-    public double DistanceMeters { get; init; }
+    public double DistanceMeters { get; set; }
 
-    public int AllowedRadiusMeters { get; init; }
+    public int AllowedRadiusMeters { get; set; }
 
-    public bool IsWithinAllowedRadius { get; init; }
+    public bool IsWithinAllowedRadius { get; set; }
 
     public DateTime LastUpdatedUtc { get; init; }
 

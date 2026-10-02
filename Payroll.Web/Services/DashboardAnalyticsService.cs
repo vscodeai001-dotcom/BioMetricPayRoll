@@ -11,11 +11,15 @@ namespace Payroll.Web.Services
     public class DashboardAnalyticsService
     {
         private readonly IDbContextFactory<AppDbContext> _dbFactory;
+        private readonly FirebaseEmployeeManagementService _firebaseEmployees;
 
 
-        public DashboardAnalyticsService(IDbContextFactory<AppDbContext> dbFactory)
+        public DashboardAnalyticsService(
+            IDbContextFactory<AppDbContext> dbFactory,
+            FirebaseEmployeeManagementService firebaseEmployees)
         {
             _dbFactory = dbFactory;
+            _firebaseEmployees = firebaseEmployees;
         }
 
         // --- ADMIN: PAYROLL VARIANCE & OVERVIEW ---
@@ -48,7 +52,8 @@ namespace Payroll.Web.Services
                 .Include(ds => ds.EmployeeID) // We need to join manually for perf if not using navigation props
                 .ToListAsync();
 
-            var employeeNames = await db.Employees.ToDictionaryAsync(e => e.EmployeeID, e => e.Name);
+            var employeeNames = (await _firebaseEmployees.GetEmployeesAsync())
+                .ToDictionary(e => e.EmployeeID, e => e.Name);
 
             // Best Attendance (Most Present Days)
             metrics.TopAttendees = [.. summaries
@@ -76,7 +81,8 @@ namespace Payroll.Web.Services
             // 3. Today's Stats
             var todayDate = DateOnly.FromDateTime(today);
             metrics.PresentToday = await db.DailySummaries.CountAsync(s => s.ShiftDate == todayDate && (s.Status == "Present" || s.Status == "Half Day"));
-            metrics.TotalActiveEmployees = await db.Employees.CountAsync(e => !e.TerminationDate.HasValue);
+            metrics.TotalActiveEmployees = (await _firebaseEmployees.GetEmployeesAsync())
+                .Count(e => !e.IsDeleted && !e.TerminationDate.HasValue);
 
             return metrics;
         }
@@ -140,7 +146,7 @@ namespace Payroll.Web.Services
         public async Task<LeaveBalanceStats> GetEmployeeLeaveStatsAsync(int employeeId)
         {
             using var db = await _dbFactory.CreateDbContextAsync();
-            var emp = await db.Employees.FindAsync(employeeId);
+            var emp = await _firebaseEmployees.GetEmployeeAsync(employeeId);
             if (emp == null) return new LeaveBalanceStats();
 
             return new LeaveBalanceStats

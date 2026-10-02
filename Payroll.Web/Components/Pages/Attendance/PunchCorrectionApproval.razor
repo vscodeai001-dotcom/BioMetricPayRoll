@@ -20,6 +20,11 @@
 @inject ILogger<PunchCorrectionApproval> _logger
 @inject Payroll.Web.Services.AuditService AuditService
 @inject NavigationManager Navigation
+@inject Payroll.Web.Services.FirebaseEmployeeManagementService FirebaseEmployees
+@inject Payroll.Web.Services.FirebaseAttendanceMutationService FirebaseAttendanceMutations
+@inject Payroll.Web.Services.FirebaseAttendanceService FirebaseAttendance
+@inject PayrollLockService LockService
+@inject AttendanceProcessingCoordinator AttendanceProcessingCoordinator
 @inject AuthenticationStateProvider AuthState
 @attribute [Authorize(Roles = "Admin, SuperAdmin")]
 
@@ -151,7 +156,7 @@ else
             }
 
             // 2. Load Data
-            employeeList = await dbContext.Employees.AsNoTracking().ToListAsync();
+            employeeList = await FirebaseEmployees.GetEmployeesAsync();
             await LoadRequests(dbContext); // Pass context or create new? Let's use standard pattern.
         }
         finally
@@ -171,6 +176,32 @@ else
 
         try
         {
+            try
+            {
+                var firebasePunches = await FirebaseAttendance.GetAttendancePunchesAsync(
+                    DateOnly.MinValue,
+                    DateOnly.MaxValue);
+
+                pendingPunches = firebasePunches
+                    .Where(l => !l.IsApproved &&
+                                string.Equals(l.LogType, "Correction Request", StringComparison.OrdinalIgnoreCase) &&
+                                l.EmployeeID.HasValue)
+                    .OrderBy(l => l.PunchTime)
+                    .ToList();
+
+                // Firebase is the primary read source. If this legacy request
+                // has not yet been projected, retain the SQL compatibility
+                // fallback so no existing request disappears from the approval UI.
+                if (pendingPunches.Count > 0)
+                {
+                    return;
+                }
+            }
+            catch (Exception firebaseEx)
+            {
+                _logger.LogWarning(firebaseEx, "Firebase pending punch read failed; using SQL compatibility fallback.");
+            }
+
             pendingPunches = await db.AttendanceLogs
                 .Where(l => !l.IsApproved && l.LogType == "Correction Request" && l.EmployeeID.HasValue)
                 .OrderBy(l => l.PunchTime)
@@ -201,44 +232,93 @@ else
     private async Task ApproveRequest(AttendanceLog punch)
     {
         if (!await JSRuntime.InvokeAsync<bool>("confirm", $"Approve punch for {GetEmployeeName(punch.EmployeeID ?? 0)} at {punch.PunchTime:hh:mm tt}?")) return;
+
+        if (!punch.EmployeeID.HasValue || punch.EmployeeID.Value <= 0)
+        {
+            toastService.ShowError("Invalid employee for this correction request.");
+            return;
+        }
+
+        var employeeId = punch.EmployeeID.Value;
+        var day = punch.PunchTime.Date;
+        var processingKey = $"{employeeId}:{day:yyyy-MM-dd}";
+
         try
         {
+            using var processingLease =
+                await AttendanceProcessingCoordinator.AcquireAsync(processingKey);
+
             await using var dbContext = await DbFactory.CreateDbContextAsync();
             var dbPunch = await dbContext.AttendanceLogs.FindAsync(punch.LogID);
 
-            if (dbPunch != null)
+            if (dbPunch == null || !dbPunch.EmployeeID.HasValue)
             {
-                dbPunch.IsApproved = true;
-                await dbContext.SaveChangesAsync();
-
-                // Notify Employee
-                var emp = employeeList.FirstOrDefault(e => e.EmployeeID == dbPunch.EmployeeID);
-                if (emp?.Email != null)
-                {
-                    var user = await UserManager.FindByEmailAsync(emp.Email);
-                    if (user != null)
-                    {
-                        await NoteService.NotifyEmployeeAsync(
-                            dbPunch.EmployeeID!.Value,
-                            "Punch Correction Approved",
-                            $"Your punch correction for {dbPunch.PunchTime:dd-MMM-yyyy} at {dbPunch.PunchTime:HH:mm} was approved.",
-                            "/my-attendance");
-                    }
-                }
-
-                // Audit Log
-                await AuditService.LogAsync("APPROVE", "AttendanceLog", dbPunch.LogID.ToString(), $"Punch correction approved for EmpID: {dbPunch.EmployeeID} at {dbPunch.PunchTime:hh:mm tt}");
-
-                // Recalculate
-                await RecalculateSingleDay(dbContext, dbPunch.EmployeeID!.Value, dbPunch.PunchTime.Date);
-
-                await AttendanceRefreshService
-                    .NotifyAttendanceChangedAsync(
-                        dbPunch.EmployeeID!.Value,
-                        DateOnly.FromDateTime(dbPunch.PunchTime.Date));
-
-                toastService.ShowSuccess("Punch approved. Daily summary updated.");
+                toastService.ShowError("Correction request no longer exists.");
+                return;
             }
+
+            if (dbPunch.IsApproved || dbPunch.LogType != "Correction Request")
+            {
+                toastService.ShowWarning("This correction request has already been processed.");
+                return;
+            }
+
+            if (await LockService.IsLockedAsync(employeeId, dbPunch.PunchTime))
+            {
+                toastService.ShowError("Payroll is finalized for this month. Cannot approve this correction.");
+                return;
+            }
+
+            dbPunch.IsApproved = true;
+            await dbContext.SaveChangesAsync();
+
+            await RecalculateSingleDay(dbContext, employeeId, dbPunch.PunchTime.Date);
+
+            var firebasePunchOk = await FirebaseAttendanceMutations.UpsertPunchAsync(
+                dbPunch,
+                "APPROVED");
+
+            var summary = await dbContext.DailySummaries.AsNoTracking()
+                .FirstOrDefaultAsync(x => x.EmployeeID == employeeId && x.ShiftDate == DateOnly.FromDateTime(dbPunch.PunchTime.Date));
+            var firebaseSummaryOk = summary == null || await FirebaseAttendanceMutations.UpsertDailySummaryAsync(summary, "MODIFIED");
+
+            if (!firebasePunchOk || !firebaseSummaryOk)
+                _logger.LogWarning("Punch approval committed to SQL but Firebase projection was not fully confirmed. EmployeeId={EmployeeId}, LogId={LogId}", employeeId, dbPunch.LogID);
+
+            var emp = employeeList.FirstOrDefault(e => e.EmployeeID == employeeId);
+            if (emp?.Email != null)
+            {
+                var user = await UserManager.FindByEmailAsync(emp.Email);
+                if (user != null)
+                {
+                    await NoteService.NotifyEmployeeAsync(
+                        employeeId,
+                        "Punch Correction Approved",
+                        $"Your punch correction for {dbPunch.PunchTime:dd-MMM-yyyy} at {dbPunch.PunchTime:HH:mm} was approved.",
+                        "/my-attendance");
+                }
+            }
+
+            await AuditService.LogAsync(
+                "APPROVE",
+                "AttendanceLog",
+                dbPunch.LogID.ToString(),
+                $"Punch correction approved for EmpID: {employeeId} at {dbPunch.PunchTime:hh:mm tt}");
+
+            AttendanceProcessingCoordinator.Invalidate(processingKey);
+
+            await AttendanceRefreshService.NotifyPunchChangedAsync(
+                employeeId,
+                DateOnly.FromDateTime(dbPunch.PunchTime.Date),
+                "APPROVED");
+            await AttendanceRefreshService.NotifyAttendanceChangedAsync(
+                employeeId,
+                DateOnly.FromDateTime(dbPunch.PunchTime.Date));
+
+            toastService.ShowSuccess(
+                firebasePunchOk && firebaseSummaryOk
+                    ? "Punch approved. Daily summary updated."
+                    : "Punch approved. Local attendance updated; Firebase projection will need reconciliation.");
         }
         catch (Exception ex)
         {
@@ -254,7 +334,7 @@ else
     private async Task RecalculateSingleDay(AppDbContext dbContext, int employeeId, DateTime day)
     {
         var dayOnly = DateOnly.FromDateTime(day);
-        var emp = await dbContext.Employees.AsNoTracking().FirstOrDefaultAsync(e => e.EmployeeID == employeeId);
+        var emp = await FirebaseEmployees.GetEmployeeAsync(employeeId);
         var settings = await dbContext.CompanySettings.AsNoTracking().FirstOrDefaultAsync(s => s.SettingID == 1) ?? new CompanySetting();
         var features = await dbContext.FeatureSettings.AsNoTracking().FirstOrDefaultAsync(f => f.Id == 1) ?? new FeatureSettings();
         var holidays = await dbContext.CompanyHolidays.Where(h => h.HolidayDate == dayOnly).ToListAsync();
@@ -289,33 +369,76 @@ else
     private async Task RejectRequest(AttendanceLog punch)
     {
         if (!await JSRuntime.InvokeAsync<bool>("confirm", $"Reject and delete punch for {GetEmployeeName(punch.EmployeeID ?? 0)}?")) return;
+
+        if (!punch.EmployeeID.HasValue || punch.EmployeeID.Value <= 0)
+        {
+            toastService.ShowError("Invalid employee for this correction request.");
+            return;
+        }
+
+        var employeeId = punch.EmployeeID.Value;
+        var day = punch.PunchTime.Date;
+        var processingKey = $"{employeeId}:{day:yyyy-MM-dd}";
+
         try
         {
+            using var processingLease =
+                await AttendanceProcessingCoordinator.AcquireAsync(processingKey);
+
             await using var dbContext = await DbFactory.CreateDbContextAsync();
             var dbPunch = await dbContext.AttendanceLogs.FindAsync(punch.LogID);
 
-            if (dbPunch != null)
+            if (dbPunch == null || !dbPunch.EmployeeID.HasValue)
             {
-                dbContext.AttendanceLogs.Remove(dbPunch);
-                await dbContext.SaveChangesAsync();
-
-                if (dbPunch.EmployeeID.HasValue)
-                {
-                    await NoteService.NotifyEmployeeAsync(
-                        dbPunch.EmployeeID.Value,
-                        "Punch Correction Rejected",
-                        $"Your punch correction for {dbPunch.PunchTime:dd-MMM-yyyy} at {dbPunch.PunchTime:HH:mm} was rejected.",
-                        "/my-attendance");
-
-                    await AttendanceRefreshService
-                        .NotifyAttendanceChangedAsync(
-                            dbPunch.EmployeeID.Value,
-                            DateOnly.FromDateTime(dbPunch.PunchTime.Date));
-                }
-
-                await AuditService.LogAsync("REJECT/DELETE", "AttendanceLog", dbPunch.LogID.ToString(), $"Punch correction rejected and deleted for EmpID: {dbPunch.EmployeeID} at {dbPunch.PunchTime:hh:mm tt}");
-                toastService.ShowSuccess("Punch rejected and deleted.");
+                toastService.ShowError("Correction request no longer exists.");
+                return;
             }
+
+            if (dbPunch.IsApproved || dbPunch.LogType != "Correction Request")
+            {
+                toastService.ShowWarning("This correction request has already been processed.");
+                return;
+            }
+
+            if (await LockService.IsLockedAsync(employeeId, dbPunch.PunchTime))
+            {
+                toastService.ShowError("Payroll is finalized for this month. Cannot reject this correction.");
+                return;
+            }
+
+            var id = dbPunch.LogID;
+            var punchTime = dbPunch.PunchTime;
+            dbContext.AttendanceLogs.Remove(dbPunch);
+            await dbContext.SaveChangesAsync();
+
+            var firebaseDeleteOk = await FirebaseAttendanceMutations.DeletePunchAsync(id, employeeId);
+
+            await AuditService.LogAsync(
+                "REJECT/DELETE",
+                "AttendanceLog",
+                id.ToString(),
+                $"Punch correction rejected and deleted for EmpID: {employeeId} at {punchTime:hh:mm tt}");
+
+            await NoteService.NotifyEmployeeAsync(
+                employeeId,
+                "Punch Correction Rejected",
+                $"Your punch correction for {punchTime:dd-MMM-yyyy} at {punchTime:HH:mm} was rejected.",
+                "/my-attendance");
+
+            AttendanceProcessingCoordinator.Invalidate(processingKey);
+
+            await AttendanceRefreshService.NotifyPunchChangedAsync(
+                employeeId,
+                DateOnly.FromDateTime(punchTime.Date),
+                "REJECTED");
+            await AttendanceRefreshService.NotifyAttendanceChangedAsync(
+                employeeId,
+                DateOnly.FromDateTime(punchTime.Date));
+
+            toastService.ShowSuccess(
+                firebaseDeleteOk
+                    ? "Punch rejected and deleted."
+                    : "Punch rejected and deleted locally; Firebase deletion needs reconciliation.");
         }
         catch (Exception ex)
         {

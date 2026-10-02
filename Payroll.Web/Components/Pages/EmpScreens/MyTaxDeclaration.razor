@@ -8,6 +8,7 @@
 @inject NotificationService NotificationService
 @inject IDbContextFactory<AppDbContext> DbFactory
 @inject AuthenticationStateProvider AuthState
+@inject Payroll.Web.Services.FirebaseEmployeeManagementService FirebaseEmployees
 @inject IToastService toastService
 @inject NavigationManager Nav
 @attribute [Authorize(Roles = "Employee, SuperAdmin")]
@@ -35,30 +36,45 @@ else
 {
     <div class="d-flex flex-column h-100">
         @* --- HEADER --- *@
-        <div class="flex-shrink-0 mb-3 d-flex justify-content-between align-items-center">
-            <div>
-                <h3 class="mb-0 text-primary"><i class="bi bi-file-earmark-text me-2"></i>Tax Declaration</h3>
-                <p class="text-muted small mb-0">FY @currentYear - @(currentYear + 1)</p>
+        <div class="page-header-container mb-4">
+            <div class="d-flex align-items-center gap-3">
+                <div class="emoji-icon-badge emoji-icon-badge-success">
+                    📑
+                </div>
+                <div>
+                    <h2 class="page-header-title">
+                        Income Tax Declaration (ITD)
+                    </h2>
+                    <p class="page-header-subtitle">
+                        <span>⚖️ FY @currentYear - @(currentYear + 1) • Select Regime & Declare Investments</span>
+                    </p>
+                </div>
             </div>
 
-            @if (declaration.Status == "Approved")
-            {
-                <span class="badge bg-success fs-6 px-3 py-2"><i class="bi bi-check-circle me-2"></i>Locked & Approved</span>
-            }
-            else if (declaration.Status == "Pending")
-            {
-                <span class="badge bg-warning text-dark fs-6 px-3 py-2"><i class="bi bi-hourglass-split me-2"></i>Submitted for Review</span>
-            }
-            else
-            {
-                <button class="btn btn-success" @onclick="SubmitDeclaration" disabled="@isSaving">
-                    @if (isSaving)
-                    {
-                        <span class="spinner-border spinner-border-sm me-2"></span>
-                    }
-                    <i class="bi bi-send me-2"></i> Submit Declaration
-                </button>
-            }
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+                @if (declaration.Status == "Approved")
+                {
+                    <span class="badge bg-success bg-opacity-10 text-success rounded-pill px-3 py-2 fw-semibold border border-success border-opacity-25">
+                        <span class="pulse-indicator pulse-indicator-success me-1"></span> 🔒 Locked & Approved
+                    </span>
+                }
+                else if (declaration.Status == "Pending")
+                {
+                    <span class="badge bg-warning bg-opacity-10 text-dark rounded-pill px-3 py-2 fw-semibold border border-warning border-opacity-25">
+                        ⏳ Submitted for Review
+                    </span>
+                }
+                else
+                {
+                    <button class="action-pill-btn action-pill-btn-success" @onclick="SubmitDeclaration" disabled="@isSaving">
+                        @if (isSaving)
+                        {
+                            <span class="spinner-border spinner-border-sm me-2"></span>
+                        }
+                        <span>🚀 Submit Declaration</span>
+                    </button>
+                }
+            </div>
         </div>
 
         @* --- MAIN CONTENT (Scrollable) --- *@
@@ -223,7 +239,7 @@ else
             var email = authState.User.Identity?.Name;
             if (email == null) return;
 
-            employee = await dbContext.Employees.FirstOrDefaultAsync(e => e.Email == email);
+            employee = await FirebaseEmployees.GetEmployeeByEmailAsync(email);
             if (employee == null) return;
 
             // 3. Get or Create Declaration

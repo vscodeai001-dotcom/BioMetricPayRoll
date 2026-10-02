@@ -3,15 +3,15 @@
 @using Microsoft.AspNetCore.Components.Authorization
 @using global::Payroll.Shared.Data
 @using global::Payroll.Shared
-@using Microsoft.EntityFrameworkCore
 @using System.Globalization
-@inject IDbContextFactory<AppDbContext> DbFactory
 @inject ILogger<Home> _logger
 @inject NavigationManager Navigation
 @inject AuthenticationStateProvider AuthState
 @inject GeoFeatureAccessService GeoAccess
+@inject FirebaseAdminDashboardService FirebaseDashboard
 @using global::Payroll.Web.Components.UI.Attendance
 @attribute [Authorize]
+@implements IAsyncDisposable
 
 <PageTitle>Admin Dashboard</PageTitle>
 
@@ -143,120 +143,174 @@
 {
     <div class="d-flex justify-content-center align-items-center" style="height:60vh;">
         <div class="spinner-border text-primary" style="width:3rem;height:3rem;" role="status"></div>
-        <p class="ms-3 text-muted mb-0">Gathering insights...</p>
+        <p class="ms-3 text-muted mb-0 fw-semibold">Gathering workforce insights... ⏱️</p>
     </div>
 }
 else
 {
     <AttendanceRefreshListener OnAttendanceChanged="HandleLiveAttendanceChanged"
+                               OnRegularizationChanged="HandleLiveRegularizationChanged"
                                OnLocationChanged="HandleLiveLocationChanged"
-                               OnSessionStarted="HandleLiveLocationChanged"
-                               OnRegularizationChanged="HandleLiveRegularizationChanged" />
+                               OnSessionStarted="HandleLiveAttendanceChanged"
+                               OnGeoSettingsChanged="HandleLiveAttendanceChanged" />
     <div class="dashboard-container">
-        <div class="welcome-banner d-flex justify-content-between align-items-center">
+        <!-- Header Banner -->
+        <div class="welcome-banner d-flex flex-wrap justify-content-between align-items-center gap-3">
             <div>
-                <h2 class="fw-bold mb-1">Dashboard Overview</h2>
-                <p class="mb-0 opacity-75">Real-time insights for @DateTime.Now.ToString("dddd, dd MMMM yyyy")</p>
+                <div class="d-flex align-items-center gap-2 mb-1">
+                    <span class="fs-3">👋</span>
+                    <h2 class="fw-bold mb-0">Welcome Back, Admin!</h2>
+                </div>
+                <p class="mb-0 opacity-90 d-flex align-items-center gap-2">
+                    <span>📅 @DateTime.Now.ToString("dddd, dd MMMM yyyy")</span>
+                    <span>•</span>
+                    <span>⚡ Real-Time Workforce Intelligence</span>
+                </p>
+            </div>
+            <div class="d-flex align-items-center gap-2">
+                <span class="badge bg-white bg-opacity-25 px-3 py-2 rounded-pill fw-semibold border border-white border-opacity-25">
+                    <span class="pulse-indicator pulse-indicator-success me-1"></span> Live Sync Active 🛰️
+                </span>
             </div>
         </div>
 
-        <div class="row g-4 mb-4">
-            <div class="col-xl-3 col-md-6" @onclick='() => Navigation.NavigateTo("employees")'>
-                <div class="kpi-card primary">
+        <!-- 4 KPI Cards -->
+        <div class="row g-3 g-md-4 mb-4">
+            <div class="col-xl-3 col-sm-6" @onclick='() => Navigation.NavigateTo("employees")'>
+                <div class="kpi-card primary border-accent-primary">
                     <div class="d-flex justify-content-between align-items-start">
                         <div>
-                            <p class="text-uppercase text-muted small fw-bold mb-1">Total Workforce</p>
-                            <h2 class="fw-bold text-dark mb-0">@totalEmployees</h2>
-                            <small class="text-success"><i class="bi bi-person-check"></i>@activeEmployees Active</small>
+                            <p class="text-uppercase text-muted small fw-bold mb-1">👥 Total Workforce</p>
+                            <h2 class="fw-bold text-dark mb-1">@totalEmployees</h2>
+                            <span class="status-pill status-pill-success">
+                                <i class="bi bi-person-check-fill"></i> @activeEmployees Active
+                            </span>
                         </div>
-                        <div class="kpi-icon bg-primary bg-opacity-10 text-primary"><i class="bi bi-people-fill"></i></div>
+                        <div class="emoji-icon-badge emoji-icon-badge-primary">
+                            👥
+                        </div>
                     </div>
                 </div>
             </div>
 
-            <div class="col-xl-3 col-md-6" @onclick='() => Navigation.NavigateTo("attendancelogs")'>
-                <div class="kpi-card success">
+            <div class="col-xl-3 col-sm-6" @onclick='() => Navigation.NavigateTo("attendancelogs")'>
+                <div class="kpi-card success border-accent-success">
                     <div class="d-flex justify-content-between align-items-start">
                         <div>
-                            <p class="text-uppercase text-muted small fw-bold mb-1">Present Today</p>
-                            <h2 class="fw-bold text-dark mb-0">@presentToday <span class="text-muted fs-6 fw-normal">/ @activeEmployees</span></h2>
-                            <small class="text-danger"><i class="bi bi-person-dash"></i>@absentTodayEst Absent</small>
+                            <p class="text-uppercase text-muted small fw-bold mb-1">⏱️ Present Today</p>
+                            <h2 class="fw-bold text-dark mb-1">@presentToday <span class="text-muted fs-6 fw-normal">/ @activeEmployees</span></h2>
+                            <span class="status-pill status-pill-danger">
+                                <i class="bi bi-person-x-fill"></i> @absentTodayEst Absent
+                            </span>
                         </div>
-                        <div class="kpi-icon bg-success bg-opacity-10 text-success"><i class="bi bi-clock-history"></i></div>
+                        <div class="emoji-icon-badge emoji-icon-badge-success">
+                            🟢
+                        </div>
                     </div>
                 </div>
             </div>
 
-            <div class="col-xl-3 col-md-6" @onclick='() => Navigation.NavigateTo("run-payroll")'>
-                <div class="kpi-card warning">
+            <div class="col-xl-3 col-sm-6" @onclick='() => Navigation.NavigateTo("run-payroll")'>
+                <div class="kpi-card warning border-accent-warning">
                     <div class="d-flex justify-content-between align-items-start">
                         <div>
-                            <p class="text-uppercase text-muted small fw-bold mb-1">Payroll (@DateTime.Now.ToString("MMM"))</p>
-                            <h2 class="fw-bold text-dark mb-0">@(pendingPayrolls > 0 ? "Pending" : "Done")</h2>
-                            <small class="text-muted">Current Cycle</small>
+                            <p class="text-uppercase text-muted small fw-bold mb-1">💰 Payroll Cycle</p>
+                            <h2 class="fw-bold text-dark mb-1">@(pendingPayrolls > 0 ? "Pending" : "Completed")</h2>
+                            <span class="status-pill @(pendingPayrolls > 0 ? "status-pill-warning" : "status-pill-success")">
+                                <i class="bi @(pendingPayrolls > 0 ? "bi-hourglass-split" : "bi-check2-circle")"></i> @DateTime.Now.ToString("MMM yyyy")
+                            </span>
                         </div>
-                        <div class="kpi-icon bg-warning bg-opacity-10 text-warning"><i class="bi bi-wallet2"></i></div>
+                        <div class="emoji-icon-badge emoji-icon-badge-warning">
+                            ⚡
+                        </div>
                     </div>
                 </div>
             </div>
 
-            <div class="col-xl-3 col-md-6" @onclick='() => Navigation.NavigateTo("salary-advances")'>
-                <div class="kpi-card danger">
+            <div class="col-xl-3 col-sm-6" @onclick='() => Navigation.NavigateTo("salary-advances")'>
+                <div class="kpi-card danger border-accent-danger">
                     <div class="d-flex justify-content-between align-items-start">
                         <div>
-                            <p class="text-uppercase text-muted small fw-bold mb-1">Unpaid Advances</p>
-                            <h2 class="fw-bold text-dark mb-0">@totalUnpaidAdvanceAmount.ToString("C0", inrCulture)</h2>
-                            <small class="text-muted">Needs Recovery</small>
+                            <p class="text-uppercase text-muted small fw-bold mb-1">💳 Salary Advances</p>
+                            <h2 class="fw-bold text-dark mb-1">@totalUnpaidAdvanceAmount.ToString("C0", inrCulture)</h2>
+                            <span class="status-pill status-pill-danger">
+                                <i class="bi bi-exclamation-circle-fill"></i> Needs Recovery
+                            </span>
                         </div>
-                        <div class="kpi-icon bg-danger bg-opacity-10 text-danger"><i class="bi bi-cash-stack"></i></div>
+                        <div class="emoji-icon-badge emoji-icon-badge-danger">
+                            💸
+                        </div>
                     </div>
                 </div>
             </div>
         </div>
 
-
-
-        @if (userIsSuperAdmin && geoFeatureAvailable)
+        @if ((userIsSuperAdmin || userIsAdmin) && geoFeatureAvailable)
         {
-            <Payroll.Web.Components.UI.Attendance.LiveStaffLocationPanel />
+            <div class="mb-4">
+                <Payroll.Web.Components.UI.Attendance.LiveStaffLocationPanel />
+            </div>
         }
         
         <div class="row g-4">
             <div class="col-lg-8">
                 <div class="card border-0 shadow-sm h-100">
                     <div class="card-header bg-white border-bottom-0 pt-4 px-4">
-                        <h5 class="fw-bold mb-0 text-secondary"><i class="bi bi-graph-up me-2"></i>Daily Operations</h5>
+                        <h5 class="fw-bold mb-0 text-secondary d-flex align-items-center gap-2">
+                            <span>📈</span>
+                            <span>Daily Operations & Workflows</span>
+                        </h5>
                     </div>
                     <div class="card-body px-4 pb-4">
                         <div class="row g-3">
                             <div class="col-md-6">
-                                <div class="p-3 border rounded bg-light h-100 d-flex align-items-center clickable" @onclick='() => Navigation.NavigateTo("schedule")' style="cursor:pointer">
-                                    <div class="me-3 bg-white p-3 rounded shadow-sm text-info"><i class="bi bi-calendar-range fs-3"></i></div>
+                                <div class="p-3 border rounded-3 bg-light h-100 d-flex align-items-center clickable" @onclick='() => Navigation.NavigateTo("schedule")' style="cursor:pointer">
+                                    <div class="me-3 emoji-icon-badge emoji-icon-badge-info">
+                                        🌅
+                                    </div>
                                     <div>
                                         <h3 class="fw-bold mb-0">@shiftsScheduledToday</h3>
-                                        <span class="text-muted small text-uppercase fw-bold">Shifts Scheduled Today</span>
+                                        <span class="text-muted small text-uppercase fw-bold">⏰ Shifts Scheduled Today</span>
                                     </div>
                                 </div>
                             </div>
 
                             <div class="col-md-6">
-                                <div class="p-3 border rounded bg-light h-100 d-flex align-items-center clickable" @onclick='() => Navigation.NavigateTo("company-attendance-report")' style="cursor:pointer">
-                                    <div class="me-3 bg-white p-3 rounded shadow-sm text-primary"><i class="bi bi-stopwatch fs-3"></i></div>
+                                <div class="p-3 border rounded-3 bg-light h-100 d-flex align-items-center clickable" @onclick='() => Navigation.NavigateTo("company-attendance-report")' style="cursor:pointer">
+                                    <div class="me-3 emoji-icon-badge emoji-icon-badge-primary">
+                                        ⏳
+                                    </div>
                                     <div>
                                         <h3 class="fw-bold mb-0">@FormatTimeSpan(totalMonthScheduledNet)</h3>
-                                        <span class="text-muted small text-uppercase fw-bold">Scheduled Hours (Month)</span>
+                                        <span class="text-muted small text-uppercase fw-bold">📅 Scheduled Hours (Month)</span>
                                     </div>
                                 </div>
                             </div>
                         </div>
 
                         <div class="mt-4">
-                            <h6 class="fw-bold text-muted small text-uppercase mb-3">Quick Actions</h6>
+                            <h6 class="fw-bold text-muted small text-uppercase mb-3 d-flex align-items-center gap-2">
+                                <span>🚀</span> <span>Quick Actions</span>
+                            </h6>
                             <div class="d-flex gap-2 flex-wrap">
-                                <a href="attendance/regularization-approval" class="btn btn-outline-primary btn-sm rounded-pill px-3"><i class="bi bi-check2-square me-1"></i>Approve Regularizations</a>
-                                <a href="admin/report-center" class="btn btn-outline-success btn-sm rounded-pill px-3"><i class="bi bi-file-earmark-bar-graph me-1"></i>Generate Reports</a>
-                                <a href="employees" class="btn btn-outline-secondary btn-sm rounded-pill px-3"><i class="bi bi-person-plus me-1"></i>Add Employee</a>
-                                <a href="admin/feature-toggles" class="btn btn-outline-dark btn-sm rounded-pill px-3"><i class="bi bi-sliders me-1"></i>System Settings</a>
+                                <a href="attendance/regularization-approval" class="btn btn-outline-primary action-pill-btn">
+                                    <span>⏱️</span> <i class="bi bi-check2-square"></i> Regularizations
+                                </a>
+                                <a href="admin/report-center" class="btn btn-outline-success action-pill-btn">
+                                    <span>📊</span> <i class="bi bi-file-earmark-bar-graph"></i> Report Center
+                                </a>
+                                <a href="employees" class="btn btn-outline-info action-pill-btn">
+                                    <span>➕</span> <i class="bi bi-person-plus-fill"></i> Add Employee
+                                </a>
+                                <a href="salary-advances" class="btn btn-outline-warning action-pill-btn">
+                                    <span>💳</span> <i class="bi bi-cash-coin"></i> Salary Advances
+                                </a>
+                                @if (userIsSuperAdmin || settings?.AdminCanManageFeatureToggles == true || settings?.AdminCanManageEmployeePermissions == true)
+                                {
+                                    <a href="admin/feature-toggles" class="btn btn-outline-secondary action-pill-btn">
+                                        <span>⚙️</span> <i class="bi bi-sliders2"></i> System Settings
+                                    </a>
+                                }
                             </div>
                         </div>
                     </div>
@@ -266,8 +320,10 @@ else
             <div class="col-lg-4">
                 <div class="card border-0 shadow-sm h-100">
                     <div class="card-header bg-white border-bottom-0 pt-4 px-4 d-flex justify-content-between align-items-center">
-                        <h5 class="fw-bold mb-0 text-secondary">Recent Advances</h5>
-                        <span class="badge bg-danger rounded-pill">@unpaidAdvances.Count</span>
+                        <h5 class="fw-bold mb-0 text-secondary d-flex align-items-center gap-2">
+                            <span>💳</span> <span>Recent Advances</span>
+                        </h5>
+                        <span class="badge bg-danger rounded-pill px-3 py-1">@unpaidAdvances.Count Unpaid</span>
                     </div>
                     <div class="card-body px-4 pb-4">
                         @if (unpaidAdvances.Any())
@@ -275,25 +331,37 @@ else
                             <div class="list-group list-group-flush shortcut-list">
                                 @foreach (var adv in unpaidAdvances.Take(4))
                                 {
-                                    <div class="list-group-item bg-light border-0 mb-2 rounded">
+                                    <div class="list-group-item bg-light border-0 mb-2 rounded-3 p-3">
                                         <div class="d-flex justify-content-between align-items-center">
-                                            <div>
-                                                <span class="fw-bold d-block text-dark">@GetEmployeeName(adv.EmployeeID)</span>
-                                                <small class="text-muted">@adv.AdvanceDate?.ToString("dd-MMM") • @adv.AdvanceType</small>
+                                            <div class="d-flex align-items-center gap-2">
+                                                <div class="emoji-icon-badge emoji-icon-badge-sm emoji-icon-badge-danger">
+                                                    👤
+                                                </div>
+                                                <div>
+                                                    <span class="fw-bold d-block text-dark">@GetEmployeeName(adv.EmployeeID)</span>
+                                                    <small class="text-muted">📅 @adv.AdvanceDate?.ToString("dd-MMM") • 🏷️ @adv.AdvanceType</small>
+                                                </div>
                                             </div>
-                                            <span class="fw-bold text-danger">@adv.Amount.ToString("C0", inrCulture)</span>
+                                            <span class="fw-bold text-danger fs-6">@adv.Amount.ToString("C0", inrCulture)</span>
                                         </div>
                                     </div>
                                 }
                             </div>
                             @if (unpaidAdvances.Count > 4)
                             {
-                                <div class="text-center mt-3"><a href="salary-advances" class="text-decoration-none fw-bold small">View All</a></div>
+                                <div class="text-center mt-3">
+                                    <a href="salary-advances" class="action-pill-btn btn btn-sm btn-outline-primary text-decoration-none">
+                                        <span>👀</span> View All Advances
+                                    </a>
+                                </div>
                             }
                         }
                         else
                         {
-                            <div class="text-center py-4 text-muted"><i class="bi bi-check-circle display-4 d-block mb-2 text-success opacity-50"></i>No unpaid advances.</div>
+                            <div class="text-center py-4 text-muted">
+                                <span class="fs-1 d-block mb-2">🎉</span>
+                                <p class="mb-0 fw-semibold text-success">All Clear! No unpaid advances.</p>
+                            </div>
                         }
                     </div>
                 </div>
@@ -303,9 +371,13 @@ else
 }
 
 @code {
+    [CascadingParameter(Name = "Settings")]
+    private FeatureSettings? settings { get; set; }
+
     private bool isLoaded = false;
     private bool geoFeatureAvailable;
     private bool userIsSuperAdmin = false;
+    private bool userIsAdmin = false;
     private int presentToday;
     private int absentTodayEst;
     private int totalEmployees;
@@ -329,6 +401,7 @@ else
             // ROLE CHECK
             // ---------------------------------------------------------
             userIsSuperAdmin = user.IsInRole("SuperAdmin");
+            userIsAdmin = user.IsInRole("Admin");
 
             // Employee must never access Admin Dashboard
             if (user.IsInRole("Employee") &&
@@ -343,12 +416,10 @@ else
             // GEO-FENCING
             //
             // IMPORTANT:
-            // Only SuperAdmin can see/use the Live Staff Location panel.
-            //
-            // Even if Geo-Fencing is enabled in FeatureSettings,
-            // Admin and Employee will NOT see this panel.
+            // Admin/SuperAdmin may see the Live Staff Location panel when
+            // Geo-Fencing is enabled. Employee is redirected above.
             // ---------------------------------------------------------
-            if (userIsSuperAdmin)
+            if (user.IsInRole("Admin") || userIsSuperAdmin)
             {
                 geoFeatureAvailable = await GeoAccess.IsEnabledAsync();
             }
@@ -370,33 +441,40 @@ else
     {
         try
         {
-            await using var dbContext = await DbFactory.CreateDbContextAsync();
-            var today = DateOnly.FromDateTime(DateTime.Now);
-            var todayStart = DateTime.Now.Date;
-            var todayEnd = todayStart.AddDays(1);
+            var authState = await AuthState.GetAuthenticationStateAsync();
+            var actorUid = authState.User.FindFirst("sub")?.Value
+                           ?? authState.User.FindFirst("user_id")?.Value
+                           ?? authState.User.Identity?.Name
+                           ?? string.Empty;
 
-            shiftsScheduledToday = await dbContext.ShiftSchedules.AsNoTracking().Where(s => s.ShiftDate == today).CountAsync();
+            // Firebase is the dashboard read authority. Existing Web/SQL
+            // calculations are not recreated here. This is an aggregation
+            // of already-published SSOT records only.
+            var snapshot = await FirebaseDashboard.GetSnapshotAsync(actorUid);
 
-            employeeList = await dbContext.Employees.AsNoTracking().ToListAsync();
-            totalEmployees = employeeList.Count;
-            activeEmployees = employeeList.Count(e => !e.TerminationDate.HasValue);
+            totalEmployees = snapshot.TotalEmployees;
+            activeEmployees = snapshot.ActiveEmployees;
+            presentToday = snapshot.PresentToday;
+            absentTodayEst = snapshot.AbsentToday;
+            totalUnpaidAdvanceAmount = snapshot.UnpaidAdvanceAmount;
+            pendingPayrolls = snapshot.PendingPayrolls;
+            shiftsScheduledToday = snapshot.ShiftsScheduledToday;
+            totalMonthScheduledNet = TimeSpan.FromMilliseconds(snapshot.TotalMonthScheduledMs);
+            employeeList = snapshot.EmployeeNames
+                .Select(x => new Employee { EmployeeID = x.Key, Name = x.Value })
+                .ToList();
 
-            var presentIds = await dbContext.AttendanceLogs.AsNoTracking().Where(l => l.PunchTime >= todayStart && l.PunchTime < todayEnd && l.EmployeeID.HasValue).Select(l => l.EmployeeID!.Value).Distinct().ToListAsync();
-            presentToday = presentIds.Count(id => employeeList.Any(e => e.EmployeeID == id && !e.TerminationDate.HasValue));
-            absentTodayEst = Math.Max(0, activeEmployees - presentToday);
-
-            unpaidAdvances = await dbContext.SalaryAdvances.AsNoTracking().Where(adv => adv.PayrollID_Paid == null).OrderByDescending(adv => adv.AdvanceDate).ToListAsync();
-            totalUnpaidAdvanceAmount = unpaidAdvances.Sum(adv => adv.Amount);
-
-            var lastMonth = DateTime.Now.AddMonths(-1);
-            var summaries = await dbContext.DailySummaries.Where(ds => ds.ShiftDate.Year == today.Year && ds.ShiftDate.Month == today.Month).AsNoTracking().ToListAsync();
-            totalMonthScheduledNet = TimeSpan.FromTicks(summaries.Sum(s => s.ScheduledShiftDuration.Ticks));
-
-            pendingPayrolls = await dbContext.PayrollHistories.AsNoTracking().AnyAsync(p => p.PayYear == lastMonth.Year && p.PayMonth == lastMonth.Month) ? 0 : 1;
+            unpaidAdvances = snapshot.RecentAdvances.Select(a => new SalaryAdvance
+            {
+                EmployeeID = a.EmployeeId,
+                Amount = a.Amount,
+                AdvanceDate = a.AdvanceDate,
+                AdvanceType = a.AdvanceType
+            }).ToList();
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Dashboard loading error");
+            _logger.LogError(ex, "Firebase Admin dashboard loading error");
         }
         finally
         {
@@ -423,10 +501,9 @@ else
     {
         try
         {
-            await LoadAdminDashboard();
+            ScheduleDashboardRefresh();
 
-            await InvokeAsync(
-                StateHasChanged);
+            await InvokeAsync(StateHasChanged);
         }
         catch (Exception ex)
         {
@@ -446,12 +523,11 @@ else
 
     private async Task HandleLiveLocationChanged()
     {
+        // High-frequency GPS events belong to LiveStaffLocationPanel. Do not
+        // reload the full KPI dashboard for every location point.
         try
         {
-            await LoadAdminDashboard();
-
-            await InvokeAsync(
-                StateHasChanged);
+            await InvokeAsync(StateHasChanged);
         }
         catch (Exception ex)
         {
@@ -469,10 +545,9 @@ else
     {
         try
         {
-            await LoadAdminDashboard();
+            ScheduleDashboardRefresh();
 
-            await InvokeAsync(
-                StateHasChanged);
+            await InvokeAsync(StateHasChanged);
         }
         catch (Exception ex)
         {
@@ -480,5 +555,53 @@ else
                 ex,
                 "Live regularization dashboard refresh failed.");
         }
+    }
+    private CancellationTokenSource? _dashboardRefreshDebounceCts;
+    private DateTime _lastDashboardLoadUtc = DateTime.MinValue;
+    private readonly SemaphoreSlim _dashboardLoadGate = new(1, 1);
+
+    private void ScheduleDashboardRefresh()
+    {
+        _dashboardRefreshDebounceCts?.Cancel();
+        _dashboardRefreshDebounceCts?.Dispose();
+        _dashboardRefreshDebounceCts = new CancellationTokenSource();
+        var token = _dashboardRefreshDebounceCts.Token;
+
+        _ = InvokeAsync(async () =>
+        {
+            try
+            {
+                // Fast debounce for immediate responsive real-time updates
+                await Task.Delay(TimeSpan.FromMilliseconds(100), token);
+
+                await _dashboardLoadGate.WaitAsync(token);
+                try
+                {
+                    await LoadAdminDashboard();
+                    _lastDashboardLoadUtc = DateTime.UtcNow;
+                }
+                finally
+                {
+                    _dashboardLoadGate.Release();
+                }
+
+                await InvokeAsync(StateHasChanged);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Debounced Firebase dashboard refresh failed.");
+            }
+        });
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        _dashboardRefreshDebounceCts?.Cancel();
+        _dashboardRefreshDebounceCts?.Dispose();
+        _dashboardLoadGate.Dispose();
+        return ValueTask.CompletedTask;
     }
 }

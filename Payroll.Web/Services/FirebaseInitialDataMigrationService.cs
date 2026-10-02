@@ -30,7 +30,7 @@ public sealed class FirebaseInitialDataMigrationService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        await Task.Delay(TimeSpan.FromSeconds(3), stoppingToken);
+        await Task.Delay(TimeSpan.FromSeconds(12), stoppingToken);
 
         var ownerUid = _configuration["Firebase:OwnerUid"]?.Trim()
             ?? Environment.GetEnvironmentVariable("FIREBASE_OWNER_UID")?.Trim();

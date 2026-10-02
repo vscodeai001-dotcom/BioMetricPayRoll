@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Data.Sqlite;
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using Microsoft.AspNetCore.SignalR;
@@ -15,6 +16,7 @@ public class GeoLocationService
     private readonly AttendanceRefreshService _refreshService;
     private readonly IHubContext<AttendanceRefreshHub> _hubContext;
     private readonly FirebaseRealtimeService _firebase;
+    private readonly FirebaseAttendanceMutationService _firebaseAttendanceMutations;
     private readonly IConfiguration _configuration;
 
     // Dual Attendance treats the configured geofence as a reconciliation
@@ -35,6 +37,7 @@ public class GeoLocationService
         AttendanceRefreshService refreshService,
         IHubContext<AttendanceRefreshHub> hubContext,
         FirebaseRealtimeService firebase,
+        FirebaseAttendanceMutationService firebaseAttendanceMutations,
         IConfiguration configuration)
     {
         _dbFactory = dbFactory;
@@ -42,6 +45,7 @@ public class GeoLocationService
         _refreshService = refreshService;
         _hubContext = hubContext;
         _firebase = firebase;
+        _firebaseAttendanceMutations = firebaseAttendanceMutations;
         _configuration = configuration;
     }
 
@@ -128,15 +132,37 @@ public class GeoLocationService
                 company.OfficeLatitude,
                 company.OfficeLongitude);
 
+            var previousWithin = session.LastIsWithinAllowedRadius;
+            var currentWithin = distance <= (company.GeoRadiusMeters + 1);
+
+            // REQUIREMENT: Always evaluate against the new radius immediately.
+            // Rebaseline even if previous state was the same, to ensure the
+            // authoritative LastAllowedRadiusMeters is updated and any missed
+            // transitions are reconciled.
+            await ProcessAutomaticGeofencePunchAsync(
+                db,
+                session.EmployeeId,
+                session.SessionId,
+                session.LastLatitude.Value,
+                session.LastLongitude.Value,
+                session.LastAccuracyMeters ?? 0.0,
+                distance,
+                company.GeoRadiusMeters,
+                previousWithin,
+                currentWithin);
+
             session.LastAllowedRadiusMeters = company.GeoRadiusMeters;
-            // Haversine rule + 1m buffer for UI stability
-            session.LastIsWithinAllowedRadius = distance <= (company.GeoRadiusMeters + 1);
+            session.LastIsWithinAllowedRadius = currentWithin;
         }
 
-        await db.SaveChangesAsync();
+        await SaveChangesWithSqliteRetryAsync(db);
 
         // Notify all dashboards to refresh their authoritative membership
         await _refreshService.NotifyGlobalRefreshAsync("RADIUS_REBASELINED");
+        await _refreshService.NotifyGeoSettingsChangedAsync(
+            company.OfficeLatitude,
+            company.OfficeLongitude,
+            company.GeoRadiusMeters);
     }
 
     // ================================================================
@@ -170,14 +196,6 @@ public class GeoLocationService
                     .FirstOrDefaultAsync(x =>
                         x.SessionId == sessionId);
 
-                if (existing != null)
-                {
-                    if (existing.EmployeeId != employeeId)
-                        return false;
-
-                    return !existing.EndedAtUtc.HasValue;
-                }
-
                 var previousSessions = await db.EmployeeGpsSessions
                     .Where(x =>
                         x.EmployeeId == employeeId &&
@@ -187,14 +205,46 @@ public class GeoLocationService
 
                 var now = DateTime.UtcNow;
 
-                foreach (var previous in previousSessions)
+                if (previousSessions.Count > 0)
                 {
-                    previous.EndedAtUtc = now;
-                    previous.EndReason = "NEW_SESSION";
+                    foreach (var previous in previousSessions)
+                    {
+                        previous.EndedAtUtc = now;
+                        previous.EndReason = "NEW_SESSION";
 
-                    LiveLocationStore.Remove(
-                        previous.EmployeeId,
-                        previous.SessionId);
+                        LiveLocationStore.Remove(
+                            previous.EmployeeId,
+                            previous.SessionId);
+
+                        // Ensure the Firebase live marker is un-bound from
+                        // this now-ended session.
+                        await _firebase.TerminateLiveLocationAsync(
+                            previous.EmployeeId,
+                            _firebase.ResolveOwnerUid($"employee-{previous.EmployeeId}", "Employee"),
+                            expectedSessionId: previous.SessionId);
+                    }
+                    await SaveChangesWithSqliteRetryAsync(db);
+                }
+
+                if (existing != null)
+                {
+                    if (existing.EmployeeId != employeeId)
+                        return false;
+
+                    if (existing.EndedAtUtc.HasValue)
+                    {
+                        existing.EndedAtUtc = null;
+                        existing.EndReason = null;
+                        existing.LastUpdateAtUtc = now;
+                        await SaveChangesWithSqliteRetryAsync(db);
+                    }
+
+                    await _firebase.BindLiveLocationAsync(
+                        employeeId,
+                        sessionId,
+                        _firebase.ResolveOwnerUid($"employee-{employeeId}", "Employee"));
+
+                    return true;
                 }
 
                 var session = new EmployeeGpsSession
@@ -211,7 +261,15 @@ public class GeoLocationService
                 };
 
                 db.EmployeeGpsSessions.Add(session);
-                await db.SaveChangesAsync();
+                await SaveChangesWithSqliteRetryAsync(db);
+
+                // REQUIREMENT: Bind the live marker to the new session ID in Firebase.
+                // This ensures that late location fixes from a previous session
+                // (e.g. from another device) are ignored across both platforms.
+                await _firebase.BindLiveLocationAsync(
+                    employeeId,
+                    sessionId,
+                    _firebase.ResolveOwnerUid($"employee-{employeeId}", "Employee"));
 
                 // Broadcast only after the database commit so every admin
                 // refresh triggered by SessionEnded observes EndedAtUtc.
@@ -309,7 +367,8 @@ public class GeoLocationService
         double distanceMeters,
         int allowedRadiusMeters,
         bool isWithinAllowedRadius,
-        DateTime? capturedAtUtc = null)
+        DateTime? capturedAtUtc = null,
+        bool allowSessionRecovery = true)
     {
         if (employeeId <= 0 ||
             sessionId == Guid.Empty ||
@@ -320,34 +379,13 @@ public class GeoLocationService
 
         try
         {
-            // The first update after login can race the session-start call.
-            // Recover the session before taking the lifecycle lock, then
-            // re-read it under the lock before touching LiveLocationStore.
+            // Session lookup is repeated under the advisory lock below. Do
+            // not create a session before the lock is held: a concurrent newer
+            // session could otherwise be ended by a stale GPS request.
             await using var db =
                 await _dbFactory.CreateDbContextAsync();
 
-            var session = await db.EmployeeGpsSessions
-                .FirstOrDefaultAsync(x =>
-                    x.EmployeeId == employeeId &&
-                    x.SessionId == sessionId);
-
-            if (session == null)
-            {
-                var created = await StartGpsSessionAsync(
-                    employeeId,
-                    sessionId);
-
-                if (!created)
-                    return false;
-
-                session = await db.EmployeeGpsSessions
-                    .FirstOrDefaultAsync(x =>
-                        x.EmployeeId == employeeId &&
-                        x.SessionId == sessionId);
-
-                if (session == null)
-                    return false;
-            }
+            EmployeeGpsSession? session = null;
 
             // legacy database advisory lock coordinates GPS updates
             // and logout/session-end operations across Web/Worker instances.
@@ -366,37 +404,194 @@ public class GeoLocationService
                         x.EmployeeId == employeeId &&
                         x.SessionId == sessionId);
 
+                // A GPS fix can arrive after another platform has ended the
+                // incoming session. Never resurrect that session. For a current
+                // event, first attach to the newest already-active session. Only
+                // when there is no active session may we create a new one.
+                var effectiveSessionId = sessionId;
+
                 if (session == null || session.EndedAtUtc.HasValue)
                 {
-                    // An old in-flight GPS request is no longer authoritative.
-                    // Remove only if this exact old session still owns the
-                    // in-memory entry. A newer session is never removed.
-                    LiveLocationStore.Remove(employeeId, sessionId);
-                    return false;
+                    if (!allowSessionRecovery)
+                    {
+                        if (session != null && session.EndedAtUtc.HasValue)
+                        {
+                            LiveLocationStore.Remove(employeeId, sessionId);
+                        }
+                        return false;
+                    }
+
+                    var recoveryStart = DateTime.UtcNow;
+
+                    // Check if another active session exists for this employee
+                    var existingActive = await db.EmployeeGpsSessions
+                        .Where(x =>
+                            x.EmployeeId == employeeId &&
+                            x.EndedAtUtc == null &&
+                            x.SessionId != sessionId)
+                        .OrderByDescending(x => x.StartedAtUtc)
+                        .FirstOrDefaultAsync();
+
+                    if (existingActive != null)
+                    {
+                        session = existingActive;
+                        effectiveSessionId = existingActive.SessionId;
+                    }
+                    else if (session != null && session.EndedAtUtc.HasValue)
+                    {
+                        session.EndedAtUtc = null;
+                        session.EndReason = null;
+                        session.LastUpdateAtUtc = recoveryStart;
+                        await SaveChangesWithSqliteRetryAsync(db);
+                        effectiveSessionId = sessionId;
+
+                        await _firebase.BindLiveLocationAsync(
+                            employeeId,
+                            sessionId,
+                            _firebase.ResolveOwnerUid($"employee-{employeeId}", "Employee"));
+
+                        _logger.LogInformation(
+                            "Reactivated ended GPS session for EmployeeId={EmployeeId}, SessionId={SessionId}",
+                            employeeId,
+                            sessionId);
+                    }
+                    else
+                    {
+                        // Ensure only ONE session can be active for an employee. Close any older dangling sessions.
+                        var previousSessions = await db.EmployeeGpsSessions
+                            .Where(x =>
+                                x.EmployeeId == employeeId &&
+                                x.EndedAtUtc == null &&
+                                x.SessionId != sessionId)
+                            .ToListAsync();
+
+                        if (previousSessions.Count > 0)
+                        {
+                            foreach (var previous in previousSessions)
+                            {
+                                previous.EndedAtUtc = previous.LastUpdateAtUtc > DateTime.MinValue ? previous.LastUpdateAtUtc : recoveryStart;
+                                previous.EndReason = "SUPERSEDED";
+                                LiveLocationStore.Remove(previous.EmployeeId, previous.SessionId);
+                                await _firebase.TerminateLiveLocationAsync(
+                                    previous.EmployeeId,
+                                    _firebase.ResolveOwnerUid($"employee-{previous.EmployeeId}", "Employee"),
+                                    expectedSessionId: previous.SessionId);
+                            }
+                        }
+
+                        effectiveSessionId = sessionId;
+
+                        session = new EmployeeGpsSession
+                        {
+                            EmployeeId = employeeId,
+                            SessionId = sessionId,
+                            StartedAtUtc = recoveryStart,
+                            LastUpdateAtUtc = DateTime.MinValue,
+                            EndedAtUtc = null,
+                            EndReason = null,
+                            TotalPoints = 0,
+                            TotalDistanceMeters = 0,
+                            AverageAccuracyMeters = null
+                        };
+
+                        db.EmployeeGpsSessions.Add(session);
+                        await SaveChangesWithSqliteRetryAsync(db);
+
+                        await _firebase.BindLiveLocationAsync(
+                            employeeId,
+                            sessionId,
+                            _firebase.ResolveOwnerUid($"employee-{employeeId}", "Employee"));
+
+                        try
+                        {
+                            await _hubContext.Clients.All.SendAsync(
+                                "SessionStarted",
+                                new
+                                {
+                                    EmployeeId = employeeId,
+                                    SessionId = sessionId,
+                                    StartedAtUtc = recoveryStart
+                                });
+                        }
+                        catch (Exception signalREx)
+                        {
+                            _logger.LogWarning(
+                                signalREx,
+                                "Failed to broadcast recovered GPS session start for employee {EmployeeId}",
+                                employeeId);
+                        }
+
+                        _logger.LogInformation(
+                            "Created/Recovered GPS session for EmployeeId={EmployeeId}, SessionId={SessionId}",
+                            employeeId,
+                            sessionId);
+                    }
+                }
+
+                // Ensure only ONE session can be active for an employee. Close any older dangling sessions.
+                var supersededSessions = await db.EmployeeGpsSessions
+                    .Where(x =>
+                        x.EmployeeId == employeeId &&
+                        x.EndedAtUtc == null &&
+                        x.SessionId != effectiveSessionId)
+                    .ToListAsync();
+
+                if (supersededSessions.Count > 0)
+                {
+                    var nowUtc = DateTime.UtcNow;
+                    foreach (var superseded in supersededSessions)
+                    {
+                        superseded.EndedAtUtc = superseded.LastUpdateAtUtc > DateTime.MinValue ? superseded.LastUpdateAtUtc : nowUtc;
+                        superseded.EndReason = "SUPERSEDED";
+                        LiveLocationStore.Remove(superseded.EmployeeId, superseded.SessionId);
+                    }
+                    await SaveChangesWithSqliteRetryAsync(db);
                 }
 
                 var captureTime = capturedAtUtc.HasValue && capturedAtUtc.Value != default
                     ? capturedAtUtc.Value.ToUniversalTime()
                     : DateTime.UtcNow;
 
+                // Adjust session start time if first fix has minor clock skew before session creation
+                if (session.LastUpdateAtUtc == DateTime.MinValue && captureTime < session.StartedAtUtc)
+                {
+                    session.StartedAtUtc = captureTime;
+                }
+
                 // Do not let delayed/retried GPS packets overwrite the newer
-                // session position. This is a display/data-integrity guard;
-                // attendance rules continue to use the current server time.
+                // session position. Allow reasonable 60-second clock skew for live fixes.
+                if (captureTime < session.StartedAtUtc.AddSeconds(-60))
+                {
+                    _logger.LogDebug(
+                        "Ignoring GPS fix captured before effective session start. EmployeeId={EmployeeId}, IncomingSessionId={IncomingSessionId}, EffectiveSessionId={EffectiveSessionId}",
+                        employeeId, sessionId, effectiveSessionId);
+                    return false;
+                }
+
                 if (captureTime < session.LastUpdateAtUtc)
                 {
                     _logger.LogDebug(
                         "Ignoring out-of-order GPS fix. EmployeeId={EmployeeId}, SessionId={SessionId}, Capture={CaptureTime}, Current={CurrentTime}",
-                        employeeId, sessionId, captureTime, session.LastUpdateAtUtc);
+                        employeeId, effectiveSessionId, captureTime, session.LastUpdateAtUtc);
                     return true;
                 }
 
                 var safeAccuracy = NormalizeAccuracy(accuracyMeters);
                 var safeDistance = NormalizeDistance(distanceMeters);
                 var now = DateTime.UtcNow;
-                var previousLocationState = session.LastIsWithinAllowedRadius;
+
+                var captureTimeIndia = TimeZoneInfo.ConvertTimeFromUtc(captureTime, IndiaTimeZone);
+                var sessionLastIndia = session.LastUpdateAtUtc != DateTime.MinValue
+                    ? TimeZoneInfo.ConvertTimeFromUtc(session.LastUpdateAtUtc, IndiaTimeZone)
+                    : (DateTime?)null;
+
+                // Day boundary check: if the previous GPS update was on an earlier calendar date (in India Time),
+                // treat previousLocationState as null so that the new day evaluates initial entrance fresh.
+                var isNewCalendarDay = sessionLastIndia == null || captureTimeIndia.Date > sessionLastIndia.Value.Date;
+                var effectivePreviousLocationState = isNewCalendarDay ? (bool?)null : session.LastIsWithinAllowedRadius;
 
                 var stableLocationState = ResolveStableGeofenceState(
-                    previousLocationState,
+                    effectivePreviousLocationState,
                     safeDistance,
                     allowedRadiusMeters + 1); // UX: 1m buffer for map stability
 
@@ -414,26 +609,23 @@ public class GeoLocationService
                 // held, so logout cannot interleave with the decision.
                 if (stableLocationState.HasValue)
                 {
-                    var attendanceEvaluationCompleted = radiusChanged
-                        ? true
-                        : await ProcessAutomaticGeofencePunchAsync(
+                    // REQUIREMENT: Process automatic punching even if radius changed.
+                    // This ensures Admin geofence adjustments take immediate effect.
+                    var attendanceEvaluationCompleted = await ProcessAutomaticGeofencePunchAsync(
                             db,
                             employeeId,
-                            sessionId,
+                            effectiveSessionId,
                             latitude,
                             longitude,
                             safeAccuracy,
                             safeDistance,
                             allowedRadiusMeters,
-                            previousLocationState,
-                            stableLocationState.Value);
+                            effectivePreviousLocationState,
+                            stableLocationState.Value,
+                            captureTime); // MIRROR: Use original capture time for offline sync reconciliation
 
                     // Persist the SAME stable state that drove the attendance
-                    // decision only when the evaluation completed safely. If
-                    // automatic attendance failed, keep the previous state so
-                    // the next valid GPS fix retries instead of silently
-                    // consuming the transition. Never overwrite it with raw
-                    // GPS state.
+                    // decision only when the evaluation completed safely.
                     if (attendanceEvaluationCompleted)
                     {
                         session.LastIsWithinAllowedRadius =
@@ -442,17 +634,17 @@ public class GeoLocationService
                     else
                     {
                         _logger.LogWarning(
-                            "Dual Attendance evaluation did not complete. Geofence state was not advanced so the transition can be retried. EmployeeId={EmployeeId}, SessionId={SessionId}",
+                            "Dual Attendance evaluation did not complete. Geofence state was not advanced. EmployeeId={EmployeeId}, SessionId={SessionId}",
                             employeeId,
-                            sessionId);
+                            effectiveSessionId);
                     }
 
                     if (radiusChanged)
                     {
                         _logger.LogInformation(
-                            "Geofence radius changed during active GPS session; state re-baselined without an automatic punch. EmployeeId={EmployeeId}, SessionId={SessionId}, PreviousRadius={PreviousRadius}, NewRadius={NewRadius}, State={State}",
+                            "Geofence radius changed during active GPS session; state re-baselined with immediate attendance evaluation. EmployeeId={EmployeeId}, SessionId={SessionId}, PreviousRadius={PreviousRadius}, NewRadius={NewRadius}, State={State}",
                             employeeId,
-                            sessionId,
+                            effectiveSessionId,
                             session.LastAllowedRadiusMeters,
                             allowedRadiusMeters,
                             stableLocationState.Value ? "INSIDE" : "OUTSIDE");
@@ -495,7 +687,7 @@ public class GeoLocationService
                     safeDistance,
                     allowedRadiusMeters,
                     session.LastIsWithinAllowedRadius ?? isWithinAllowedRadius,
-                    sessionId,
+                    effectiveSessionId,
                     captureTime);
 
                 if (!liveUpdated)
@@ -503,11 +695,49 @@ public class GeoLocationService
                     _logger.LogWarning(
                         "GPS live-store update rejected. EmployeeId={EmployeeId}, SessionId={SessionId}",
                         employeeId,
-                        sessionId);
+                        effectiveSessionId);
                     return false;
                 }
 
-                await db.SaveChangesAsync();
+                await SaveChangesWithSqliteRetryAsync(db);
+
+                /*
+                 * Firebase is the shared realtime wire for Web + Android.
+                 * Publish only after the authoritative GPS session update has
+                 * committed. A Firebase outage must never break the existing
+                 * Web attendance/GPS business flow.
+                 */
+                try
+                {
+                    var live = LiveLocationStore.Get(employeeId);
+                    var speed = live?.SpeedMps ?? 0;
+
+                    var clientEventId =
+                        $"web-{effectiveSessionId:N}-{session.TotalPoints}";
+
+                    await _firebase.PublishLiveLocationAsync(
+                        employeeId,
+                        effectiveSessionId,
+                        clientEventId,
+                        session.TotalPoints,
+                        latitude,
+                        longitude,
+                        safeAccuracy,
+                        speed,
+                        new DateTimeOffset(captureTime).ToUnixTimeMilliseconds(),
+                        allowedRadiusMeters,
+                        session.LastIsWithinAllowedRadius ?? isWithinAllowedRadius,
+                        session.StartedAtUtc,
+                        safeDistance);
+                }
+                catch (Exception firebaseEx)
+                {
+                    _logger.LogWarning(
+                        firebaseEx,
+                        "Firebase live-location publish failed after committed GPS update. EmployeeId={EmployeeId}, SessionId={SessionId}",
+                        employeeId,
+                        effectiveSessionId);
+                }
 
                 try
                 {
@@ -522,7 +752,7 @@ public class GeoLocationService
                         new
                         {
                             EmployeeId = employeeId,
-                            SessionId = sessionId,
+                            SessionId = effectiveSessionId,
                             Latitude = latitude,
                             Longitude = longitude,
                             Timestamp = live?.LastUpdatedUtc ?? captureTime,
@@ -606,12 +836,9 @@ public class GeoLocationService
         double distanceMeters,
         int allowedRadiusMeters,
         bool? previousLocationState,
-        bool currentLocationState)
+        bool currentLocationState,
+        DateTime? overridePunchTime = null)
     {
-        // Automatic geofence attendance requires BOTH Geo-Fencing and the
-        // dedicated Automatic Geofence Punching feature. Dual Attendance is
-        // independent: when enabled, biometric remains the highest-priority
-        // attendance source while automatic geofence punches are still saved.
         var features = await db.FeatureSettings
             .AsNoTracking()
             .FirstOrDefaultAsync(f => f.Id == 1);
@@ -620,140 +847,277 @@ public class GeoLocationService
             features.EnableAutomaticGeofencePunching != true)
             return true;
 
-        // The GPS state is nullable because a session can begin before the
-        // first valid fix, after a browser reconnect, or after legacy data.
-        // A null state is therefore a bootstrap condition, not an automatic
-        // reason to suppress OUT. Attendance state below decides whether the
-        // first valid fix should create IN, OUT, or simply establish state.
-        // Do not use the previous GPS state as a hard gate. The previous
-        // state can be null or stale after reconnects, app suspension,
-        // legacy sessions, or a missed GPS transition. Attendance parity
-        // plus the CURRENT geofence state is the authoritative reconciliation
-        // decision, which makes the feature self-healing.
         if (allowedRadiusMeters <= 0)
             return true;
 
         try
         {
-            // Keep the attendance decision and fallback punch atomic.
-            // The surrounding GPS/session advisory lock prevents logout and
-            // stale GPS updates from interleaving with this operation.
+            /*
+             * IMPORTANT:
+             * Automatic geofence attendance is a RADIUS STATE TRANSITION,
+             * not a reconciliation on every GPS fix.
+             *
+             * OUTSIDE -> INSIDE = one IN
+             * INSIDE  -> OUTSIDE = one OUT
+             * INSIDE  -> INSIDE  = no punch
+             * OUTSIDE -> OUTSIDE = no punch
+             *
+             * A null previous state is the first known state for this GPS
+             * session. Establishing OUTSIDE never creates an OUT punch.
+             * Establishing INSIDE may create the initial IN, but only when
+             * the current attendance parity is still OUT.
+             *
+             * If a genuine transition fails because SQLite is temporarily
+             * locked, return false and do NOT advance the session state. The
+             * next GPS fix can retry the same transition without creating
+             * duplicate punches after the first successful save.
+             */
+            var isTransition =
+                previousLocationState.HasValue &&
+                previousLocationState.Value != currentLocationState;
+
+            var isInitialInside =
+                !previousLocationState.HasValue && currentLocationState;
+
+            // If neither a state transition nor initial inside fix:
+            // Only proceed if the employee is currently inside (to check for new day opening punch).
+            // OUTSIDE -> OUTSIDE is an immediate no-op.
+            if (!isTransition && !isInitialInside && !currentLocationState)
+                return true;
+
             await using var transaction =
                 await db.Database.BeginTransactionAsync();
 
-            await AcquireAttendanceAdvisoryLockAsync(
-                db,
-                employeeId);
+            await AcquireAttendanceAdvisoryLockAsync(db, employeeId);
 
-            var indiaNow = GetIndiaNow();
+            var punchTime = overridePunchTime.HasValue
+                ? TimeZoneInfo.ConvertTimeFromUtc(
+                    overridePunchTime.Value,
+                    IndiaTimeZone)
+                : GetIndiaNow();
 
-            var businessDayStart =
-                DateTime.SpecifyKind(
-                    indiaNow.Date,
-                    DateTimeKind.Unspecified);
+            var businessDayStart = DateTime.SpecifyKind(
+                punchTime.Date,
+                DateTimeKind.Unspecified);
 
-            var businessDayEnd =
-                DateTime.SpecifyKind(
-                    indiaNow.Date.AddDays(1),
-                    DateTimeKind.Unspecified);
+            var businessDayEnd = DateTime.SpecifyKind(
+                punchTime.Date.AddDays(1),
+                DateTimeKind.Unspecified);
 
-            var todaysPunches =
-                await db.AttendanceLogs
-                    .Where(x =>
-                        x.EmployeeID == employeeId &&
-                        x.PunchTime >= businessDayStart &&
-                        x.PunchTime < businessDayEnd)
-                    .OrderBy(x => x.PunchTime)
-                    .ThenBy(x => x.LogID)
+            var todaysPunches = await db.AttendanceLogs
+                .Where(x =>
+                    x.EmployeeID == employeeId &&
+                    x.PunchTime >= businessDayStart &&
+                    x.PunchTime < businessDayEnd)
+                .OrderBy(x => x.PunchTime)
+                .ThenBy(x => x.LogID)
+                .ToListAsync();
+
+            var emp = await db.Employees.AsNoTracking().FirstOrDefaultAsync(e => e.EmployeeID == employeeId);
+            var isContinuous = string.Equals(emp?.ShiftMode, "CONTINUOUS", StringComparison.OrdinalIgnoreCase) ||
+                               (emp?.ShiftStartTime.HasValue == true && emp?.ShiftEndTime.HasValue == true && emp.ShiftEndTime.Value <= emp.ShiftStartTime.Value);
+
+            bool attendanceCurrentlyOpen = false;
+
+            if (isContinuous)
+            {
+                // In continuous shift mode (or overnight shift), check the most recent punch within the last 24 hours.
+                // Use IsInType/IsOutType so aliases like "Punch", "CheckIn", "AUTO_IN" are recognised.
+                var windowStart = punchTime.AddHours(-24);
+                var recentPunches = await db.AttendanceLogs
+                    .AsNoTracking()
+                    .Where(x => x.EmployeeID == employeeId &&
+                                x.PunchTime >= windowStart &&
+                                x.PunchTime <= punchTime)
+                    .OrderByDescending(x => x.PunchTime)
+                    .ThenByDescending(x => x.LogID)
                     .ToListAsync();
 
-            // The existing attendance engine remains untouched: attendance
-            // state is still derived from chronological punch parity.
-            var attendanceCurrentlyOpen =
-                todaysPunches.Count % 2 != 0;
+                // Filter to canonical IN/OUT after EF materialises results (IsInType is not translatable to SQL)
+                var recentValid = recentPunches
+                    .Where(x => IsInType(x.LogType) || IsOutType(x.LogType))
+                    .Take(1)
+                    .ToList();
 
-            var requiredPunchType =
-                currentLocationState
-                    ? "IN"
-                    : "OUT";
+                if (recentValid.Count > 0)
+                {
+                    attendanceCurrentlyOpen = IsInType(recentValid[0].LogType);
+                }
+            }
+            else
+            {
+                // Standard Single Day Shift mode: check punches belonging to today's business day.
+                // Use IsInType/IsOutType so aliases like "Punch", "CheckIn", "AUTO_IN" are recognised.
+                var validPunches = todaysPunches
+                    .Where(p => IsInType(p.LogType) || IsOutType(p.LogType))
+                    .ToList();
 
-            // Attendance state is the safety gate on EVERY valid GPS fix.
-            // This is deliberately reconciliation-based rather than relying
-            // only on a detected GPS transition. It covers: fresh sessions,
-            // reconnects, missed fixes, browser sleep, Android suspension,
-            // legacy sessions with a null LastIsWithinAllowedRadius, and an
-            // employee who starts tracking after already leaving/entering.
-            //
-            //   GPS INSIDE  + attendance OUT -> automatic IN
-            //   GPS OUTSIDE + attendance IN  -> automatic OUT
-            //   GPS INSIDE  + attendance IN  -> no duplicate IN
-            //   GPS OUTSIDE + attendance OUT -> no duplicate OUT
-            //
-            // Once the required parity is reached, every later fix is
-            // naturally idempotent because the same condition becomes true.
-            if (currentLocationState == attendanceCurrentlyOpen)
+                if (validPunches.Count > 0)
+                {
+                    attendanceCurrentlyOpen = IsInType(validPunches.Last().LogType);
+                }
+            }
+            // If this is an INSIDE -> INSIDE fix (neither transition nor initial inside):
+            // For single-day shift, only allow it if today's business day has ZERO punches yet
+            // (e.g. employee remained inside across midnight 12:00 AM).
+            // If punches already exist today, or if continuous mode, INSIDE -> INSIDE is a no-op.
+            if (!isTransition && !isInitialInside)
+            {
+                if (isContinuous || todaysPunches.Count > 0)
+                {
+                    await transaction.CommitAsync();
+                    return true;
+                }
+            }
+
+            var punchType = currentLocationState ? "IN" : "OUT";
+
+            // Initial OUT is only a state initialization, never an OUT punch.
+            if (!currentLocationState && !previousLocationState.HasValue)
+            {
+                await transaction.CommitAsync();
                 return true;
+            }
 
-            /*
-             * BIOMETRIC and explicit MOBILE punches are authoritative.
-             * If one has already been committed close to this transition,
-             * the fallback must not add another event.
-             */
-            var recentAuthoritative =
-                todaysPunches
-                    .Where(IsAuthoritativeAttendancePunch)
-                    .Where(x =>
-                        Math.Abs(
-                            (x.PunchTime - indiaNow).TotalSeconds)
-                        <= AuthoritativePunchProtectionSeconds)
-                    .OrderByDescending(x => x.PunchTime)
-                    .FirstOrDefault();
+            // For a real transition, the geofence direction must agree with
+            // the attendance direction before creating a fallback punch.
+            // This prevents a manual/biometric punch from being duplicated.
+            if (currentLocationState == attendanceCurrentlyOpen)
+            {
+                await transaction.CommitAsync();
+                return true;
+            }
+
+            var recentAuthoritative = todaysPunches
+                .Where(IsAuthoritativeAttendancePunch)
+                .Where(x =>
+                    Math.Abs((x.PunchTime - punchTime).TotalSeconds) <=
+                    AuthoritativePunchProtectionSeconds)
+                .OrderByDescending(x => x.PunchTime)
+                .FirstOrDefault();
 
             if (recentAuthoritative != null)
             {
                 _logger.LogInformation(
-                    "Automatic geofence {PunchType} skipped because an authoritative attendance punch already exists. " +
-                    "EmployeeId={EmployeeId}, LogId={LogId}, Device={Device}, Time={PunchTime}",
-                    requiredPunchType,
-                    employeeId,
-                    recentAuthoritative.LogID,
-                    recentAuthoritative.DeviceID,
-                    recentAuthoritative.PunchTime);
+    "Automatic geofence {PunchType} skipped because an authoritative attendance punch already exists. " +
+    "EmployeeId={EmployeeId}, LogId={LogId}, Device={Device}, Time={PunchTime}",
+    punchType,
+    employeeId,
+    recentAuthoritative.LogID,
+    recentAuthoritative.DeviceID,
+    recentAuthoritative.PunchTime);
 
                 await transaction.CommitAsync();
                 return true;
             }
 
-            var log =
-                new AttendanceLog
+            // 5-minute IN guard: cross-device safety net.
+            // If an IN punch (any LogType alias) was created within the last 5 minutes,
+            // skip creating another IN even if the parity check above passed
+            // (can happen when Android auto-punch fires concurrently and its "IN" type
+            // was not yet normalised at parity-check time).
+            if (currentLocationState) // i.e. generating an IN punch
+            {
+                var recentInPunch = todaysPunches
+                    .Where(p => IsInType(p.LogType))
+                    .Where(p => Math.Abs((p.PunchTime - punchTime).TotalSeconds) <= 300) // 5 minutes
+                    .OrderByDescending(p => p.PunchTime)
+                    .FirstOrDefault();
+
+                if (recentInPunch != null)
                 {
-                    EmployeeID = employeeId,
-                    BiometricID = "GEOFENCE_AUTO",
-                    PunchTime = indiaNow,
-                    DeviceID = "GeofenceAuto",
-                    LogType = requiredPunchType,
-                    Latitude = latitude,
-                    Longitude = longitude,
-                    IsApproved = true
-                };
+                    _logger.LogInformation(
+                        "Automatic geofence IN skipped — an IN punch already exists within 5 minutes. " +
+                        "EmployeeId={EmployeeId}, ExistingLogId={LogId}, ExistingDevice={Device}, ExistingTime={Time}",
+                        employeeId,
+                        recentInPunch.LogID,
+                        recentInPunch.DeviceID,
+                        recentInPunch.PunchTime);
+
+                    await transaction.CommitAsync();
+                    return true;
+                }
+            }
+            else // i.e. generating an OUT punch
+            {
+                // 10-minute OUT guard: cross-device safety net.
+                // Re-query the DB fresh (not the stale todaysPunches snapshot) so that
+                // any AndroidGeofenceAuto OUT written by Firebase sync AFTER the initial
+                // todaysPunches load is also caught, closing the async-write race window.
+                // Fetch the bounded 10-min window, then apply IsOutType in memory
+                // (IsOutType is a C# static method — not EF-translatable to SQL).
+                var guardWindowStart = punchTime.AddMinutes(-10);
+                var guardWindowEnd   = punchTime;
+                var windowPunches = await db.AttendanceLogs
+                    .Where(p =>
+                        p.EmployeeID == employeeId &&
+                        p.PunchTime >= businessDayStart &&
+                        p.PunchTime < businessDayEnd &&
+                        p.PunchTime >= guardWindowStart &&
+                        p.PunchTime <= guardWindowEnd)
+                    .OrderByDescending(p => p.PunchTime)
+                    .ToListAsync();
+                var freshOutPunch = windowPunches.FirstOrDefault(p => IsOutType(p.LogType) &&
+                    (p.DeviceID == "GeofenceAuto" || p.DeviceID == "AndroidGeofenceAuto"));
+
+                if (freshOutPunch != null)
+                {
+                    _logger.LogInformation(
+                        "Automatic geofence OUT skipped — an OUT punch already exists within 10 minutes (fresh re-query). " +
+                        "EmployeeId={EmployeeId}, ExistingLogId={LogId}, ExistingDevice={Device}, ExistingTime={Time}",
+                        employeeId,
+                        freshOutPunch.LogID,
+                        freshOutPunch.DeviceID,
+                        freshOutPunch.PunchTime);
+
+                    await transaction.CommitAsync();
+                    return true;
+                }
+            }
+
+            var log = new AttendanceLog
+            {
+                EmployeeID = employeeId,
+                BiometricID = "GEOFENCE_AUTO",
+                PunchTime = punchTime,
+                DeviceID = "GeofenceAuto",
+                LogType = punchType,
+                Latitude = latitude,
+                Longitude = longitude,
+                IsApproved = true
+            };
 
             db.AttendanceLogs.Add(log);
-            await db.SaveChangesAsync();
+            await SaveChangesWithSqliteRetryAsync(db);
 
-            var result =
-                new GeoPunchResult
-                {
-                    Success = true,
-                    Message =
-                        $"Automatic geofence {requiredPunchType} recorded. " +
-                        $"(Dist: {distanceMeters:F0}m)"
-                };
+            // Firebase synchronization remains secondary to the committed
+            // local attendance transaction and must never create another punch.
+            _ = _firebaseAttendanceMutations.UpsertPunchAsync(log, "CREATED");
+
+            try
+            {
+                var punchDate = DateOnly.FromDateTime(punchTime);
+                _ = _refreshService.NotifyPunchCreatedAsync(employeeId, punchDate);
+                _ = _refreshService.NotifyAttendanceChangedAsync(employeeId, punchDate);
+            }
+            catch (Exception refreshEx)
+            {
+                _logger.LogWarning(refreshEx, "Failed to broadcast attendance change for auto-punch: {EmployeeId}", employeeId);
+            }
+
+            var result = new GeoPunchResult
+            {
+                Success = true,
+                Message =
+    $"Automatic geofence {punchType} recorded. " +
+    $"(Dist: {distanceMeters:F0}m)"
+            };
 
             await SavePunchAuditAsync(
                 db,
                 employeeId,
                 sessionId,
-                DateTime.UtcNow,
+                overridePunchTime?.ToUniversalTime() ?? DateTime.UtcNow,
                 latitude,
                 longitude,
                 accuracyMeters,
@@ -767,12 +1131,13 @@ public class GeoLocationService
             await transaction.CommitAsync();
 
             _logger.LogInformation(
-                "Automatic geofence {PunchType} recorded. " +
-                "EmployeeId={EmployeeId}, LogId={LogId}, Distance={Distance}m",
-                requiredPunchType,
+                "Automatic geofence {PunchType} recorded. EmployeeId={EmployeeId}, LogId={LogId}, Distance={Distance}m, PreviousState={PreviousState}, CurrentState={CurrentState}",
+                punchType,
                 employeeId,
                 log.LogID,
-                Math.Round(distanceMeters, 1));
+                Math.Round(distanceMeters, 1),
+                previousLocationState?.ToString() ?? "NULL",
+                currentLocationState);
 
             try
             {
@@ -793,8 +1158,7 @@ public class GeoLocationService
             {
                 _logger.LogWarning(
                     refreshEx,
-                    "Automatic geofence punch saved but attendance refresh notification failed. " +
-                    "EmployeeId={EmployeeId}, LogId={LogId}",
+                    "Automatic geofence punch saved but attendance refresh notification failed. EmployeeId={EmployeeId}, LogId={LogId}",
                     employeeId,
                     log.LogID);
             }
@@ -803,15 +1167,16 @@ public class GeoLocationService
         }
         catch (Exception ex)
         {
-            // Automatic fallback must NEVER break normal GPS tracking.
-            // Record the failure separately so an operator can diagnose a
-            // missing automatic punch from the existing Punch Audit screen.
+            // Automatic fallback must NEVER stop normal GPS tracking. A
+            // transient SQLite lock leaves the previous geofence state intact,
+            // allowing the next GPS fix to retry the same transition.
             _logger.LogError(
                 ex,
-                "Automatic geofence attendance processing failed. " +
-                "EmployeeId={EmployeeId}, SessionId={SessionId}",
+                "Automatic geofence attendance processing failed. EmployeeId={EmployeeId}, SessionId={SessionId}, PreviousState={PreviousState}, CurrentState={CurrentState}",
                 employeeId,
-                sessionId);
+                sessionId,
+                previousLocationState?.ToString() ?? "NULL",
+                currentLocationState);
 
             try
             {
@@ -822,7 +1187,7 @@ public class GeoLocationService
                     auditDb,
                     employeeId,
                     sessionId,
-                    DateTime.UtcNow,
+                    overridePunchTime?.ToUniversalTime() ?? DateTime.UtcNow,
                     latitude,
                     longitude,
                     accuracyMeters,
@@ -832,8 +1197,8 @@ public class GeoLocationService
                     new GeoPunchResult
                     {
                         Success = false,
-                        Message = $"Automatic geofence {
-                            (currentLocationState ? "IN" : "OUT")} failed: {ex.Message}"
+                        Message =
+                            $"Automatic geofence {requiredPunchType(currentLocationState)} failed: {ex.Message}"
                     },
                     null,
                     "GEOFENCE_AUTO");
@@ -849,6 +1214,8 @@ public class GeoLocationService
 
             return false;
         }
+
+        static string requiredPunchType(bool inside) => inside ? "IN" : "OUT";
     }
 
     private static bool IsAuthoritativeAttendancePunch(AttendanceLog log)
@@ -871,6 +1238,35 @@ public class GeoLocationService
             device.Equals("Android", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Returns true when <paramref name="logType"/> represents any form of check-IN punch.
+    /// Covers all aliases used by Web, Android, biometric machine, and Firebase sync:
+    /// "IN", "CHECKIN", "CHECK_IN", "Punch" (Web manual default), and "AUTO_IN" prefixed.
+    /// </summary>
+    private static bool IsInType(string? logType)
+    {
+        if (string.IsNullOrWhiteSpace(logType)) return false;
+        var t = logType.Trim();
+        return string.Equals(t, "IN", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(t, "CHECKIN", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(t, "CHECK_IN", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(t, "Punch", StringComparison.OrdinalIgnoreCase)
+            || t.StartsWith("AUTO_IN", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Returns true when <paramref name="logType"/> represents any form of check-OUT punch.
+    /// </summary>
+    private static bool IsOutType(string? logType)
+    {
+        if (string.IsNullOrWhiteSpace(logType)) return false;
+        var t = logType.Trim();
+        return string.Equals(t, "OUT", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(t, "CHECKOUT", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(t, "CHECK_OUT", StringComparison.OrdinalIgnoreCase)
+            || t.StartsWith("AUTO_OUT", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static Task AcquireAttendanceAdvisoryLockAsync(
         AppDbContext db,
         int employeeId)
@@ -890,6 +1286,37 @@ public class GeoLocationService
     {
         if (!LocalAdvisoryLocks.TryGetValue(key, out var gate)) return;
         try { gate.Release(); } catch (SemaphoreFullException) { }
+    }
+
+    private static async Task SaveChangesWithSqliteRetryAsync(
+        AppDbContext db,
+        CancellationToken cancellationToken = default)
+    {
+        const int maxAttempts = 5;
+
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                await db.SaveChangesAsync(cancellationToken);
+                return;
+            }
+            catch (SqliteException ex)
+                when ((ex.SqliteErrorCode == 5 || ex.SqliteErrorCode == 6) &&
+                      attempt < maxAttempts)
+            {
+                // SQLITE_BUSY (5) / SQLITE_LOCKED (6). Another Web/Worker
+                // compatibility-database operation is briefly holding the
+                // table. Wait with bounded exponential backoff instead of
+                // immediately failing the GPS/geofence operation.
+                await Task.Delay(
+                    TimeSpan.FromMilliseconds(100 * attempt),
+                    cancellationToken);
+            }
+        }
+
+        // Final attempt propagates the original SQLite exception.
+        await db.SaveChangesAsync(cancellationToken);
     }
 
     private static bool? ResolveStableGeofenceState(
@@ -1001,11 +1428,64 @@ public class GeoLocationService
                             ? endReason[..40]
                             : endReason;
 
-                await db.SaveChangesAsync();
+                await SaveChangesWithSqliteRetryAsync(db);
 
-                // Remove only the session being ended. A newer login/session
-                // can never be removed by an old logout request.
+                // Keep the cross-platform Firebase session lifecycle aligned with
+                // the authoritative Web session. This prevents Android from
+                // continuing to publish against a session that Web has ended.
+                try
+                {
+                    var ownerUidForSession = _firebase.ResolveOwnerUid(
+                        $"employee-{employeeId}",
+                        "Employee");
+
+                    await _firebase.TerminateTrackingSessionAsync(
+                        employeeId,
+                        sessionId,
+                        ownerUidForSession,
+                        session.EndReason ?? "ENDED");
+                }
+                catch (Exception firebaseSessionEx)
+                {
+                    _logger.LogWarning(
+                        firebaseSessionEx,
+                        "Failed to publish GPS session end to Firebase. EmployeeId={EmployeeId}, SessionId={SessionId}",
+                        employeeId,
+                        sessionId);
+                }
+
+                // Remove only the ended session from the process-local store.
+                // Before deleting the Firebase live marker, verify that no newer
+                // active session exists for the same employee.
                 LiveLocationStore.Remove(employeeId, sessionId);
+
+                var newerActiveSessionExists = await db.EmployeeGpsSessions
+                    .AsNoTracking()
+                    .AnyAsync(x =>
+                        x.EmployeeId == employeeId &&
+                        x.EndedAtUtc == null &&
+                        x.SessionId != sessionId);
+
+                if (!newerActiveSessionExists)
+                {
+                    try
+                    {
+                        var ownerUid = _firebase.ResolveOwnerUid($"employee-{employeeId}", "Employee");
+                        await _firebase.DeleteGlobalRecordAsync($"tracking/live/{employeeId}");
+                        if (!string.IsNullOrWhiteSpace(ownerUid))
+                        {
+                            await _firebase.DeleteGlobalRecordAsync(
+                                $"owners/{ownerUid}/tracking/live/{employeeId}");
+                        }
+                    }
+                    catch (Exception firebaseEx)
+                    {
+                        _logger.LogWarning(
+                            firebaseEx,
+                            "Failed to remove ended GPS live marker for employee {EmployeeId}",
+                            employeeId);
+                    }
+                }
 
                 _logger.LogInformation(
                     "GPS session ended. EmployeeId={EmployeeId}, SessionId={SessionId}, Reason={Reason}",
@@ -1119,7 +1599,38 @@ public class GeoLocationService
                     session.EndReason = safeReason;
                 }
 
-                await db.SaveChangesAsync();
+                await SaveChangesWithSqliteRetryAsync(db);
+
+                // REQUIREMENT: Synchronize session termination to Firebase.
+                // This ensures map markers go offline immediately without
+                // waiting for a SignalR broadcast or browser refresh.
+                var ownerUidForSessions = _firebase.ResolveOwnerUid(
+                    $"employee-{employeeId}",
+                    "Employee");
+
+                foreach (var session in sessions)
+                {
+                    try
+                    {
+                        await _firebase.TerminateTrackingSessionAsync(
+                            session.EmployeeId,
+                            session.SessionId,
+                            ownerUidForSessions,
+                            session.EndReason ?? safeReason);
+                    }
+                    catch (Exception firebaseSessionEx)
+                    {
+                        _logger.LogWarning(
+                            firebaseSessionEx,
+                            "Failed to publish GPS session termination to Firebase. EmployeeId={EmployeeId}, SessionId={SessionId}",
+                            session.EmployeeId,
+                            session.SessionId);
+                    }
+                }
+
+                await _firebase.TerminateLiveLocationAsync(
+                    employeeId,
+                    ownerUidForSessions);
 
                 foreach (var session in sessions)
                 {
@@ -1189,6 +1700,93 @@ public class GeoLocationService
 
 
     // ================================================================
+    // PROCESS MANUAL LOGOUT PUNCH
+    // ================================================================
+
+    public async Task ProcessManualLogoutPunchAsync(int employeeId)
+    {
+        if (employeeId <= 0) return;
+
+        try
+        {
+            await using var db = await _dbFactory.CreateDbContextAsync();
+
+            await AcquireAttendanceAdvisoryLockAsync(db, employeeId);
+
+            var punchTime = GetIndiaNow();
+
+            var businessDayStart =
+                DateTime.SpecifyKind(
+                    punchTime.Date,
+                    DateTimeKind.Unspecified);
+
+            var businessDayEnd =
+                DateTime.SpecifyKind(
+                    punchTime.Date.AddDays(1),
+                    DateTimeKind.Unspecified);
+
+            var todaysPunches = await db.AttendanceLogs
+                .Where(x => x.EmployeeID == employeeId && x.PunchTime >= businessDayStart && x.PunchTime < businessDayEnd)
+                .OrderBy(x => x.PunchTime)
+                .ThenBy(x => x.LogID)
+                .ToListAsync();
+
+            // REQUIREMENT: Only create an OUT punch if they are currently IN (odd number of punches).
+            // This ensures manual logout closes the attendance session authoritatively.
+            if (todaysPunches.Count % 2 != 0)
+            {
+                /*
+                 * BIOMETRIC and explicit MOBILE punches are authoritative.
+                 * If one has already been committed close to this logout,
+                 * we skip the fallback to avoid duplicate/noisy events.
+                 */
+                var recentAuthoritative = todaysPunches
+                    .Where(IsAuthoritativeAttendancePunch)
+                    .Where(x => Math.Abs((x.PunchTime - punchTime).TotalSeconds) <= AuthoritativePunchProtectionSeconds)
+                    .OrderByDescending(x => x.PunchTime)
+                    .FirstOrDefault();
+
+                if (recentAuthoritative != null)
+                {
+                    _logger.LogInformation(
+                        "Manual logout OUT punch skipped because an authoritative attendance punch already exists. " +
+                        "EmployeeId={EmployeeId}, LogId={LogId}, Time={PunchTime}",
+                        employeeId, recentAuthoritative.LogID, recentAuthoritative.PunchTime);
+                    return;
+                }
+
+                var log = new AttendanceLog
+                {
+                    EmployeeID = employeeId,
+                    BiometricID = "MOBILE_LOGOUT",
+                    PunchTime = punchTime,
+                    DeviceID = "ManualLogout",
+                    LogType = "OUT",
+                    IsApproved = true
+                };
+
+                db.AttendanceLogs.Add(log);
+                await SaveChangesWithSqliteRetryAsync(db);
+
+                // Synchronize to Firebase so the Android app observes the logout punch immediately.
+                _ = _firebaseAttendanceMutations.UpsertPunchAsync(log, "CREATED");
+
+                await _refreshService.NotifyAttendanceChangedAsync(employeeId, DateOnly.FromDateTime(punchTime));
+
+                _logger.LogInformation(
+                    "Manual logout OUT punch recorded. EmployeeId={EmployeeId}, LogId={LogId}",
+                    employeeId, log.LogID);
+            }
+        }
+        catch (Exception ex)
+        {
+            // Fallback punch creation must never block the authoritative logout.
+            _logger.LogError(ex, "Failed to process manual logout punch. EmployeeId={EmployeeId}", employeeId);
+        }
+    }
+
+
+    // ================================================================
     // MARK SESSION TIMED OUT
     // ================================================================
     //
@@ -1212,76 +1810,12 @@ public class GeoLocationService
 
     public async Task MarkTimedOutSessionsAsync()
     {
-        try
-        {
-            await using var db =
-                await _dbFactory.CreateDbContextAsync();
-
-            // Only timeout sessions with NO updates for 30 minutes
-            var timeoutBefore =
-                DateTime.UtcNow.AddSeconds(-1800);
-
-            var sessions = await db.EmployeeGpsSessions
-                .Where(x =>
-                    x.EndedAtUtc == null &&
-                    x.LastUpdateAtUtc <= timeoutBefore)
-                .ToListAsync();
-
-            if (sessions.Count == 0)
-                return;
-
-            var now = DateTime.UtcNow;
-
-            foreach (var session in sessions)
-            {
-                session.EndedAtUtc = now;
-                session.EndReason = "TIMED_OUT";
-
-                // Remove only the timed-out session. A newer session for the
-                // same employee can never be removed by this cleanup pass.
-                LiveLocationStore.Remove(session.EmployeeId, session.SessionId);
-
-                try
-                {
-                    await _hubContext.Clients.All.SendAsync(
-                        "SessionEnded",
-                        new
-                        {
-                            EmployeeId = session.EmployeeId,
-                            SessionId = session.SessionId,
-                            EndedAtUtc = now,
-                            EndReason = session.EndReason
-                        });
-                }
-                catch (Exception signalREx)
-                {
-                    _logger.LogWarning(
-                        signalREx,
-                        "Failed to broadcast timed-out GPS session for employee {EmployeeId}",
-                        session.EmployeeId);
-                }
-
-                _logger.LogInformation(
-                    "GPS session timed out. EmployeeId={EmployeeId}, SessionId={SessionId}, " +
-                    "LastUpdate={LastUpdate}, Age={Age} minutes",
-                    session.EmployeeId,
-                    session.SessionId,
-                    session.LastUpdateAtUtc,
-                    (int)(now - session.LastUpdateAtUtc).TotalMinutes);
-            }
-
-            await db.SaveChangesAsync();
-
-            _logger.LogInformation(
-                "Marked {Count} GPS sessions as timed out.",
-                sessions.Count);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(
-                ex,
-                "Failed to mark timed-out GPS sessions.");
-        }
+        // Network loss, airplane mode, browser suspension and temporary GPS
+        // outages are NOT logout events. A GPS session may only end through
+        // explicit logout or an explicit force-login replacement. Keep this
+        // method for hosted-service compatibility, but never mutate session
+        // state merely because LastUpdateAtUtc is old.
+        await Task.CompletedTask;
     }
 
     // ================================================================
@@ -1355,6 +1889,29 @@ public class GeoLocationService
             if (originalCaptureUtc > serverRecordedAtUtc.AddMinutes(5))
                 originalCaptureUtc = serverRecordedAtUtc;
 
+            // Smart Route Playback De-duplication:
+            // 1. Prevent sub-second / burst duplicate entries (less than 5 seconds apart).
+            // 2. Suppress stationary GPS jitter (< 15 meters movement) unless 60 seconds have elapsed.
+            var lastPoint = await db.EmployeeLocationHistory
+                .AsNoTracking()
+                .Where(x => x.EmployeeId == employeeId && x.SessionId == sessionId)
+                .OrderByDescending(x => x.CapturedAtUtc)
+                .FirstOrDefaultAsync();
+
+            if (lastPoint != null)
+            {
+                var timeDiffSeconds = Math.Abs((originalCaptureUtc - lastPoint.CapturedAtUtc).TotalSeconds);
+
+                // Burst duplicate suppression (same second or within 5s)
+                if (timeDiffSeconds < 5.0)
+                    return;
+
+                // Stationary deadband: suppress micro-jitter within 15 meters unless 60s passed
+                var distanceMoved = CalculateDistance(lastPoint.Latitude, lastPoint.Longitude, latitude, longitude);
+                if (distanceMoved < 15.0 && timeDiffSeconds < 60.0)
+                    return;
+            }
+
             var record = new EmployeeLocationHistory
             {
                 EmployeeId = employeeId,
@@ -1379,7 +1936,7 @@ public class GeoLocationService
 
             db.EmployeeLocationHistory.Add(record);
 
-            await db.SaveChangesAsync();
+            await SaveChangesWithSqliteRetryAsync(db);
         }
         catch (Exception ex)
         {
@@ -1575,7 +2132,11 @@ public class GeoLocationService
                 });
         }
 
-        await db.SaveChangesAsync();
+        await SaveChangesWithSqliteRetryAsync(db);
+
+        // REQUIREMENT: Synchronize the new mobile punch to the Firebase SSOT
+        // attendance_punches node.
+        _ = _firebaseAttendanceMutations.UpsertPunchAsync(log, "CREATED");
 
         var success = new GeoPunchResult
         {
@@ -1692,7 +2253,103 @@ public class GeoLocationService
             authoritativePunchTime,
             fallback.LogID);
 
-        await db.SaveChangesAsync();
+        await SaveChangesWithSqliteRetryAsync(db);
+    }
+
+    // ================================================================
+    // RECONCILE OFFLINE GPS HISTORY INTO ATTENDANCE
+    // ================================================================
+    //
+    // History is normally an immutable ledger and must not resurrect a
+    // session. OfflineSync points are the one explicit recovery path:
+    // if a GPS fix was captured while the phone was offline, use that
+    // recorded capture time to repair a missed automatic IN/OUT punch.
+    // The existing attendance engine remains authoritative.
+    // ================================================================
+
+    public async Task<bool> ReconcileHistoricalGeofencePointAsync(
+        int employeeId,
+        Guid sessionId,
+        double latitude,
+        double longitude,
+        double accuracyMeters,
+        double distanceMeters,
+        int allowedRadiusMeters,
+        bool isWithinAllowedRadius,
+        DateTime capturedAtUtc)
+    {
+        if (employeeId <= 0 ||
+            sessionId == Guid.Empty ||
+            !IsValidCoordinate(latitude, longitude) ||
+            capturedAtUtc == default)
+        {
+            return false;
+        }
+
+        var capturedUtc = capturedAtUtc.ToUniversalTime();
+
+        try
+        {
+            await using var db = await _dbFactory.CreateDbContextAsync();
+
+            var session = await db.EmployeeGpsSessions
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x =>
+                    x.EmployeeId == employeeId &&
+                    x.SessionId == sessionId);
+
+            if (session == null)
+            {
+                _logger.LogDebug(
+                    "Offline GPS attendance reconciliation skipped because session is unknown. EmployeeId={EmployeeId}, SessionId={SessionId}",
+                    employeeId,
+                    sessionId);
+                return false;
+            }
+
+            // The GPS evidence must belong to the session. A small clock-skew
+            // allowance is permitted, but an unrelated post-logout point cannot
+            // reopen attendance.
+            if (capturedUtc < session.StartedAtUtc.AddMinutes(-5) ||
+                (session.EndedAtUtc.HasValue &&
+                 capturedUtc > session.EndedAtUtc.Value.AddMinutes(5)))
+            {
+                _logger.LogDebug(
+                    "Offline GPS attendance reconciliation skipped because capture is outside session window. EmployeeId={EmployeeId}, SessionId={SessionId}, Capture={CaptureTime}, Start={Start}, End={End}",
+                    employeeId,
+                    sessionId,
+                    capturedUtc,
+                    session.StartedAtUtc,
+                    session.EndedAtUtc);
+                return false;
+            }
+
+            var stableDistance = NormalizeDistance(distanceMeters);
+            var stableRadius = Math.Max(0, allowedRadiusMeters);
+            var stableAccuracy = NormalizeAccuracy(accuracyMeters);
+
+            return await ProcessAutomaticGeofencePunchAsync(
+                db,
+                employeeId,
+                sessionId,
+                latitude,
+                longitude,
+                stableAccuracy,
+                stableDistance,
+                stableRadius,
+                previousLocationState: null,
+                currentLocationState: isWithinAllowedRadius,
+                overridePunchTime: capturedUtc);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "Offline GPS attendance reconciliation failed. EmployeeId={EmployeeId}, SessionId={SessionId}",
+                employeeId,
+                sessionId);
+            return false;
+        }
     }
 
     // ================================================================
@@ -1735,7 +2392,7 @@ public class GeoLocationService
 
             db.GeoPunchAudits.Add(audit);
 
-            await db.SaveChangesAsync();
+            await SaveChangesWithSqliteRetryAsync(db);
 
             // Firebase is the realtime SSOT for connected Web/Android clients.
             // Publish only after the local audit row has committed so the
@@ -1744,10 +2401,7 @@ public class GeoLocationService
             // punch calculation, audit values, schema, or existing UI flow.
             try
             {
-                var ownerUid =
-                    _configuration["Firebase:OwnerUid"]
-                    ?? Environment.GetEnvironmentVariable("FIREBASE_OWNER_UID")
-                    ?? "biometricpayroll";
+                var ownerUid = _firebase.ResolveOwnerUid($"employee-{employeeId}", "Employee");
 
                 if (audit.Id > 0)
                 {
@@ -1768,6 +2422,27 @@ public class GeoLocationService
                     "Geo punch audit committed locally but Firebase realtime publication failed. EmployeeId={EmployeeId}, AuditId={AuditId}",
                     employeeId,
                     audit.Id);
+            }
+
+            try
+            {
+                await _hubContext.Clients.All.SendAsync(
+                    "GeoPunchAuditChanged",
+                    new
+                    {
+                        EmployeeId = employeeId,
+                        SessionId = sessionId.ToString(),
+                        AuditId = audit.Id,
+                        PunchTimeUtc = punchTimeUtc,
+                        IsWithinAllowedRadius = withinRadius,
+                        ResultMessage = result.Message
+                    });
+
+                await _refreshService.NotifyLocationChangedAsync(employeeId);
+            }
+            catch (Exception signalREx)
+            {
+                _logger.LogWarning(signalREx, "Failed to broadcast GeoPunchAuditChanged event via SignalR. EmployeeId={EmployeeId}", employeeId);
             }
         }
         catch (Exception ex)
@@ -1861,7 +2536,8 @@ public class GeoLocationService
             latitude >= -90 &&
             latitude <= 90 &&
             longitude >= -180 &&
-            longitude <= 180;
+            longitude <= 180 &&
+            !(latitude == 0.0 && longitude == 0.0);
     }
 
     // ================================================================

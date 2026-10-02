@@ -7,6 +7,7 @@
 @using Microsoft.AspNetCore.Components.Authorization
 @inject IToastService toastService
 @inject IDbContextFactory<AppDbContext> DbFactory
+@inject FirebaseEmployeeManagementService FirebaseEmployeeManagementService
 @inject NavigationManager Navigation
 @inject PdfExportService PdfService
 @inject IJSRuntime JSRuntime
@@ -263,13 +264,19 @@ else
         <p class="text-center small mt-2 text-muted" style="font-size:0.7em">Gen: @DateTime.Now.ToString("g")</p>
     </div>
 
-    <div class="no-print mt-3 text-center">
-        <button class="btn btn-secondary me-2" @onclick="GoBack">Back</button>
-        <button class="btn btn-danger me-2" @onclick="DownloadPdf">
-            <span class="bi bi-file-earmark-pdf"></span> Download PDF
+    <div class="no-print mt-4 mb-4 text-center d-flex justify-content-center gap-2 flex-wrap">
+        <button class="btn btn-secondary action-pill-btn" @onclick="GoBack">
+            <span>🔙</span> <span>Back</span>
         </button>
-        <button class="btn btn-primary me-2" @onclick="PrintStandardPayslip">Print A4</button>
-        <button class="btn btn-info" @onclick="PrintThermalPayslip">Print Thermal</button>
+        <button class="btn btn-danger action-pill-btn" @onclick="DownloadPdf">
+            <span>📥</span> <span class="bi bi-file-earmark-pdf-fill"></span> Download PDF
+        </button>
+        <button class="btn btn-primary action-pill-btn" @onclick="PrintStandardPayslip">
+            <span>🖨️</span> <span class="bi bi-printer-fill"></span> Print A4
+        </button>
+        <button class="btn btn-info action-pill-btn text-white" @onclick="PrintThermalPayslip">
+            <span>🧾</span> <span class="bi bi-receipt"></span> Print Thermal
+        </button>
     </div>
 
     @* --- STYLES (Dark Mode Compatible) --- *@
@@ -503,9 +510,8 @@ else
                     return;
                 }
 
-                var loggedInEmployee = await dbContext.Employees
-                    .AsNoTracking()
-                    .FirstOrDefaultAsync(e => e.Email == email && !e.IsDeleted);
+                var loggedInEmployee = await FirebaseEmployeeManagementService
+                    .GetEmployeeByEmailAsync(email);
 
                 if (loggedInEmployee == null ||
                     loggedInEmployee.EmployeeID != payslip.EmployeeID)
@@ -523,9 +529,8 @@ else
                 }
             }
 
-            employee = await dbContext.Employees
-                .AsNoTracking()
-                .FirstOrDefaultAsync(e => e.EmployeeID == payslip.EmployeeID);
+            employee = await FirebaseEmployeeManagementService
+                .GetEmployeeAsync(payslip.EmployeeID);
 
             if (employee == null)
             {

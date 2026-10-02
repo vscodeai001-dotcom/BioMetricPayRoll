@@ -13,6 +13,7 @@ public sealed class MobileTokenAuthenticationHandler : AuthenticationHandler<Aut
     private readonly MobileEmployeeTokenService _tokens;
     private readonly IDbContextFactory<AppDbContext> _dbFactory;
     private readonly FirebaseRealtimeService _firebase;
+    private readonly FirebaseEmployeeManagementService _employeeManagement;
 
     public MobileTokenAuthenticationHandler(
         IOptionsMonitor<AuthenticationSchemeOptions> options,
@@ -20,12 +21,14 @@ public sealed class MobileTokenAuthenticationHandler : AuthenticationHandler<Aut
         UrlEncoder encoder,
         MobileEmployeeTokenService tokens,
         IDbContextFactory<AppDbContext> dbFactory,
-        FirebaseRealtimeService firebase)
+        FirebaseRealtimeService firebase,
+        FirebaseEmployeeManagementService employeeManagement)
         : base(options, logger, encoder)
     {
         _tokens = tokens;
         _dbFactory = dbFactory;
         _firebase = firebase;
+        _employeeManagement = employeeManagement;
     }
 
     protected override async Task<AuthenticateResult> HandleAuthenticateAsync()
@@ -72,21 +75,38 @@ public sealed class MobileTokenAuthenticationHandler : AuthenticationHandler<Aut
             ? ownerValue?.ToString()
             : null;
 
-        await using var firebaseDb = await _dbFactory.CreateDbContextAsync(Context.RequestAborted);
+        // Firebase-native authentication resolves the employee projection from
+        // the Firebase SSOT. SQL remains the compatibility authority only for
+        // the legacy opaque-token path below.
+        // A Firebase token is cryptographically verified, but tenant scope and
+        // Employee lifecycle state still have to be checked against the server
+        // side SSOT before issuing an application principal.
+        var expectedOwnerUid = _employeeManagement.OwnerUid;
+        if (!string.IsNullOrWhiteSpace(ownerUid) &&
+            !string.Equals(ownerUid, expectedOwnerUid, StringComparison.Ordinal))
+        {
+            return AuthenticateResult.Fail("Firebase session belongs to a different owner scope.");
+        }
+
         var employee = employeeId > 0
-            ? await firebaseDb.Employees.AsNoTracking().FirstOrDefaultAsync(x => x.EmployeeID == employeeId && !x.IsDeleted, Context.RequestAborted)
+            ? await _employeeManagement.GetEmployeeAsync(employeeId, Context.RequestAborted)
             : null;
 
         if (employee == null && !string.IsNullOrWhiteSpace(email))
         {
-            employee = await firebaseDb.Employees.AsNoTracking()
-                .FirstOrDefaultAsync(x => x.Email == email && !x.IsDeleted, Context.RequestAborted);
+            employee = await _employeeManagement.GetEmployeeByEmailAsync(email, Context.RequestAborted);
             employeeId = employee?.EmployeeID ?? employeeId;
         }
 
         var isAdmin = role.Contains("Admin", StringComparison.OrdinalIgnoreCase);
         if (employee == null && !isAdmin)
             return AuthenticateResult.Fail("Employee session is invalid or not linked.");
+
+        if (!isAdmin && employee?.IsDeleted == true)
+            return AuthenticateResult.Fail("Employee account is disabled.");
+
+        if (!isAdmin && (employee is null || employee.EmployeeID != employeeId))
+            return AuthenticateResult.Fail("Firebase Employee claim does not match the Employee record.");
 
         if (!isAdmin)
         {

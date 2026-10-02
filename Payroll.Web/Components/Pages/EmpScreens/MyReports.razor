@@ -9,6 +9,7 @@
 @inject ReportService ReportService
 @inject IToastService toastService
 @inject AuthenticationStateProvider AuthState
+@inject Payroll.Web.Services.FirebaseEmployeeManagementService FirebaseEmployees
 @inject CsvExportService CsvService
 @inject IJSRuntime JSRuntime
 @inject NavigationManager Navigation
@@ -30,30 +31,48 @@
 }
 else
 {
-    <div class="d-flex justify-content-between align-items-center mb-3">
-        <h3 class="text-primary mb-0"><i class="bi bi-file-earmark-bar-graph me-2"></i> My Personal Reports</h3>
+    <div class="page-header-container mb-4">
+        <div class="d-flex align-items-center gap-3">
+            <div class="emoji-icon-badge emoji-icon-badge-primary">
+                📊
+            </div>
+            <div>
+                <h2 class="page-header-title">
+                    My Personal Reports
+                </h2>
+                <p class="page-header-subtitle">
+                    <span>📑 Generate custom analytics, statements, and verified CSV downloads</span>
+                </p>
+            </div>
+        </div>
+
+        <div class="d-flex align-items-center gap-2">
+            <span class="badge bg-primary bg-opacity-10 text-primary rounded-pill px-3 py-2 fw-semibold border border-primary border-opacity-25">
+                <span>📥 CSV Export Available</span>
+            </span>
+        </div>
     </div>
 
     @* --- REPORT SELECTION TABS --- *@
-    <ul class="nav nav-tabs mb-3">
+    <ul class="nav nav-pills mb-3 gap-2">
         <li class="nav-item">
-            <button class="nav-link @(activeTab == "attendance" ? "active" : "")" @onclick="@(() => SwitchTab("attendance"))">
-                <i class="bi bi-clock-history me-2"></i> Attendance
+            <button class="nav-link rounded-pill @(activeTab == "attendance" ? "active" : "")" @onclick="@(() => SwitchTab("attendance"))">
+                <span>⏱️ Attendance</span>
             </button>
         </li>
         <li class="nav-item">
-            <button class="nav-link @(activeTab == "payslips" ? "active" : "")" @onclick="@(() => SwitchTab("payslips"))">
-                <i class="bi bi-currency-rupee me-2"></i> Payslips
+            <button class="nav-link rounded-pill @(activeTab == "payslips" ? "active" : "")" @onclick="@(() => SwitchTab("payslips"))">
+                <span>💵 Payslips</span>
             </button>
         </li>
         <li class="nav-item">
-            <button class="nav-link @(activeTab == "leave" ? "active" : "")" @onclick="@(() => SwitchTab("leave"))">
-                <i class="bi bi-calendar-check me-2"></i> Leave History
+            <button class="nav-link rounded-pill @(activeTab == "leave" ? "active" : "")" @onclick="@(() => SwitchTab("leave"))">
+                <span>🏖️ Leave History</span>
             </button>
         </li>
         <li class="nav-item">
-            <button class="nav-link @(activeTab == "advances" ? "active" : "")" @onclick="@(() => SwitchTab("advances"))">
-                <i class="bi bi-cash-stack me-2"></i> Advances
+            <button class="nav-link rounded-pill @(activeTab == "advances" ? "active" : "")" @onclick="@(() => SwitchTab("advances"))">
+                <span>💳 Salary Advances</span>
             </button>
         </li>
     </ul>
@@ -248,7 +267,7 @@ else
             var email = authState.User.Identity?.Name;
             if (email != null)
             {
-                var emp = await db.Employees.AsNoTracking().FirstOrDefaultAsync(e => e.Email == email);
+                var emp = await FirebaseEmployees.GetEmployeeByEmailAsync(email);
                 employeeId = emp?.EmployeeID ?? 0;
             }
         }

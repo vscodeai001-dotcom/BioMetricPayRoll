@@ -61,6 +61,17 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
         private readonly AttendanceEventMonitorService
             _attendanceMonitor;
 
+        private readonly FirebaseEmployeeManagementService
+            _firebaseEmployees;
+
+        private readonly FirebaseEmployeePresenceService
+            _firebasePresence;
+
+        private readonly FirebaseRealtimeService
+            _firebaseRealtime;
+        private readonly IAppModeService
+            _appMode;
+
 
         // ============================================================
         // CONSTRUCTOR
@@ -73,7 +84,11 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
             ILogger<LoginModel> logger,
             NotificationService notificationService,
             GeoLocationService geoLocationService,
-            AttendanceEventMonitorService attendanceMonitor)
+            AttendanceEventMonitorService attendanceMonitor,
+            FirebaseEmployeeManagementService firebaseEmployees,
+            FirebaseEmployeePresenceService firebasePresence,
+            FirebaseRealtimeService firebaseRealtime,
+            IAppModeService appMode)
         {
             _signInManager = signInManager;
             _userManager = userManager;
@@ -82,6 +97,10 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
             _notificationService = notificationService;
             _geoLocationService = geoLocationService;
             _attendanceMonitor = attendanceMonitor;
+            _firebaseEmployees = firebaseEmployees;
+            _firebasePresence = firebasePresence;
+            _firebaseRealtime = firebaseRealtime;
+            _appMode = appMode;
         }
 
 
@@ -186,24 +205,106 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
 
 
             // ========================================================
-            // FIND USER
+            // FIND AND VERIFY USER (Identity + Firebase Auth)
             // ========================================================
 
             var user =
                 await _userManager.FindByEmailAsync(email);
 
+            var passwordVerified = false;
 
-            // --------------------------------------------------------
-            // Do not reveal whether an account exists.
-            // --------------------------------------------------------
-
-            if (user == null)
+            if (user != null)
             {
-                AddInvalidLoginError();
+                var localPasswordResult =
+                    await _signInManager.CheckPasswordSignInAsync(
+                        user,
+                        Input.Password,
+                        lockoutOnFailure: false);
 
-                return Page();
+                if (localPasswordResult.Succeeded)
+                {
+                    passwordVerified = true;
+                }
+                else if (localPasswordResult.IsLockedOut)
+                {
+                    ModelState.AddModelError(
+                        string.Empty,
+                        "This account is temporarily locked. Please try again later.");
+                    return Page();
+                }
+                else if (localPasswordResult.IsNotAllowed)
+                {
+                    ModelState.AddModelError(
+                        string.Empty,
+                        "This account is currently not allowed to sign in.");
+                    return Page();
+                }
             }
 
+            // If user does not exist in local Identity or local password failed,
+            // authenticate against Firebase Authentication directly.
+            if (!passwordVerified)
+            {
+                var fbResult = await _firebaseRealtime.VerifyEmailPasswordAsync(
+                    email,
+                    Input.Password,
+                    HttpContext.RequestAborted);
+
+                if (fbResult.Success)
+                {
+                    passwordVerified = true;
+
+                    if (user == null)
+                    {
+                        user = new IdentityUser
+                        {
+                            Id = fbResult.LocalId ?? Guid.NewGuid().ToString(),
+                            Email = email,
+                            UserName = email,
+                            EmailConfirmed = true
+                        };
+
+                        var createResult = await _userManager.CreateAsync(user, Input.Password);
+                        if (createResult.Succeeded)
+                        {
+                            var fbEmp = await _firebaseEmployees.GetEmployeeByEmailAsync(email);
+                            var role = string.Equals(email, FirebaseAuthSecurityConstants.CanonicalSuperAdminEmail, StringComparison.OrdinalIgnoreCase)
+                                ? "SuperAdmin" : (fbEmp != null ? "Employee" : "Admin");
+                            await _userManager.AddToRoleAsync(user, role);
+
+                            if (fbEmp != null)
+                            {
+                                await using var db = await _dbFactory.CreateDbContextAsync();
+                                var dbEmp = await db.Employees.FirstOrDefaultAsync(e => e.EmployeeID == fbEmp.EmployeeID);
+                                if (dbEmp != null)
+                                {
+                                    dbEmp.AspNetUserId = user.Id;
+                                    dbEmp.Email = email;
+                                    await db.SaveChangesAsync();
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // Sync updated Firebase password into local Identity
+                        var resetToken = await _userManager.GeneratePasswordResetTokenAsync(user);
+                        await _userManager.ResetPasswordAsync(user, resetToken, Input.Password);
+                    }
+                }
+            }
+
+            if (user == null || !passwordVerified)
+            {
+                if (user != null)
+                {
+                    await _attendanceMonitor.RecordAsync(
+                        "LOGIN_FAILED", user.Id, user.Email ?? email, null, "Web", "FAILED", "INVALID_CREDENTIALS");
+                }
+
+                AddInvalidLoginError();
+                return Page();
+            }
 
             // ========================================================
             // CONFIRMED EMAIL CHECK
@@ -219,7 +320,6 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
 
                 return Page();
             }
-
 
             // ========================================================
             // ROLE CHECK
@@ -238,7 +338,8 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
             var isSuperAdmin =
                 await _userManager.IsInRoleAsync(
                     user,
-                    "SuperAdmin");
+                    "SuperAdmin") ||
+                string.Equals(email, FirebaseAuthSecurityConstants.CanonicalSuperAdminEmail, StringComparison.OrdinalIgnoreCase);
 
             var hasKnownRole =
                 isEmployee ||
@@ -246,63 +347,133 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
                 isSuperAdmin;
 
 
-            // ========================================================
-            // VERIFY PASSWORD FIRST
-            // ========================================================
-            //
-            // We NEVER allow a person to force logout an existing
-            // session without first proving the correct password.
-            //
-            // This is important.
-            // ========================================================
-
-            var passwordResult =
-                await _signInManager.CheckPasswordSignInAsync(
-                    user,
-                    Input.Password,
-                    lockoutOnFailure: false);
-
-
-            if (passwordResult.IsLockedOut)
-            {
-                ModelState.AddModelError(
-                    string.Empty,
-                    "This account is temporarily locked. Please try again later.");
-
-                return Page();
-            }
-
-
-            if (passwordResult.IsNotAllowed)
-            {
-                ModelState.AddModelError(
-                    string.Empty,
-                    "This account is currently not allowed to sign in.");
-
-                return Page();
-            }
-
-
-            if (!passwordResult.Succeeded)
-            {
-                await _attendanceMonitor.RecordAsync(
-                    "LOGIN_FAILED", user.Id, user.Email ?? email, null, "Web", "FAILED",
-                    passwordResult.IsLockedOut ? "LOCKED" : (passwordResult.IsNotAllowed ? "NOT_ALLOWED" : "INVALID_CREDENTIALS"));
-
-                AddInvalidLoginError();
-
-                return Page();
-            }
-
-
             _logger.LogInformation(
                 "LOGIN PASSWORD VERIFIED. UserId={UserId}, KnownRole={KnownRole}",
                 user.Id,
                 hasKnownRole);
 
+            // Resolve the canonical employee from Firebase when the legacy Web
+            // Identity row has not yet been linked. A unique email match is safe
+            // because Firebase employees are the application SSOT.
+            var firebaseEmployee = isEmployee
+                ? await _firebaseEmployees.GetEmployeeByEmailAsync(email)
+                : null;
+
+            if (isEmployee && firebaseEmployee == null)
+            {
+                AddInvalidLoginError();
+                _logger.LogWarning(
+                    "Employee login rejected because no saved Firebase Employee record is linked to {Email}.",
+                    email);
+                return Page();
+            }
+
+            // Successful Web authentication is the bridge that keeps Web and
+            // Android credentials/claims identical. The password is used only
+            // for this Firebase Auth synchronization and is never stored.
+            string? firebaseUid = null;
+            if (isEmployee && firebaseEmployee != null)
+            {
+                firebaseUid = await _firebaseEmployeesReconcileLoginAsync(
+                    firebaseEmployee,
+                    email,
+                    Input.Password,
+                    ct: HttpContext.RequestAborted);
+
+                if (string.IsNullOrWhiteSpace(firebaseUid))
+                {
+                    firebaseUid = await _firebaseEmployees.GetFirebaseAuthUidByEmailAsync(
+                        email,
+                        HttpContext.RequestAborted);
+                }
+
+                if (string.IsNullOrWhiteSpace(firebaseUid))
+                {
+                    var fbResult = await _firebaseRealtime.VerifyEmailPasswordAsync(
+                        email,
+                        Input.Password,
+                        HttpContext.RequestAborted);
+                    if (fbResult.Success && !string.IsNullOrWhiteSpace(fbResult.LocalId))
+                    {
+                        firebaseUid = fbResult.LocalId;
+                    }
+                }
+
+                if (string.IsNullOrWhiteSpace(firebaseUid) && !string.IsNullOrWhiteSpace(firebaseEmployee.AspNetUserId))
+                {
+                    firebaseUid = firebaseEmployee.AspNetUserId;
+                }
+
+                if (string.IsNullOrWhiteSpace(firebaseUid) && user != null && !string.IsNullOrWhiteSpace(user.Id))
+                {
+                    firebaseUid = user.Id;
+                }
+            }
 
             // ========================================================
-            // SINGLE SESSION FOR ALL ROLES
+            // SUPERADMIN & ADMIN: UNRESTRICTED INSTANT LOGIN
+            // ========================================================
+            // SuperAdmin and Company Admins are governance/management users
+            // and must NEVER be blocked by single-device employee locks or
+            // employee session replacement constraints.
+            // ========================================================
+
+            if (isSuperAdmin || isAdmin || !isEmployee)
+            {
+                var customClaims = new List<Claim>();
+
+                string? tenantId = null;
+                if (!isSuperAdmin)
+                {
+                    var currentUserId = user!.Id;
+                    await using var db = await _dbFactory.CreateDbContextAsync();
+                    var tenant = await db.CompanyTenants
+                        .FirstOrDefaultAsync(t => (currentUserId != null && t.AdminUserId == currentUserId) ||
+                                                  (t.AdminEmail.ToLower() == email.ToLower()));
+                    if (tenant != null)
+                    {
+                        if (string.IsNullOrWhiteSpace(tenant.AdminUserId) || tenant.AdminUserId != currentUserId)
+                        {
+                            tenant.AdminUserId = currentUserId;
+                            await db.SaveChangesAsync();
+                        }
+                        tenantId = tenant.TenantId;
+                        customClaims.Add(new Claim("TenantId", tenantId));
+                        customClaims.Add(new Claim("OwnerUid", tenantId));
+                        customClaims.Add(new Claim("CompanyName", tenant.CompanyName));
+                    }
+                }
+                else
+                {
+                    customClaims.Add(new Claim("IsSuperAdmin", "true"));
+                }
+
+                await _signInManager.SignInWithClaimsAsync(user!, Input.RememberMe, customClaims);
+                _logger.LogInformation("ADMIN / SUPERADMIN LOGIN SUCCESS WITHOUT RESTRICTION. UserId={UserId}, Email={Email}, TenantId={TenantId}", user!.Id, email, tenantId);
+
+                await _attendanceMonitor.RecordAsync(
+                    "LOGIN_SUCCESS", user.Id, user.Email ?? email, "WEB_ADMIN", "Web", "SUCCESS",
+                    "ADMIN_LOGIN_UNRESTRICTED", null, null);
+
+                if (isSuperAdmin)
+                {
+                    if (!await _appMode.IsOfflineModeAsync())
+                    {
+                        return LocalRedirect("/superadmin/tenants");
+                    }
+                    return LocalRedirect("/");
+                }
+
+                if (!string.IsNullOrWhiteSpace(ReturnUrl) && ReturnUrl != "/" && Url.IsLocalUrl(ReturnUrl))
+                {
+                    return LocalRedirect(ReturnUrl);
+                }
+
+                return LocalRedirect("/");
+            }
+
+            // ========================================================
+            // SINGLE SESSION FOR EMPLOYEES ONLY
             // ========================================================
 
             var deviceId =
@@ -314,7 +485,7 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
             {
                 currentDeviceOwnsSession =
                     await ReconcileCurrentDeviceLockAsync(
-                        user.Id,
+                        user!.Id,
                         deviceId);
             }
 
@@ -326,102 +497,304 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
             deviceId ??= Guid.NewGuid().ToString("N");
 
 
-            var activeDeviceBeforeLogin = await _attendanceMonitor.GetActiveDeviceIdAsync(user.Id);
+            var activeDeviceBeforeLogin = await _attendanceMonitor.GetActiveDeviceIdAsync(user!.Id);
 
             await _attendanceMonitor.RecordAsync(
                 "LOGIN_ATTEMPT", user.Id, user.Email ?? email, deviceId, "Web", "PASSWORD_VERIFIED",
-                ForceLogoutExisting ? "FORCE_REPLACE_REQUEST" : "NORMAL_LOGIN_ATTEMPT",
+                "AUTOMATIC_SINGLE_SESSION_PROVISIONING",
                 new { CurrentDeviceOwnsSession = currentDeviceOwnsSession, ExistingSession = activeDeviceBeforeLogin != null },
                 activeDeviceBeforeLogin);
 
             _logger.LogInformation(
-                "LOGIN ATTEMPT. UserId={UserId}, ForceLogout={ForceLogout}",
-                user.Id,
-                ForceLogoutExisting);
+                "LOGIN ATTEMPT. UserId={UserId}, DeviceId={DeviceId}, Owns={Owns}",
+                user.Id, deviceId, currentDeviceOwnsSession);
 
 
             // ========================================================
-            // NORMAL LOGIN
+            // EXPLICIT CROSS-DEVICE SESSION ENFORCEMENT
+            // ========================================================
+            // Only an explicit user confirmation may replace an existing
+            // employee login on another device/platform. Network loss, GPS
+            // loss and airplane mode never end a login session.
             // ========================================================
 
-            if (!ForceLogoutExisting &&
-                !currentDeviceOwnsSession)
+            var firebaseActiveDevice = string.Empty;
+            var firebaseActivePlatform = string.Empty;
+            var firebaseActiveDeviceName = string.Empty;
+            long firebaseActiveLastSeen = 0;
+            string? foundSessionUid = null;
+
+            if (isEmployee)
             {
-                var lockResult =
-                    await TryAcquireEmployeeLockAsync(
-                        user.Id,
-                        deviceId);
-
-
-                if (lockResult ==
-                    EmployeeLockResult.AlreadyActive)
+                try
                 {
-                    ShowForceLogout = true;
-                    ModelState.AddModelError(
-                        string.Empty,
-                        $"{AlreadyLoggedInMessage} {ForceLogoutInstruction}");
+                    // 1. Direct path check if firebaseUid is known
+                    if (!string.IsNullOrWhiteSpace(firebaseUid))
+                    {
+                        var firebaseSession = await _firebaseRealtime.GetGlobalRecordAsync(
+                            $"employee_sessions/{firebaseUid}",
+                            HttpContext.RequestAborted);
 
-                    await _attendanceMonitor.RecordAsync(
-                        "SECOND_DEVICE_ATTEMPT", user.Id, user.Email ?? email, deviceId, "Web",
-                        "EXISTING_SESSION_FOUND", "SINGLE_DEVICE_POLICY",
-                        new { ExistingSession = true }, activeDeviceBeforeLogin);
+                        if (firebaseSession.HasValue && firebaseSession.Value.ValueKind == System.Text.Json.JsonValueKind.Object)
+                        {
+                            foundSessionUid = firebaseUid;
+                            if (firebaseSession.Value.TryGetProperty("deviceId", out var deviceProp))
+                                firebaseActiveDevice = deviceProp.GetString() ?? string.Empty;
+                            if (firebaseSession.Value.TryGetProperty("platform", out var platProp))
+                                firebaseActivePlatform = platProp.GetString() ?? string.Empty;
+                            if (firebaseSession.Value.TryGetProperty("deviceName", out var devNameProp))
+                                firebaseActiveDeviceName = devNameProp.GetString() ?? string.Empty;
+                            if (firebaseSession.Value.TryGetProperty("lastSeenAt", out var lastSeenProp))
+                            {
+                                if (lastSeenProp.ValueKind == System.Text.Json.JsonValueKind.Number)
+                                    firebaseActiveLastSeen = lastSeenProp.GetInt64();
+                            }
+                        }
+                    }
 
-                    await NotifyBlockedLoginAsync(
-                        user,
-                        email);
+                    // 2. Fallback scan of employee_sessions if direct lookup had no active device
+                    if (string.IsNullOrWhiteSpace(firebaseActiveDevice) && firebaseEmployee != null)
+                    {
+                        var allSessions = await _firebaseRealtime.GetGlobalRecordAsync("employee_sessions", HttpContext.RequestAborted);
+                        if (allSessions.HasValue && allSessions.Value.ValueKind == System.Text.Json.JsonValueKind.Object)
+                        {
+                            foreach (var sProp in allSessions.Value.EnumerateObject())
+                            {
+                                if (sProp.Value.ValueKind != System.Text.Json.JsonValueKind.Object) continue;
+                                var empIdVal = 0;
+                                if (sProp.Value.TryGetProperty("employeeId", out var empIdProp))
+                                {
+                                    if (empIdProp.ValueKind == System.Text.Json.JsonValueKind.Number)
+                                        empIdVal = empIdProp.GetInt32();
+                                    else if (empIdProp.ValueKind == System.Text.Json.JsonValueKind.String && int.TryParse(empIdProp.GetString(), out var parsed))
+                                        empIdVal = parsed;
+                                }
 
-                    return Page();
+                                if (empIdVal == firebaseEmployee.EmployeeID)
+                                {
+                                    foundSessionUid = sProp.Name;
+                                    if (string.IsNullOrWhiteSpace(firebaseUid)) firebaseUid = foundSessionUid;
+                                    if (sProp.Value.TryGetProperty("deviceId", out var deviceProp))
+                                        firebaseActiveDevice = deviceProp.GetString() ?? string.Empty;
+                                    if (sProp.Value.TryGetProperty("platform", out var platProp))
+                                        firebaseActivePlatform = platProp.GetString() ?? string.Empty;
+                                    if (sProp.Value.TryGetProperty("deviceName", out var devNameProp))
+                                        firebaseActiveDeviceName = devNameProp.GetString() ?? string.Empty;
+                                    if (sProp.Value.TryGetProperty("lastSeenAt", out var lastSeenProp))
+                                    {
+                                        if (lastSeenProp.ValueKind == System.Text.Json.JsonValueKind.Number)
+                                            firebaseActiveLastSeen = lastSeenProp.GetInt64();
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
-
-
-                if (lockResult !=
-                    EmployeeLockResult.Acquired)
+                catch (Exception ex)
                 {
-                    ModelState.AddModelError(
-                        string.Empty,
-                        "We could not start your employee session. Please try again.");
-
-                    return Page();
+                    _logger.LogWarning(ex, "Could not inspect Firebase employee session for {EmployeeId}", firebaseEmployee?.EmployeeID);
                 }
             }
 
+            // Retrieve last known GPS location & workplace distance for the displaced/existing device
+            double existingLat = 0;
+            double existingLng = 0;
+            double existingDistanceMeters = 0;
+            bool existingWithinRadius = false;
+            DateTime? existingLocationTime = null;
 
-            // ========================================================
-            // FORCE LOGOUT EXISTING SESSION
-            // ========================================================
-
-            else
+            if (firebaseEmployee != null)
             {
-                await _attendanceMonitor.RecordAsync(
-                    "FORCE_LOGOUT_REQUESTED", user.Id, user.Email ?? email, deviceId, "Web",
-                    "REQUESTED", "EMPLOYEE_CONFIRMED_EXISTING_SESSION_REPLACEMENT",
-                    new { ForceLogoutExisting }, activeDeviceBeforeLogin);
-
-                _logger.LogWarning(
-                    "FORCE LOGIN REQUEST. UserId={UserId}",
-                    user.Id);
-
-
-                if (!await ReplaceAndInvalidateEmployeeSessionAsync(
-                        user,
-                        deviceId))
+                var liveLoc = LiveLocationStore.Get(firebaseEmployee.EmployeeID);
+                if (liveLoc != null)
                 {
-                    ModelState.AddModelError(
-                        string.Empty,
-                        "The existing session could not be replaced. Please try again.");
+                    existingLat = liveLoc.Latitude;
+                    existingLng = liveLoc.Longitude;
+                    existingDistanceMeters = liveLoc.DistanceMeters;
+                    existingWithinRadius = liveLoc.IsWithinAllowedRadius;
+                    existingLocationTime = liveLoc.LastUpdatedUtc;
+                }
+                else
+                {
+                    try
+                    {
+                        await using var gpsDb = await _dbFactory.CreateDbContextAsync();
+                        var activeGpsSession = await gpsDb.EmployeeGpsSessions.AsNoTracking()
+                            .Where(s => s.EmployeeId == firebaseEmployee.EmployeeID && s.EndedAtUtc == null)
+                            .OrderByDescending(s => s.LastUpdateAtUtc)
+                            .FirstOrDefaultAsync();
 
+                        if (activeGpsSession != null)
+                        {
+                            existingLat = activeGpsSession.LastLatitude ?? 0;
+                            existingLng = activeGpsSession.LastLongitude ?? 0;
+                            existingDistanceMeters = activeGpsSession.LastDistanceFromOfficeMeters ?? 0;
+                            existingWithinRadius = activeGpsSession.LastIsWithinAllowedRadius ?? false;
+                            existingLocationTime = activeGpsSession.LastUpdateAtUtc;
+                        }
+                    }
+                    catch { }
+                }
+            }
+
+            var isCurrentWebBrowser = !string.IsNullOrWhiteSpace(firebaseActiveDevice) &&
+                firebaseActiveDevice.StartsWith("WEB_BROWSER_", StringComparison.OrdinalIgnoreCase) &&
+                firebaseActiveDevice.EndsWith(deviceId[..Math.Min(8, deviceId.Length)], StringComparison.OrdinalIgnoreCase);
+
+            var firebaseOtherDeviceActive = !string.IsNullOrWhiteSpace(firebaseActiveDevice) && !isCurrentWebBrowser;
+
+            var existingPlatformName = !string.IsNullOrWhiteSpace(firebaseActivePlatform)
+                ? firebaseActivePlatform
+                : (firebaseActiveDevice.StartsWith("WEB_BROWSER_", StringComparison.OrdinalIgnoreCase) ? "Web" : "Android");
+
+            var existingDeviceLabel = !string.IsNullOrWhiteSpace(firebaseActiveDeviceName)
+                ? firebaseActiveDeviceName
+                : (existingPlatformName.Equals("Android", StringComparison.OrdinalIgnoreCase) ? $"Android Device ({firebaseActiveDevice})" : $"Web Browser ({firebaseActiveDevice})");
+
+            var existingLocationDesc = (existingLat != 0 || existingLng != 0)
+                ? $"Lat {existingLat:F5}, Lng {existingLng:F5} ({existingDistanceMeters:F0}m from office {(existingWithinRadius ? "[Inside Geofence]" : "[Outside Geofence]")})"
+                : "No active GPS fix";
+
+            var indiaZone = TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata");
+            var existingTimeDesc = existingLocationTime.HasValue
+                ? TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(existingLocationTime.Value, DateTimeKind.Utc), indiaZone).ToString("dd-MMM HH:mm:ss")
+                : (firebaseActiveLastSeen > 0 ? DateTimeOffset.FromUnixTimeMilliseconds(firebaseActiveLastSeen).ToOffset(TimeSpan.FromHours(5.5)).ToString("dd-MMM HH:mm:ss") : "Recent");
+
+            var httpContext = HttpContext;
+            var ipAddress = httpContext.Connection.RemoteIpAddress?.ToString() ?? "Unavailable";
+            var forwardedIp = httpContext.Request.Headers["X-Forwarded-For"].FirstOrDefault();
+            if (!string.IsNullOrWhiteSpace(forwardedIp))
+                ipAddress = forwardedIp.Split(',')[0].Trim();
+
+            var userAgent = httpContext.Request.Headers.UserAgent.ToString();
+            if (string.IsNullOrWhiteSpace(userAgent))
+                userAgent = "Unavailable";
+
+            if (isEmployee &&
+                (activeDeviceBeforeLogin != null || firebaseOtherDeviceActive) &&
+                !currentDeviceOwnsSession &&
+                !ForceLogoutExisting)
+            {
+                ShowForceLogout = true;
+                var warningMessage = $"This employee account is already active on {existingPlatformName} ({existingDeviceLabel}). " +
+                    $"Last active: {existingTimeDesc}, Location: {existingLocationDesc}. " +
+                    $"Check 'Log out previous device and continue' to switch to this device.";
+
+                ModelState.AddModelError(string.Empty, warningMessage);
+
+                await _attendanceMonitor.RecordAsync(
+                    "SECOND_DEVICE_ATTEMPT",
+                    user.Id,
+                    user.Email ?? email,
+                    deviceId,
+                    "Web",
+                    "BLOCKED_REQUIRE_CONFIRMATION",
+                    "EXISTING_DEVICE_ACTIVE",
+                    new
+                    {
+                        EmployeeId = firebaseEmployee?.EmployeeID,
+                        Summary = $"Login attempt blocked: Account is already active on {existingPlatformName} ({existingDeviceLabel}) at {existingLocationDesc}. Explicit confirmation required to displace.",
+                        DisplacedDevice = new
+                        {
+                            DeviceId = firebaseActiveDevice,
+                            Platform = existingPlatformName,
+                            DeviceName = existingDeviceLabel,
+                            LastSeen = existingTimeDesc,
+                            LastLatitude = existingLat,
+                            LastLongitude = existingLng,
+                            LastDistanceMeters = existingDistanceMeters,
+                            WithinAllowedRadius = existingWithinRadius
+                        },
+                        NewDevice = new
+                        {
+                            DeviceId = deviceId,
+                            Platform = "Web",
+                            IpAddress = ipAddress,
+                            UserAgent = userAgent,
+                            AttemptedAtUtc = DateTime.UtcNow
+                        }
+                    },
+                    firebaseActiveDevice);
+
+                return Page();
+            }
+
+            if (!currentDeviceOwnsSession)
+            {
+                _logger.LogWarning("FORCED SESSION REPLACEMENT. UserId={UserId}, NewDevice={DeviceId}", user.Id, deviceId);
+
+                if (!await ReplaceAndInvalidateEmployeeSessionAsync(user, deviceId))
+                {
+                    ModelState.AddModelError(string.Empty, "Unable to establish employee session.");
                     return Page();
                 }
 
+                // Authoritatively write Web's session lock into employee_sessions/{firebaseUid}
+                // so Android's observeSessionActive() immediately sees that activeDevice has changed
+                // to WEB_BROWSER_... and stops tracking / logs out.
+                if (isEmployee && !string.IsNullOrWhiteSpace(firebaseUid))
+                {
+                    try
+                    {
+                        var sessionRow = new Dictionary<string, object?>
+                        {
+                            ["deviceId"] = "WEB_BROWSER_" + deviceId[..Math.Min(8, deviceId.Length)],
+                            ["employeeId"] = firebaseEmployee?.EmployeeID,
+                            ["ownerUid"] = firebaseEmployee?.TenantId,
+                            ["uid"] = firebaseUid,
+                            ["platform"] = "WEB",
+                            ["deviceName"] = "Web Browser",
+                            ["lastSeenAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                            ["createdAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                        };
+                        await _firebaseRealtime.SetGlobalRecordAsync(
+                            $"employee_sessions/{firebaseUid}",
+                            sessionRow,
+                            HttpContext.RequestAborted);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to update Firebase employee session for forced replacement. EmployeeId={EmployeeId}", firebaseEmployee?.EmployeeID);
+                    }
+                }
 
-                await _attendanceMonitor.RecordAsync(
-                    "FORCED_SESSION_LOGOUT", user.Id, user.Email ?? email, activeDeviceBeforeLogin, "Web",
-                    "TERMINATED", "REPLACED_BY_NEW_DEVICE",
-                    new { NewDeviceId = deviceId }, activeDeviceBeforeLogin);
-
-                _logger.LogWarning(
-                    "EXISTING EMPLOYEE SESSION INVALIDATED. UserId={UserId}",
-                    user.Id);
+                if (isEmployee && (firebaseOtherDeviceActive || activeDeviceBeforeLogin != null))
+                {
+                    await _attendanceMonitor.RecordAsync(
+                        "FORCED_SESSION_LOGOUT",
+                        user.Id,
+                        user.Email ?? email,
+                        firebaseActiveDevice,
+                        "Web",
+                        "TERMINATED",
+                        "REPLACED_BY_NEW_DEVICE",
+                        new
+                        {
+                            EmployeeId = firebaseEmployee?.EmployeeID,
+                            Summary = $"Single-Device Rule Enforced: Displaced {existingPlatformName} session ({existingDeviceLabel} at {existingLocationDesc}). New session established on Web Browser (IP: {ipAddress}).",
+                            DisplacedDevice = new
+                            {
+                                DeviceId = firebaseActiveDevice,
+                                Platform = existingPlatformName,
+                                DeviceName = existingDeviceLabel,
+                                LastSeen = existingTimeDesc,
+                                LastLatitude = existingLat,
+                                LastLongitude = existingLng,
+                                LastDistanceMeters = existingDistanceMeters,
+                                WithinAllowedRadius = existingWithinRadius
+                            },
+                            NewDevice = new
+                            {
+                                DeviceId = deviceId,
+                                Platform = "Web",
+                                IpAddress = ipAddress,
+                                UserAgent = userAgent,
+                                EstablishedAtUtc = DateTime.UtcNow
+                            }
+                        },
+                        deviceId);
+                }
             }
 
 
@@ -431,19 +804,32 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
 
             try
             {
-                var claims =
-                    new[]
-                    {
-                        new Claim(
-                            DeviceClaimType,
-                            deviceId)
-                    };
+                var customClaims = new List<Claim>
+                {
+                    new Claim(DeviceClaimType, deviceId)
+                };
 
+                if (!string.IsNullOrWhiteSpace(firebaseUid))
+                {
+                    customClaims.Add(new Claim("FirebaseUid", firebaseUid));
+                }
+
+                if (firebaseEmployee != null)
+                {
+                    customClaims.Add(new Claim("employee_id", firebaseEmployee.EmployeeID.ToString()));
+                    customClaims.Add(new Claim("EmployeeID", firebaseEmployee.EmployeeID.ToString()));
+
+                    if (!string.IsNullOrWhiteSpace(firebaseEmployee.TenantId))
+                    {
+                        customClaims.Add(new Claim("OwnerUid", firebaseEmployee.TenantId));
+                        customClaims.Add(new Claim("TenantId", firebaseEmployee.TenantId));
+                    }
+                }
 
                 await _signInManager.SignInWithClaimsAsync(
                     user,
                     Input.RememberMe,
-                    claims);
+                    customClaims);
             }
             catch (Exception ex)
             {
@@ -490,15 +876,16 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
                     Path = "/"
                 });
 
-            var httpContext = HttpContext;
-            var ipAddress = httpContext.Connection.RemoteIpAddress?.ToString() ?? "Unavailable";
-            var forwardedIp = httpContext.Request.Headers["X-Forwarded-For"].FirstOrDefault();
-            if (!string.IsNullOrWhiteSpace(forwardedIp))
-                ipAddress = forwardedIp.Split(',')[0].Trim();
-
-            var userAgent = httpContext.Request.Headers.UserAgent.ToString();
-            if (string.IsNullOrWhiteSpace(userAgent))
-                userAgent = "Unavailable";
+            if (isEmployee && firebaseEmployee != null && !string.IsNullOrWhiteSpace(firebaseUid))
+            {
+                await _firebasePresence.SetWebPresenceAsync(
+                    firebaseEmployee.EmployeeID,
+                    deviceId,
+                    firebaseUid,
+                    email,
+                    firebaseEmployee.TenantId,
+                    HttpContext.RequestAborted);
+            }
 
             try
             {
@@ -523,7 +910,38 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
             await _attendanceMonitor.RecordAsync(
                 "LOGIN_SUCCESS", user.Id, user.Email ?? email, deviceId, "Web", "SUCCESS",
                 ForceLogoutExisting ? "NEW_DEVICE_AFTER_FORCE_REPLACE" : "SESSION_STARTED",
-                new { ForceLogoutExisting }, ForceLogoutExisting ? activeDeviceBeforeLogin : null);
+                new
+                {
+                    ForceLogoutExisting,
+                    Platform = "Web",
+                    DeviceName = "Web Browser",
+                    IpAddress = ipAddress,
+                    UserAgent = userAgent,
+                    Summary = ForceLogoutExisting
+                        ? $"Login successful on Web after force displacing previous {existingPlatformName} ({existingDeviceLabel})."
+                        : "Login successful on Web.",
+                    DisplacedDevice = ForceLogoutExisting ? new
+                    {
+                        DeviceId = firebaseActiveDevice,
+                        Platform = existingPlatformName,
+                        DeviceName = existingDeviceLabel,
+                        LastSeen = existingTimeDesc,
+                        LastLatitude = existingLat,
+                        LastLongitude = existingLng,
+                        LastDistanceMeters = existingDistanceMeters,
+                        WithinAllowedRadius = existingWithinRadius
+                    } : null,
+                    NewDevice = new
+                    {
+                        DeviceId = deviceId,
+                        Platform = "Web",
+                        DeviceName = "Web Browser",
+                        IpAddress = ipAddress,
+                        UserAgent = userAgent,
+                        EstablishedAtUtc = DateTime.UtcNow
+                    }
+                },
+                ForceLogoutExisting ? firebaseActiveDevice : null);
 
             // ========================================================
             // SUCCESS
@@ -545,12 +963,45 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
                     return LocalRedirect(ReturnUrl);
                 }
 
+                if (isSuperAdmin)
+                {
+                    if (!await _appMode.IsOfflineModeAsync())
+                    {
+                        return LocalRedirect("/superadmin/tenants");
+                    }
+                    return LocalRedirect("/");
+                }
+
                 return LocalRedirect("/");
             }
 
             return LocalRedirect("/employee-home");
         }
 
+
+        private async Task<string?> _firebaseEmployeesReconcileLoginAsync(
+            Employee employee,
+            string email,
+            string password,
+            CancellationToken ct)
+        {
+            try
+            {
+                return await _firebaseEmployees.EnsureLoginAuthBindingAsync(
+                    employee,
+                    email,
+                    password,
+                    ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Firebase employee identity reconciliation failed during Web login. EmployeeId={EmployeeId}",
+                    employee.EmployeeID);
+                return null;
+            }
+        }
 
         private string? GetCurrentDeviceId()
         {
@@ -581,11 +1032,10 @@ namespace Payroll.Web.Areas.Identity.Pages.Account
                 return false;
 
             if (lockRecord.DeviceId != deviceId)
-            {
-                lockRecord.DeviceId = deviceId;
-                lockRecord.LastSeenAtUtc = DateTime.UtcNow;
-                await db.SaveChangesAsync();
-            }
+                return false;
+
+            lockRecord.LastSeenAtUtc = DateTime.UtcNow;
+            await db.SaveChangesAsync();
 
             return true;
         }

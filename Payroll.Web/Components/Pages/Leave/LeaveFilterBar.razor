@@ -1,10 +1,10 @@
-﻿@using global::Payroll.Shared.Data
+@using global::Payroll.Shared.Data
 @using Microsoft.AspNetCore.Components.Forms
 
-<div class="row p-3 mb-4 border rounded bg-light">
+<div class="row p-3 mb-4 border rounded bg-light align-items-end g-2">
     <div class="col-md-3">
         <label class="form-label small fw-bold">Filter by Employee</label>
-        <select class="form-select" @bind="SelectedEmployeeId" @bind:event="oninput">
+        <select class="form-select" value="@SelectedEmployeeId" @onchange="OnEmployeeChanged">
             <option value="0">-- All Employees --</option>
             @if (Employees != null)
             {
@@ -23,6 +23,7 @@
             <option value="All">All</option>
             <option value="Pending">Pending</option>
             <option value="Approved">Approved</option>
+            <option value="Rejected">Rejected</option>
         </select>
     </div>
     <div class="col-md-2">
@@ -33,9 +34,12 @@
         <label class="form-label small fw-bold">End Date</label>
         <input type="date" class="form-control" @bind="CurrentEndDate" @bind:event="oninput" />
     </div>
-    <div class="col-md-2 d-flex align-items-end">
-        <button class="btn btn-primary w-100" @onclick="() => OnSearch.InvokeAsync()" disabled="@IsLoading">
+    <div class="col-md-2 d-flex gap-1">
+        <button class="btn btn-primary flex-grow-1" @onclick="() => OnSearch.InvokeAsync()" disabled="@IsLoading" title="Search">
             <i class="bi bi-search"></i> Search
+        </button>
+        <button class="btn btn-outline-secondary" @onclick="ClearDates" disabled="@IsLoading" title="Clear Date Range to view all dates">
+            <i class="bi bi-calendar-x"></i>
         </button>
     </div>
 </div>
@@ -59,9 +63,29 @@
     [Parameter] public bool IsLoading { get; set; }
     [Parameter] public EventCallback OnSearch { get; set; }
 
+    private async Task OnEmployeeChanged(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), out var empId))
+        {
+            SelectedEmployeeId = empId;
+            await SelectedEmployeeIdChanged.InvokeAsync(empId);
+            await OnSearch.InvokeAsync();
+        }
+    }
+
     private async Task OnStatusChanged(ChangeEventArgs e)
     {
         FilterStatus = e.Value?.ToString() ?? "Pending";
         await FilterStatusChanged.InvokeAsync(FilterStatus);
+        await OnSearch.InvokeAsync();
+    }
+
+    private async Task ClearDates()
+    {
+        StartDate = null;
+        EndDate = null;
+        await StartDateChanged.InvokeAsync(null);
+        await EndDateChanged.InvokeAsync(null);
+        await OnSearch.InvokeAsync();
     }
 }

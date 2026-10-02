@@ -1,4 +1,4 @@
-﻿@using global::Payroll.Shared.Data
+@using global::Payroll.Shared.Data
 @using Microsoft.AspNetCore.Components.Forms
 @using System.Diagnostics.CodeAnalysis;
 
@@ -16,26 +16,13 @@
             }
         </select>
     </div>
-    <div class="col-md-3">
+    <div class="col-md-4">
         <label class="form-label small fw-bold">Start Date</label>
         <input type="date" class="form-control" @bind="CurrentStartDate" @bind:event="oninput" />
     </div>
-    <div class="col-md-3">
+    <div class="col-md-4">
         <label class="form-label small fw-bold">End Date</label>
         <input type="date" class="form-control" @bind="CurrentEndDate" @bind:event="oninput" />
-    </div>
-    <div class="col-md-2 d-flex align-items-end">
-        <button class="btn btn-primary w-100" @onclick="OnSearchClicked" disabled="@IsLoading">
-            @if (IsLoading)
-            {
-                <span class="spinner-border spinner-border-sm"></span>
-            }
-            else
-            {
-                <span class="bi bi-search"></span>
-            }
-            Search
-        </button>
     </div>
 </div>
 

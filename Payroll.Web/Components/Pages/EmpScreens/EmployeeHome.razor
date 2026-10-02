@@ -9,6 +9,7 @@
 
 @inject NavigationManager Navigation
 @inject AuthenticationStateProvider Auth
+@inject Payroll.Web.Services.FirebaseEmployeeManagementService FirebaseEmployees
 @inject IDbContextFactory<AppDbContext> DbFactory
 
 <PageTitle>Employee Home</PageTitle>
@@ -96,20 +97,27 @@
 
 <AuthorizeView>
     <Authorized>
-        <div class="d-flex justify-content-between align-items-center mb-4">
-            <div>
-                <h2 class="fw-bold text-dark mb-0">
-                    Hello, @(linkedEmployee?.Name ?? context.User.Identity?.Name)!
-                </h2>
-                <p class="text-muted mb-0">
-                    Welcome to your self-service portal.
-                </p>
+        <div class="page-header-container">
+            <div class="d-flex align-items-center gap-3">
+                <div class="emoji-icon-badge emoji-icon-badge-lg emoji-icon-badge-primary">
+                    👤
+                </div>
+                <div>
+                    <div class="d-flex align-items-center gap-2">
+                        <h2 class="page-header-title">
+                            Hello, @(linkedEmployee?.Name ?? context.User.Identity?.Name)! 👋
+                        </h2>
+                    </div>
+                    <p class="page-header-subtitle">
+                        <span>🏢 Employee Self-Service Portal</span> • <span class="badge bg-primary bg-opacity-10 text-primary rounded-pill px-2 py-1">@(linkedEmployee?.Role ?? "Team Member")</span>
+                    </p>
+                </div>
             </div>
 
-            <div class="d-none d-md-block">
-                <span class="badge bg-white text-dark border px-3 py-2 rounded-pill shadow-sm">
-                    <i class="bi bi-calendar-check me-2 text-primary"></i>
-                    @DateTime.Now.ToString("dd MMMM yyyy")
+            <div class="d-flex align-items-center gap-2">
+                <span class="badge bg-white text-dark border px-3 py-2 rounded-pill shadow-sm d-flex align-items-center gap-2">
+                    <span class="pulse-indicator pulse-indicator-success"></span>
+                    <span>📅 @DateTime.Now.ToString("dd MMMM yyyy")</span>
                 </span>
             </div>
         </div>
@@ -120,7 +128,7 @@
 {
     <div class="text-center p-5">
         <div class="spinner-border text-primary" role="status"></div>
-        <p class="mt-2 text-muted">Loading your profile...</p>
+        <p class="mt-3 text-muted fw-semibold">Loading your workspace... ⏱️</p>
     </div>
 }
 else
@@ -136,31 +144,34 @@ else
             featureSettings?.EmployeeCanViewPayslip == true)
         {
             <div class="col-md-6 col-xl-4">
-                <div class="card card-gradient-blue shadow-sm employee-summary-card">
+                <div class="card card-gradient-blue shadow-sm employee-summary-card rounded-4">
                     <div class="card-body p-4 d-flex flex-column justify-content-between">
                         <div>
-                            <div class="text-uppercase small fw-bold opacity-75">
-                                Current Salary
+                            <div class="d-flex justify-content-between align-items-center">
+                                <span class="text-uppercase small fw-bold opacity-75">
+                                    💰 Current Salary
+                                </span>
+                                <span class="badge bg-white bg-opacity-25 rounded-pill px-2 py-1">Gross Wage</span>
                             </div>
 
                             @if (linkedEmployee != null)
                             {
-                                <h2 class="fw-bold mb-0 mt-2">
+                                <h2 class="fw-bold mb-0 mt-3">
                                     @linkedEmployee.MonthlySalary.ToString(
                                     "C0",
                                                 new System.Globalization.CultureInfo("en-IN"))
-                    </h2>
+                                </h2>
 
-                    <small class="opacity-75">
-                        / Month (Gross)
-                    </small>
-                                        }
+                                <small class="opacity-75">
+                                    per Month • Direct Deposit 🏦
+                                </small>
+                            }
                         </div>
 
                         <div class="mt-4">
                             <a href="my-payslips"
-                               class="btn btn-light text-primary fw-bold rounded-pill px-4 w-100">
-                                View Payslips
+                               class="btn btn-light text-primary fw-bold rounded-pill px-4 w-100 action-pill-btn justify-content-center">
+                                <span>📄</span> View Payslips
                                 <i class="bi bi-arrow-right ms-1"></i>
                             </a>
                         </div>
@@ -180,25 +191,28 @@ else
 
                 @if (linkedEmployee != null)
                 {
-                    <div class="card border-0 shadow-sm employee-summary-card">
+                    <div class="card border-0 shadow-sm employee-summary-card rounded-4">
                         <div class="card-body p-4">
 
-                            <h6 class="fw-bold text-secondary mb-4">
-                                Leave Balance
-                            </h6>
+                            <div class="d-flex justify-content-between align-items-center mb-3">
+                                <h6 class="fw-bold text-secondary mb-0 d-flex align-items-center gap-2">
+                                    <span>🏖️</span> Leave Balance
+                                </h6>
+                                <a href="my-leave-request" class="small text-decoration-none fw-semibold">Apply Off &rarr;</a>
+                            </div>
 
-                            <div class="mb-4">
+                            <div class="mb-3">
                                 <div class="d-flex justify-content-between align-items-end mb-1">
-                                    <span class="fw-bold text-primary">
-                                        Paid Leave
+                                    <span class="fw-bold text-primary small">
+                                        🌴 Paid Leave
                                     </span>
 
                                     <span class="fw-bold">
-                                        @linkedEmployee.PaidLeaveBalance
+                                        @linkedEmployee.PaidLeaveBalance <small class="text-muted fw-normal">days</small>
                                     </span>
                                 </div>
 
-                                <div class="progress" style="height: 8px;">
+                                <div class="progress rounded-pill" style="height: 8px;">
                                     <div class="progress-bar bg-primary"
                                          style="width: @(Math.Min(linkedEmployee.PaidLeaveBalance * 10, 100))%">
                                     </div>
@@ -207,16 +221,16 @@ else
 
                             <div>
                                 <div class="d-flex justify-content-between align-items-end mb-1">
-                                    <span class="fw-bold text-success">
-                                        Sick Leave
+                                    <span class="fw-bold text-success small">
+                                        🤒 Sick Leave
                                     </span>
 
                                     <span class="fw-bold">
-                                        @linkedEmployee.SickLeaveBalance
+                                        @linkedEmployee.SickLeaveBalance <small class="text-muted fw-normal">days</small>
                                     </span>
                                 </div>
 
-                                <div class="progress" style="height: 8px;">
+                                <div class="progress rounded-pill" style="height: 8px;">
                                     <div class="progress-bar bg-success"
                                          style="width: @(Math.Min(linkedEmployee.SickLeaveBalance * 10, 100))%">
                                     </div>
@@ -228,9 +242,9 @@ else
                 }
                 else
                 {
-                    <div class="card border-0 shadow-sm d-flex align-items-center justify-content-center bg-light">
+                    <div class="card border-0 shadow-sm d-flex align-items-center justify-content-center bg-light rounded-4">
                         <span class="text-muted">
-                            Leave info unavailable
+                            🏖️ Leave info unavailable
                         </span>
                     </div>
                 }
@@ -240,12 +254,6 @@ else
 
         @* ============================================================
            3. QUICK ATTENDANCE
-           
-           IMPORTANT:
-           MobilePunchWidget handles ONLY the punch operation.
-           
-           Persistent employee GPS is NOT started here.
-           EmployeeGpsTracker lives in EmployeeLayout.
            ============================================================ *@
 
         @if (featureSettings?.EmployeeCanViewAttendance == true)
@@ -254,19 +262,24 @@ else
 
                 @if (linkedEmployee != null)
                 {
-                    <div class="card h-100 border-0 shadow-sm">
+                    <div class="card h-100 border-0 shadow-sm rounded-4">
                         <div class="card-body p-4">
 
-                            <h6 class="fw-bold text-secondary mb-3">
-                                Quick Attendance
-                            </h6>
+                            <div class="d-flex justify-content-between align-items-center mb-3">
+                                <h6 class="fw-bold text-secondary mb-0 d-flex align-items-center gap-2">
+                                    <span>⏱️</span> Quick Punch
+                                </h6>
+                                <span class="badge bg-success bg-opacity-10 text-success rounded-pill px-2 py-1">
+                                    <span class="pulse-indicator pulse-indicator-success me-1"></span> Live GPS
+                                </span>
+                            </div>
 
                             <MobilePunchWidget EmployeeId="@linkedEmployee.EmployeeID" EmployeeName="@linkedEmployee.Name" />
 
                             <div class="mt-3 text-center">
                                 <a href="my-attendance"
-                                   class="small text-decoration-none fw-bold">
-                                    View Attendance Logs &rarr;
+                                   class="small text-decoration-none fw-bold text-primary">
+                                    <span>📋</span> View My Attendance Logs &rarr;
                                 </a>
                             </div>
 
@@ -284,8 +297,8 @@ else
        ============================================================ *@
 
     <div class="employee-dashboard-applications">
-    <h5 class="fw-bold text-secondary mb-3">
-        Applications
+    <h5 class="fw-bold text-secondary mb-3 d-flex align-items-center gap-2">
+        <span>🚀</span> Self-Service Applications
     </h5>
 
     <div class="row g-3 row-cols-2 row-cols-md-3">
@@ -296,8 +309,8 @@ else
             <div class="col">
                 <div class="app-tile"
                      @onclick='() => Navigation.NavigateTo("my-attendance")'>
-                    <div class="tile-icon bg-success bg-opacity-10 text-success">
-                        <i class="bi bi-calendar-check"></i>
+                    <div class="emoji-icon-badge emoji-icon-badge-success mb-2">
+                        ⏱️
                     </div>
 
                     <h6 class="fw-bold text-dark mb-1">
@@ -318,8 +331,8 @@ else
             <div class="col">
                 <div class="app-tile"
                      @onclick='() => Navigation.NavigateTo("my-leave-request")'>
-                    <div class="tile-icon bg-warning bg-opacity-10 text-warning">
-                        <i class="bi bi-calendar-plus"></i>
+                    <div class="emoji-icon-badge emoji-icon-badge-warning mb-2">
+                        🏖️
                     </div>
 
                     <h6 class="fw-bold text-dark mb-1">
@@ -340,8 +353,8 @@ else
             <div class="col">
                 <div class="app-tile"
                      @onclick='() => Navigation.NavigateTo("my-payslips")'>
-                    <div class="tile-icon bg-primary bg-opacity-10 text-primary">
-                        <i class="bi bi-receipt"></i>
+                    <div class="emoji-icon-badge emoji-icon-badge-primary mb-2">
+                        💵
                     </div>
 
                     <h6 class="fw-bold text-dark mb-1">
@@ -349,7 +362,7 @@ else
                     </h6>
 
                     <small class="text-muted">
-                        Download
+                        Download PDF
                     </small>
                 </div>
             </div>
@@ -362,8 +375,8 @@ else
             <div class="col">
                 <div class="app-tile"
                      @onclick='() => Navigation.NavigateTo("my-shifts")'>
-                    <div class="tile-icon bg-info bg-opacity-10 text-info">
-                        <i class="bi bi-calendar-range"></i>
+                    <div class="emoji-icon-badge emoji-icon-badge-info mb-2">
+                        🔄
                     </div>
 
                     <h6 class="fw-bold text-dark mb-1">
@@ -384,8 +397,8 @@ else
             <div class="col">
                 <div class="app-tile"
                      @onclick='() => Navigation.NavigateTo("my-salary-advances")'>
-                    <div class="tile-icon bg-danger bg-opacity-10 text-danger">
-                        <i class="bi bi-cash"></i>
+                    <div class="emoji-icon-badge emoji-icon-badge-danger mb-2">
+                        💳
                     </div>
 
                     <h6 class="fw-bold text-dark mb-1">
@@ -393,7 +406,7 @@ else
                     </h6>
 
                     <small class="text-muted">
-                        Request/View
+                        Request & Balance
                     </small>
                 </div>
             </div>
@@ -406,8 +419,8 @@ else
             <div class="col">
                 <div class="app-tile"
                      @onclick='() => Navigation.NavigateTo("my-bonuses")'>
-                    <div class="tile-icon bg-success bg-opacity-10 text-success">
-                        <i class="bi bi-gift"></i>
+                    <div class="emoji-icon-badge emoji-icon-badge-purple mb-2">
+                        🎁
                     </div>
 
                     <h6 class="fw-bold text-dark mb-1">
@@ -415,7 +428,7 @@ else
                     </h6>
 
                     <small class="text-muted">
-                        History
+                        Incentive History
                     </small>
                 </div>
             </div>
@@ -428,8 +441,8 @@ else
             <div class="col">
                 <div class="app-tile"
                      @onclick='() => Navigation.NavigateTo("my-tax-declaration")'>
-                    <div class="tile-icon bg-secondary bg-opacity-10 text-secondary">
-                        <i class="bi bi-bank"></i>
+                    <div class="emoji-icon-badge emoji-icon-badge-primary mb-2">
+                        📝
                     </div>
 
                     <h6 class="fw-bold text-dark mb-1">
@@ -437,7 +450,7 @@ else
                     </h6>
 
                     <small class="text-muted">
-                        Declarations
+                        80C Declarations
                     </small>
                 </div>
             </div>
@@ -450,8 +463,8 @@ else
             <div class="col">
                 <div class="app-tile"
                      @onclick='() => Navigation.NavigateTo("my-regularization")'>
-                    <div class="tile-icon bg-dark bg-opacity-10 text-dark">
-                        <i class="bi bi-tools"></i>
+                    <div class="emoji-icon-badge emoji-icon-badge-warning mb-2">
+                        🔧
                     </div>
 
                     <h6 class="fw-bold text-dark mb-1">
@@ -459,7 +472,7 @@ else
                     </h6>
 
                     <small class="text-muted">
-                        Fix Punch
+                        Fix Missed Punch
                     </small>
                 </div>
             </div>
@@ -472,8 +485,8 @@ else
             <div class="col">
                 <div class="app-tile"
                      @onclick='() => Navigation.NavigateTo("my-reports")'>
-                    <div class="tile-icon bg-info bg-opacity-10 text-primary">
-                        <i class="bi bi-file-earmark-bar-graph"></i>
+                    <div class="emoji-icon-badge emoji-icon-badge-info mb-2">
+                        📊
                     </div>
 
                     <h6 class="fw-bold text-dark mb-1">
@@ -481,7 +494,7 @@ else
                     </h6>
 
                     <small class="text-muted">
-                        My Stats
+                        My Stats & Trends
                     </small>
                 </div>
             </div>
@@ -494,8 +507,8 @@ else
             <div class="col">
                 <div class="app-tile"
                      @onclick='() => Navigation.NavigateTo("my-resignation")'>
-                    <div class="tile-icon bg-danger bg-opacity-10 text-danger">
-                        <i class="bi bi-door-open"></i>
+                    <div class="emoji-icon-badge emoji-icon-badge-danger mb-2">
+                        🚪
                     </div>
 
                     <h6 class="fw-bold text-dark mb-1">
@@ -503,7 +516,7 @@ else
                     </h6>
 
                     <small class="text-muted">
-                        Exit Process
+                        Exit Clearance
                     </small>
                 </div>
             </div>
@@ -512,17 +525,17 @@ else
         @* Profile / Settings *@
         <div class="col">
             <div class="app-tile"
-                 @onclick='() => Navigation.NavigateTo("Identity/Account/Manage")'>
-                <div class="tile-icon bg-light text-dark border">
-                    <i class="bi bi-person-gear"></i>
+                 @onclick='() => Navigation.NavigateTo("my-profile")'>
+                <div class="emoji-icon-badge emoji-icon-badge-purple mb-2">
+                    👤
                 </div>
 
                 <h6 class="fw-bold text-dark mb-1">
-                    Settings
+                    My Profile
                 </h6>
 
                 <small class="text-muted">
-                    Account
+                    Employment &amp; Account
                 </small>
             </div>
         </div>
@@ -587,11 +600,7 @@ else
             // Load employee
             // ----------------------------------------------------
 
-            linkedEmployee =
-                await dbContext.Employees
-                    .AsNoTracking()
-                    .FirstOrDefaultAsync(
-                        e => e.Email == email);
+            linkedEmployee = await FirebaseEmployees.GetEmployeeByEmailAsync(email);
         }
         catch (Exception ex)
         {
